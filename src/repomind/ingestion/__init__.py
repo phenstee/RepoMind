@@ -1,0 +1,41 @@
+"""Repository discovery, filtering, and safe source-file loading."""
+
+from repomind.ingestion.language import (
+    LANGUAGE_BY_EXTENSION,
+    SUPPORTED_EXTENSIONS,
+    is_supported_source_file,
+    language_for_path,
+)
+from repomind.ingestion.models import (
+    IngestionConfig,
+    RepositorySnapshot,
+    SkippedFile,
+    SourceFile,
+)
+from repomind.ingestion.repository import (
+    InvalidRepositoryRootError,
+    PathOutsideRepositoryError,
+    RepositoryIngestionError,
+    find_source_files,
+    ingest_repository,
+    load_source_file,
+    validate_repository_root,
+)
+
+__all__ = [
+    "LANGUAGE_BY_EXTENSION",
+    "SUPPORTED_EXTENSIONS",
+    "IngestionConfig",
+    "InvalidRepositoryRootError",
+    "PathOutsideRepositoryError",
+    "RepositoryIngestionError",
+    "RepositorySnapshot",
+    "SkippedFile",
+    "SourceFile",
+    "find_source_files",
+    "ingest_repository",
+    "is_supported_source_file",
+    "language_for_path",
+    "load_source_file",
+    "validate_repository_root",
+]
