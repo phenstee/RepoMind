@@ -14,6 +14,7 @@ from repomind.ingestion.models import (
     RepositorySnapshot,
     SkippedFile,
     SourceFile,
+    validate_repository_relative_path,
 )
 from repomind.ingestion.repository import (
     InvalidRepositoryRootError,
@@ -44,5 +45,6 @@ __all__ = [
     "is_supported_source_file",
     "language_for_path",
     "load_source_file",
+    "validate_repository_relative_path",
     "validate_repository_root",
 ]

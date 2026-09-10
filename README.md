@@ -36,8 +36,13 @@ separate synchronous/asynchronous OpenAI embedding client.
 natural-language query once, compare it with existing `EmbeddedChunk` vectors,
 and return deterministic top-k source chunks ranked by cosine similarity.
 
-Milestone 6 will add basic RAG. Later milestones will add persistence, hybrid
-retrieval, tools, agent behavior, application services, and deployment support.
+**Milestone 6: basic repository RAG** is complete. RepoMind can turn ranked
+chunks into bounded context, request a structured grounded answer, validate its
+source IDs, and map them to repository-owned file and line citations.
+
+Milestone 7 will add PostgreSQL and pgvector persistence. Later milestones will
+add hybrid retrieval, tools, agent behavior, application services, and
+deployment support.
 
 ## Repository ingestion
 
@@ -164,8 +169,52 @@ order for exact ties. No arbitrary score threshold is applied.
 This baseline performs brute-force comparison in memory using NumPy. Its time
 complexity is O(N × D), where N is the number of chunks and D is vector
 dimensionality. It is intended for correctness and learning, not large-scale
-indexing. There is no vector database, keyword or hybrid search, reranking, RAG,
-or LLM answer generation yet.
+indexing. The retrieval layer itself does not generate answers, apply keyword
+or hybrid search, rerank results, or use a vector database.
+
+## Basic repository RAG
+
+Retrieval-Augmented Generation keeps three responsibilities visible:
+
+```text
+Question
+    ↓
+RETRIEVAL: find relevant repository chunks
+    ↓
+AUGMENTATION: build bounded context from those chunks
+    ↓
+GENERATION: produce a structured answer grounded in that context
+    ↓
+validate source IDs and map them to real file/line citations
+```
+
+`answer_repository_question` reuses semantic search rather than duplicating
+ranking logic. The exact valid question is embedded once, up to `top_k` ranked
+chunks are considered, and their cosine scores are not shown to the LLM because
+similarity is not a calibrated confidence measure.
+
+The context builder assigns deterministic IDs `S1`, `S2`, and so on in
+retrieval order. Each block includes the existing relative path, line range,
+language when available, and exact chunk content. Repository excerpts are
+explicitly marked as untrusted data in both the context and system prompt;
+instructions found in source files, comments, or documentation must not be
+followed.
+
+`RAGConfig` defaults to five retrieved chunks and a 20,000-character context
+budget. Complete chunks are added in order without truncation. The highest-
+ranked chunk is included even if it alone exceeds the budget; lower-ranked
+chunks stop at the first block that would exceed it. Overlapping chunks remain
+independent, so repeated source lines are possible in this baseline.
+
+The structured LLM response contains only answer text, selected source IDs, and
+an insufficient-evidence flag. RepoMind rejects unknown IDs, removes duplicate
+IDs while preserving first-use order, and requires at least one citation for an
+answer claiming sufficient evidence. The LLM never supplies paths or line
+numbers. Empty retrieval returns a deterministic insufficient-evidence answer
+without calling the LLM.
+
+All chunks, vectors, retrieval results, and context remain in memory. There is
+no persistence, keyword/hybrid search, reranking, tool use, or agent loop.
 
 ## Repository layout
 
@@ -183,6 +232,11 @@ RepoMind/
 │       ├── llm/
 │       │   ├── client.py
 │       │   └── models.py
+│       ├── rag/
+│       │   ├── __init__.py
+│       │   ├── context.py
+│       │   ├── models.py
+│       │   └── pipeline.py
 │       └── retrieval/
 │           ├── __init__.py
 │           ├── embeddings.py
@@ -192,6 +246,7 @@ RepoMind/
 ├── scripts/
 │   ├── inspect_repository.py
 │   ├── manual_embedding_check.py
+│   ├── manual_rag_check.py
 │   ├── manual_semantic_search.py
 │   └── manual_llm_check.py
 ├── tests/
@@ -201,6 +256,10 @@ RepoMind/
 │       │   ├── test_language.py
 │       │   ├── test_models.py
 │       │   └── test_repository.py
+│       ├── rag/
+│       │   ├── test_context.py
+│       │   ├── test_rag_models.py
+│       │   └── test_pipeline.py
 │       ├── retrieval/
 │       │   ├── test_embedding_models.py
 │       │   ├── test_embeddings.py
@@ -234,11 +293,15 @@ flowchart LR
     Chunk --> EmbedClient[OpenAI Embedding Client]
     EmbedClient --> Vector[EmbeddingVector]
     Vector --> Embedded[EmbeddedChunk]
-    Query[User query] --> QueryEmbed[Query embedding]
-    QueryEmbed --> Similarity[Cosine similarity]
-    Embedded --> Similarity
-    Similarity --> Results[Ranked CodeChunks]
-    Results -. future .-> RAG[Basic RAG / LLM answer]
+    Question[User question] --> QueryEmbed[Query embedding]
+    QueryEmbed --> Search[Semantic search]
+    Embedded --> Search
+    Search --> Results[Ranked CodeChunks]
+    Results --> Context[Deterministic context builder]
+    Context --> Generation[Structured LLM generation]
+    Client --> Generation
+    Generation --> Validation[Source-ID validation]
+    Validation --> Answer[RepositoryAnswer]
 ```
 
 `OpenAILLMClient` wraps the official OpenAI SDK. The rest of the codebase
@@ -311,6 +374,17 @@ It embeds at most 10 source chunks by default, embeds the query once, and prints
 up to five ranked locations. Without an API key it exits before ingestion or
 network activity.
 
+Run the bounded end-to-end repository RAG check with:
+
+```powershell
+uv run python scripts/manual_rag_check.py `
+    "Where is retry logic implemented?" --max-chunks 10
+```
+
+It embeds at most 10 source chunks, embeds the question once, makes one
+structured generation request, and prints only validated citations. Without an
+API key it exits before ingestion or network activity.
+
 ## Optional ingestion check
 
 Inspect a repository without using the LLM:
@@ -347,6 +421,14 @@ uv run python scripts/inspect_repository.py . --chunks
   after the in-memory retrieval pipeline is understood and verified.
 - **Raw semantic ranking stays visible.** There is no score threshold, keyword
   boost, reranker, or framework retrieval abstraction in this baseline.
+- **Citations use deterministic source IDs.** The LLM selects `S1`, `S2`, and
+  similar identifiers; RepoMind owns and validates the corresponding paths and
+  line ranges.
+- **Context uses a character budget.** This simple deterministic limit is easy
+  to inspect before token-aware budgeting is justified. Chunks stay complete,
+  and overlapping intervals are not merged yet.
+- **Basic RAG is not an agent.** It performs one retrieval, one context build,
+  and one generation request without tools, planning, iteration, or editing.
 
 ## Roadmap
 
@@ -357,8 +439,8 @@ The full project roadmap is described in the RepoMind engineering brief:
 3. Code chunking (complete)
 4. Embeddings (complete)
 5. Semantic search (complete)
-6. Basic RAG (next)
-7. PostgreSQL + pgvector persistence
+6. Basic RAG (complete)
+7. PostgreSQL + pgvector persistence (next)
 8. Hybrid retrieval
 9. Reranking
 10. Tool system

@@ -31,7 +31,7 @@ DEFAULT_IGNORED_DIRECTORIES: frozenset[str] = frozenset(
 DEFAULT_MAX_FILE_SIZE_BYTES = 1_048_576
 
 
-def _repository_relative_path(value: Path) -> Path:
+def validate_repository_relative_path(value: Path) -> Path:
     """Validate a repository-relative metadata path without touching the filesystem."""
 
     raw_path = str(value)
@@ -90,7 +90,7 @@ class SourceFile(BaseModel):
     @field_validator("relative_path")
     @classmethod
     def _validate_relative_path(cls, value: Path) -> Path:
-        return _repository_relative_path(value)
+        return validate_repository_relative_path(value)
 
 
 class SkippedFile(BaseModel):
@@ -102,7 +102,7 @@ class SkippedFile(BaseModel):
     @field_validator("relative_path")
     @classmethod
     def _validate_relative_path(cls, value: Path) -> Path:
-        return _repository_relative_path(value)
+        return validate_repository_relative_path(value)
 
 
 class RepositorySnapshot(BaseModel):
@@ -159,7 +159,7 @@ class CodeChunk(BaseModel):
     @field_validator("relative_path")
     @classmethod
     def _validate_relative_path(cls, value: Path) -> Path:
-        return _repository_relative_path(value)
+        return validate_repository_relative_path(value)
 
     @model_validator(mode="after")
     def _validate_line_range(self) -> "CodeChunk":
