@@ -1,5 +1,6 @@
 """Repository discovery, filtering, and safe source-file loading."""
 
+from repomind.ingestion.chunker import chunk_repository, chunk_source_file
 from repomind.ingestion.language import (
     LANGUAGE_BY_EXTENSION,
     SUPPORTED_EXTENSIONS,
@@ -7,6 +8,8 @@ from repomind.ingestion.language import (
     language_for_path,
 )
 from repomind.ingestion.models import (
+    ChunkingConfig,
+    CodeChunk,
     IngestionConfig,
     RepositorySnapshot,
     SkippedFile,
@@ -25,6 +28,8 @@ from repomind.ingestion.repository import (
 __all__ = [
     "LANGUAGE_BY_EXTENSION",
     "SUPPORTED_EXTENSIONS",
+    "ChunkingConfig",
+    "CodeChunk",
     "IngestionConfig",
     "InvalidRepositoryRootError",
     "PathOutsideRepositoryError",
@@ -32,6 +37,8 @@ __all__ = [
     "RepositorySnapshot",
     "SkippedFile",
     "SourceFile",
+    "chunk_repository",
+    "chunk_source_file",
     "find_source_files",
     "ingest_repository",
     "is_supported_source_file",

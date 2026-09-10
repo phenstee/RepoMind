@@ -20,10 +20,14 @@ verifiable milestones rather than as one monolithic prototype.
 discover, filter, decode, and represent supported source files without calling
 the LLM layer.
 
-Later milestones will add code chunking, embeddings, semantic/hybrid retrieval,
-RAG, tools, the handwritten agent loop, code editing, tests/self-correction,
-permissions, memory, multi-agent orchestration, observability, evaluations,
-FastAPI, a Next.js frontend, Redis, Docker, and CI.
+**Milestone 3: deterministic code chunking** is complete. RepoMind can now
+transform `SourceFile` objects into ordered, citation-ready `CodeChunk` objects
+using a deterministic line-based baseline.
+
+Later milestones will add embeddings, semantic/hybrid retrieval, RAG, tools,
+the handwritten agent loop, code editing, tests/self-correction, permissions,
+memory, multi-agent orchestration, observability, evaluations, FastAPI, a
+Next.js frontend, Redis, Docker, and CI.
 
 ## Repository ingestion
 
@@ -53,6 +57,27 @@ Safety behaviors:
 - undecodable files are skipped and reported
 - line counts use Python `splitlines()` semantics
 
+## Code chunking
+
+`chunk_source_file` splits a `SourceFile` into smaller `CodeChunk` objects.
+`chunk_repository` applies that process across all files in a
+`RepositorySnapshot` and returns one flat, deterministically ordered list.
+
+The current baseline is simple line-based chunking:
+
+- `max_lines_per_chunk` defaults to 120
+- `overlap_lines` defaults to 20
+- chunk line numbers are 1-based and inclusive
+- chunk indexes restart at zero for each file
+- empty files produce no chunks
+
+Overlap exists because code near a chunk boundary often depends on surrounding
+context. Repeating nearby lines helps prevent that context from being split
+completely across two retrieval units.
+
+Chunking is intentionally deterministic and synchronous. It does not perform
+embeddings, retrieval, or syntax-aware parsing.
+
 ## Repository layout
 
 ```text
@@ -62,6 +87,7 @@ RepoMind/
 │       ├── config.py
 │       ├── ingestion/
 │       │   ├── __init__.py
+│       │   ├── chunker.py
 │       │   ├── language.py
 │       │   ├── models.py
 │       │   └── repository.py
@@ -76,7 +102,8 @@ RepoMind/
 │   └── unit/
 │       ├── ingestion/
 │       │   ├── test_language.py
-│       │   └── test_repository.py
+│       │   ├── test_repository.py
+│       │   └── test_chunker.py
 │       ├── test_config.py
 │       └── test_llm_client.py
 ├── .env.example
@@ -101,6 +128,8 @@ flowchart LR
     Filter --> Load[Safe text loading]
     Load --> Source[SourceFile objects]
     Source --> Snapshot[RepositorySnapshot]
+    Source --> Chunk[CodeChunk objects]
+    Chunk --> Future[Future embeddings/retrieval]
 ```
 
 `OpenAILLMClient` wraps the official OpenAI SDK. The rest of the codebase
@@ -160,6 +189,12 @@ Inspect a repository without using the LLM:
 uv run python scripts/inspect_repository.py .
 ```
 
+Include deterministic chunking statistics:
+
+```powershell
+uv run python scripts/inspect_repository.py . --chunks
+```
+
 ## Design decisions
 
 - **No agent framework yet.** Milestone 1 uses only the official OpenAI SDK. The
@@ -170,14 +205,17 @@ uv run python scripts/inspect_repository.py .
   `repomind.config.Settings`, and `.env` is gitignored.
 - **Tests are offline by default.** SDK objects are injected in tests, so CI and
   local development do not require paid API calls.
+- **Chunking starts with a deterministic baseline.** Line-based chunking is
+  deliberately simple so later syntax-aware strategies can be compared against
+  a stable reference.
 
 ## Roadmap
 
 The full project roadmap is described in the RepoMind engineering brief:
 
 1. LLM foundation (complete)
-2. Repository ingestion (current)
-3. Code chunking
+2. Repository ingestion (complete)
+3. Code chunking (current)
 4. Embeddings
 5. Semantic search
 6. Basic RAG

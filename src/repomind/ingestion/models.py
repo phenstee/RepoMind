@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 DEFAULT_IGNORED_DIRECTORIES: frozenset[str] = frozenset(
     {
@@ -92,3 +92,49 @@ class RepositorySnapshot(BaseModel):
     file_count: int
     total_size_bytes: int
     languages: dict[str, int]
+
+
+class ChunkingConfig(BaseModel):
+    """Configuration for deterministic line-based source chunking.
+
+    ``max_lines_per_chunk`` is the maximum number of logical source lines in a
+    chunk. ``overlap_lines`` is the number of lines repeated between adjacent
+    chunks, which helps preserve context across chunk boundaries.
+    """
+
+    max_lines_per_chunk: int = Field(default=120, gt=0)
+    overlap_lines: int = Field(default=20, ge=0)
+
+    @model_validator(mode="after")
+    def _validate_overlap(self) -> "ChunkingConfig":
+        if self.overlap_lines >= self.max_lines_per_chunk:
+            raise ValueError("overlap_lines must be less than max_lines_per_chunk")
+        return self
+
+
+class CodeChunk(BaseModel):
+    """A deterministic slice of a source file.
+
+    ``start_line`` and ``end_line`` are 1-based and inclusive. ``chunk_index``
+    restarts at zero for each source file.
+    """
+
+    relative_path: Path
+    language: str | None
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+    content: str
+    chunk_index: int = Field(ge=0)
+
+    @field_validator("relative_path")
+    @classmethod
+    def _validate_relative_path(cls, value: Path) -> Path:
+        if value.is_absolute():
+            raise ValueError("relative_path must be relative to the repository root")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_line_range(self) -> "CodeChunk":
+        if self.end_line < self.start_line:
+            raise ValueError("end_line must be greater than or equal to start_line")
+        return self
