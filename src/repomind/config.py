@@ -6,6 +6,7 @@ application does not need to read process environment variables directly.
 
 from functools import lru_cache
 
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,14 +20,14 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    openai_api_key: str | None = None
+    openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-4.1-mini"
     openai_embedding_model: str = "text-embedding-3-small"
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/repomind"
     redis_url: str = "redis://localhost:6379/0"
 
-    llm_timeout_seconds: float = 60.0
-    llm_max_retries: int = 3
+    llm_timeout_seconds: float = Field(default=60.0, gt=0)
+    llm_max_retries: int = Field(default=3, ge=0)
 
 
 @lru_cache

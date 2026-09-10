@@ -1,6 +1,6 @@
 """Pydantic models used by repository ingestion."""
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -31,6 +31,27 @@ DEFAULT_IGNORED_DIRECTORIES: frozenset[str] = frozenset(
 DEFAULT_MAX_FILE_SIZE_BYTES = 1_048_576
 
 
+def _repository_relative_path(value: Path) -> Path:
+    """Validate a repository-relative metadata path without touching the filesystem."""
+
+    raw_path = str(value)
+    posix_path = PurePosixPath(raw_path)
+    windows_path = PureWindowsPath(raw_path)
+    if (
+        not raw_path
+        or value == Path(".")
+        or value.is_absolute()
+        or posix_path.is_absolute()
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or bool(windows_path.root)
+        or ".." in posix_path.parts
+        or ".." in windows_path.parts
+    ):
+        raise ValueError("path must be a safe repository-relative identifier")
+    return value
+
+
 class IngestionConfig(BaseModel):
     """Configuration for repository traversal and source-file loading."""
 
@@ -39,7 +60,6 @@ class IngestionConfig(BaseModel):
     )
     ignored_file_patterns: tuple[str, ...] = Field(default_factory=tuple)
     max_file_size_bytes: int = Field(default=DEFAULT_MAX_FILE_SIZE_BYTES, gt=0)
-    binary_sample_bytes: int = Field(default=8192, gt=0)
     fallback_encoding: str = Field(default="cp1252", min_length=1)
 
     @field_validator("ignored_directories")
@@ -64,15 +84,13 @@ class SourceFile(BaseModel):
     relative_path: Path
     language: str | None
     content: str
-    size_bytes: int
-    line_count: int
+    size_bytes: int = Field(ge=0)
+    line_count: int = Field(ge=0)
 
     @field_validator("relative_path")
     @classmethod
     def _validate_relative_path(cls, value: Path) -> Path:
-        if value.is_absolute():
-            raise ValueError("relative_path must be relative to the repository root")
-        return value
+        return _repository_relative_path(value)
 
 
 class SkippedFile(BaseModel):
@@ -80,6 +98,11 @@ class SkippedFile(BaseModel):
 
     relative_path: Path
     reason: str
+
+    @field_validator("relative_path")
+    @classmethod
+    def _validate_relative_path(cls, value: Path) -> Path:
+        return _repository_relative_path(value)
 
 
 class RepositorySnapshot(BaseModel):
@@ -89,9 +112,16 @@ class RepositorySnapshot(BaseModel):
     name: str
     files: list[SourceFile]
     skipped: list[SkippedFile]
-    file_count: int
-    total_size_bytes: int
+    file_count: int = Field(ge=0)
+    total_size_bytes: int = Field(ge=0)
     languages: dict[str, int]
+
+    @field_validator("languages")
+    @classmethod
+    def _validate_language_counts(cls, value: dict[str, int]) -> dict[str, int]:
+        if any(count < 0 for count in value.values()):
+            raise ValueError("language counts must be nonnegative")
+        return value
 
 
 class ChunkingConfig(BaseModel):
@@ -129,9 +159,7 @@ class CodeChunk(BaseModel):
     @field_validator("relative_path")
     @classmethod
     def _validate_relative_path(cls, value: Path) -> Path:
-        if value.is_absolute():
-            raise ValueError("relative_path must be relative to the repository root")
-        return value
+        return _repository_relative_path(value)
 
     @model_validator(mode="after")
     def _validate_line_range(self) -> "CodeChunk":

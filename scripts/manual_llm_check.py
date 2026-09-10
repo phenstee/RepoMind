@@ -12,7 +12,7 @@ Run it with::
 from pydantic import BaseModel
 
 from repomind.config import get_settings
-from repomind.llm.client import LLMError, OpenAILLMClient
+from repomind.llm import LLMError, OpenAILLMClient
 
 
 class BuildStep(BaseModel):

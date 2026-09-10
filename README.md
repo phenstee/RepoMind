@@ -24,10 +24,18 @@ the LLM layer.
 transform `SourceFile` objects into ordered, citation-ready `CodeChunk` objects
 using a deterministic line-based baseline.
 
-Later milestones will add embeddings, semantic/hybrid retrieval, RAG, tools,
-the handwritten agent loop, code editing, tests/self-correction, permissions,
-memory, multi-agent orchestration, observability, evaluations, FastAPI, a
-Next.js frontend, Redis, Docker, and CI.
+**Milestone 3.5: hardening** is complete. Async retries are event-loop safe,
+configuration secrets and bounds are validated, and repository reads and path
+metadata have additional safety checks.
+
+**Milestone 4: embeddings** is complete. RepoMind can transform arbitrary text,
+text batches, and `CodeChunk` objects into validated numerical vectors using a
+separate synchronous/asynchronous OpenAI embedding client.
+
+Later milestones will add semantic/hybrid retrieval, RAG, tools, the handwritten
+agent loop, code editing, tests/self-correction, permissions, memory, multi-agent
+orchestration, observability, evaluations, FastAPI, a Next.js frontend, Redis,
+Docker, and CI.
 
 ## Repository ingestion
 
@@ -50,12 +58,17 @@ configuration is meaningful project context.
 
 Safety behaviors:
 
-- symlinked directories and files are skipped
-- files over 1 MiB are skipped and reported
-- files with null bytes in an initial sample are treated as binary and skipped
+- symlinked files/directories and Windows junction directories are skipped
+- discovered paths are resolved and containment-checked against the repository root
+- reads are bounded; files over 1 MiB are skipped and reported
+- files with null bytes anywhere in the bounded payload are treated as binary and skipped
 - UTF-8 and UTF-8 BOM are supported; legacy `cp1252` text is used as a fallback
 - undecodable files are skipped and reported
 - line counts use Python `splitlines()` semantics
+
+Ingestion assumes the repository is not maliciously mutated concurrently while
+it is being read. Static traversal is protected, but fully race-free path
+handling would require substantially more platform-specific file-handle logic.
 
 ## Code chunking
 
@@ -78,6 +91,43 @@ completely across two retrieval units.
 Chunking is intentionally deterministic and synchronous. It does not perform
 embeddings, retrieval, or syntax-aware parsing.
 
+## Embeddings
+
+Embeddings convert text into high-dimensional numerical vectors whose geometry
+captures aspects of semantic similarity. Milestone 4 implements vector
+generation only:
+
+```text
+CodeChunk
+    ↓ exact content
+OpenAI embedding model
+    ↓
+EmbeddingVector
+    ↓ paired with the original chunk
+EmbeddedChunk
+```
+
+`OpenAIEmbeddingClient` supports single text, text batches, and `CodeChunk`
+batches through synchronous and asynchronous methods. It uses the model selected
+by `OPENAI_EMBEDDING_MODEL` and reuses the existing OpenAI timeout and retry
+settings rather than duplicating them.
+
+Requests are split deterministically into batches of 64 items by default. API
+response indices are validated and used to restore input order, vectors must be
+non-empty and finite, and dimensionality must remain consistent across the
+operation. Usage returned by the provider is aggregated so future indexing cost
+can be measured. Batching is currently based on item count; token-aware batching
+is a future improvement.
+
+Chunk content is sent exactly as stored, including indentation and newline
+characters. Empty strings are rejected; whitespace-only strings are deliberately
+allowed without stripping.
+
+Vectors are immutable Python tuples held only in memory. RepoMind does **not**
+yet compare vectors, perform semantic search or retrieval, or store embeddings
+in a vector database. Automated embedding tests inject fake SDK clients and
+never make live API calls.
+
 ## Repository layout
 
 ```text
@@ -91,19 +141,27 @@ RepoMind/
 │       │   ├── language.py
 │       │   ├── models.py
 │       │   └── repository.py
-│       └── llm/
-│           ├── client.py
-│           ├── models.py
-│           └── structured.py
+│       ├── llm/
+│       │   ├── client.py
+│       │   └── models.py
+│       └── retrieval/
+│           ├── __init__.py
+│           ├── embeddings.py
+│           └── models.py
 ├── scripts/
 │   ├── inspect_repository.py
+│   ├── manual_embedding_check.py
 │   └── manual_llm_check.py
 ├── tests/
 │   └── unit/
 │       ├── ingestion/
+│       │   ├── test_chunker.py
 │       │   ├── test_language.py
-│       │   ├── test_repository.py
-│       │   └── test_chunker.py
+│       │   ├── test_models.py
+│       │   └── test_repository.py
+│       ├── retrieval/
+│       │   ├── test_embedding_models.py
+│       │   └── test_embeddings.py
 │       ├── test_config.py
 │       └── test_llm_client.py
 ├── .env.example
@@ -126,15 +184,19 @@ flowchart LR
     Root[Repository root] --> Discovery[File discovery]
     Discovery --> Filter[Validation and filtering]
     Filter --> Load[Safe text loading]
-    Load --> Source[SourceFile objects]
-    Source --> Snapshot[RepositorySnapshot]
+    Load --> Snapshot[RepositorySnapshot]
+    Snapshot --> Source[SourceFile objects]
     Source --> Chunk[CodeChunk objects]
-    Chunk --> Future[Future embeddings/retrieval]
+    Chunk --> EmbedClient[OpenAI Embedding Client]
+    EmbedClient --> Vector[EmbeddingVector]
+    Vector --> Embedded[EmbeddedChunk]
+    Embedded --> Future[Future semantic search]
 ```
 
 `OpenAILLMClient` wraps the official OpenAI SDK. The rest of the codebase
 depends on RepoMind's own `LLMResponse`, `TokenUsage`, and Pydantic response
-models, not on raw SDK objects.
+models, not on raw SDK objects. `OpenAIEmbeddingClient` is separate because
+language generation and numerical representation are distinct responsibilities.
 
 ## Setup
 
@@ -171,7 +233,7 @@ Run linting:
 uv run ruff check .
 ```
 
-## Optional live check
+## Optional live checks
 
 With a valid `OPENAI_API_KEY` configured:
 
@@ -180,6 +242,15 @@ uv run python scripts/manual_llm_check.py
 ```
 
 This script makes real API calls and is not part of the automated test suite.
+
+Run the separate, single-text embedding smoke check with:
+
+```powershell
+uv run python scripts/manual_embedding_check.py
+```
+
+It prints the model, dimensions, usage, and only the first five vector values.
+Without an API key it exits without making a request.
 
 ## Optional ingestion check
 
@@ -208,6 +279,13 @@ uv run python scripts/inspect_repository.py . --chunks
 - **Chunking starts with a deterministic baseline.** Line-based chunking is
   deliberately simple so later syntax-aware strategies can be compared against
   a stable reference.
+- **Embedding generation stays separate.** It uses the official OpenAI SDK
+  directly, normalizes provider responses, and keeps vectors associated with
+  their source chunks.
+- **No NumPy yet.** Tuples are sufficient to generate and hold vectors. NumPy
+  belongs in Milestone 5, when vector comparison is introduced.
+- **Embeddings stay in memory.** Persistence and vector databases follow only
+  after the in-memory retrieval pipeline is understood and verified.
 
 ## Roadmap
 
@@ -215,9 +293,9 @@ The full project roadmap is described in the RepoMind engineering brief:
 
 1. LLM foundation (complete)
 2. Repository ingestion (complete)
-3. Code chunking (current)
-4. Embeddings
-5. Semantic search
+3. Code chunking (complete)
+4. Embeddings (complete)
+5. Semantic search (next)
 6. Basic RAG
 7. PostgreSQL + pgvector persistence
 8. Hybrid retrieval

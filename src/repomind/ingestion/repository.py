@@ -50,6 +50,10 @@ class SourceDecodeError(RepositoryIngestionError):
     reason = "decode_error"
 
 
+class SourceReadError(RepositoryIngestionError):
+    reason = "read_error"
+
+
 def validate_repository_root(root: str | Path) -> Path:
     """Resolve and validate a repository root."""
 
@@ -80,6 +84,39 @@ def _is_path_within(root: Path, path: Path) -> bool:
     return True
 
 
+def _is_link_or_junction(path: Path) -> bool:
+    """Return whether a path is a symlink or Windows junction/reparse directory."""
+
+    try:
+        return path.is_symlink() or path.is_junction()
+    except OSError:
+        return True
+
+
+def _resolves_within(root: Path, path: Path) -> bool:
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        return False
+    return _is_path_within(root, resolved)
+
+
+def _has_link_or_junction_component(root: Path, path: Path) -> bool:
+    """Check path components below root without resolving metadata identifiers."""
+
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        return False
+
+    current = root
+    for part in relative.parts:
+        current /= part
+        if _is_link_or_junction(current):
+            return True
+    return False
+
+
 def _is_ignored_directory_name(name: str, config: IngestionConfig) -> bool:
     return name.casefold() in config.ignored_directories
 
@@ -106,7 +143,8 @@ def _iter_repository_files(root: Path, config: IngestionConfig):
             name
             for name in dirnames
             if not _is_ignored_directory_name(name, config)
-            and not (current_path / name).is_symlink()
+            and not _is_link_or_junction(current_path / name)
+            and _resolves_within(root, current_path / name)
         )
         for filename in sorted(filenames):
             yield current_path / filename
@@ -124,7 +162,8 @@ def find_source_files(
     paths = [
         path
         for path in _iter_repository_files(resolved_root, resolved_config)
-        if not path.is_symlink()
+        if not _is_link_or_junction(path)
+        and _resolves_within(resolved_root, path)
         and path.is_file()
         and is_supported_source_file(path)
         and not _is_ignored_file(path, resolved_config)
@@ -151,6 +190,20 @@ def _count_lines(content: str) -> int:
     return len(content.splitlines())
 
 
+def _read_source_bytes(path: Path, max_file_size_bytes: int) -> bytes:
+    try:
+        with path.open("rb") as source:
+            data = source.read(max_file_size_bytes + 1)
+    except OSError as exc:
+        raise SourceReadError(f"Could not read source file: {path}") from exc
+
+    if len(data) > max_file_size_bytes:
+        raise FileTooLargeError(
+            f"Source file exceeds {max_file_size_bytes} bytes: {path}"
+        )
+    return data
+
+
 def load_source_file(
     root: str | Path,
     path: str | Path,
@@ -165,18 +218,16 @@ def load_source_file(
     if not candidate.is_absolute():
         candidate = resolved_root / candidate
 
-    if candidate.is_symlink():
-        raise SymlinkSourceFileError(f"Symlinks are not ingested: {candidate}")
+    if _has_link_or_junction_component(resolved_root, candidate):
+        raise SymlinkSourceFileError(
+            f"Symlinks and junctions are not ingested: {candidate}"
+        )
 
     resolved_path = candidate.resolve(strict=False)
     if not _is_path_within(resolved_root, resolved_path):
         raise PathOutsideRepositoryError(
             f"Source file is outside the repository root: {resolved_path}"
         )
-    if not resolved_path.exists():
-        raise RepositoryIngestionError(f"Source file does not exist: {resolved_path}")
-    if not resolved_path.is_file():
-        raise RepositoryIngestionError(f"Source path is not a file: {resolved_path}")
     if not is_supported_source_file(resolved_path):
         raise UnsupportedSourceFileError(
             f"Unsupported source-file extension: {resolved_path.suffix}"
@@ -186,15 +237,8 @@ def load_source_file(
             f"Source file matches an ignored file pattern: {resolved_path}"
         )
 
-    size_bytes = resolved_path.stat().st_size
-    if size_bytes > resolved_config.max_file_size_bytes:
-        raise FileTooLargeError(
-            f"Source file exceeds {resolved_config.max_file_size_bytes} bytes: "
-            f"{resolved_path}"
-        )
-
-    data = resolved_path.read_bytes()
-    if b"\x00" in data[: resolved_config.binary_sample_bytes]:
+    data = _read_source_bytes(resolved_path, resolved_config.max_file_size_bytes)
+    if b"\x00" in data:
         raise BinarySourceFileError(f"Source file appears to be binary: {resolved_path}")
 
     content = _decode_source(data, resolved_config.fallback_encoding)
@@ -202,7 +246,7 @@ def load_source_file(
         relative_path=_relative_path(resolved_root, resolved_path),
         language=language_for_path(resolved_path),
         content=content,
-        size_bytes=size_bytes,
+        size_bytes=len(data),
         line_count=_count_lines(content),
     )
 
@@ -221,7 +265,7 @@ def ingest_repository(
     for path in _iter_repository_files(resolved_root, resolved_config):
         relative = _relative_path(resolved_root, path)
 
-        if path.is_symlink():
+        if _is_link_or_junction(path):
             skipped.append(SkippedFile(relative_path=relative, reason="symlink"))
             continue
         if not path.is_file():

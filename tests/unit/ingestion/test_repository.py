@@ -1,6 +1,7 @@
 """Tests for repository discovery and source-file loading."""
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -11,6 +12,8 @@ from repomind.ingestion.repository import (
     InvalidRepositoryRootError,
     PathOutsideRepositoryError,
     SourceDecodeError,
+    SourceReadError,
+    SymlinkSourceFileError,
     UnsupportedSourceFileError,
     find_source_files,
     ingest_repository,
@@ -126,12 +129,38 @@ def test_load_source_file_rejects_oversized_file(tmp_path: Path) -> None:
         load_source_file(root, root / "large.py", config)
 
 
+def test_load_source_file_uses_a_bounded_read(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "repo"
+    path = root / "growing.py"
+    _write(path, b"")
+    config = IngestionConfig(max_file_size_bytes=4)
+    source = MagicMock()
+    source.__enter__.return_value = source
+    source.read.return_value = b"12345"
+    open_mock = MagicMock(return_value=source)
+    monkeypatch.setattr(Path, "open", open_mock)
+
+    with pytest.raises(FileTooLargeError):
+        load_source_file(root, path, config)
+
+    open_mock.assert_called_once_with("rb")
+    source.read.assert_called_once_with(5)
+
+
 def test_load_source_file_rejects_binary_content(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     _write(root / "fake.py", b"print('x')\x00")
 
     with pytest.raises(BinarySourceFileError):
         load_source_file(root, root / "fake.py")
+
+
+def test_load_source_file_rejects_null_byte_after_old_sample(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    _write(root / "late-null.py", b"a" * 8192 + b"\x00")
+
+    with pytest.raises(BinarySourceFileError):
+        load_source_file(root, root / "late-null.py")
 
 
 def test_load_source_file_rejects_undecodable_content(tmp_path: Path) -> None:
@@ -213,6 +242,70 @@ def test_symlink_files_are_skipped_when_available(tmp_path: Path) -> None:
     snapshot = ingest_repository(root)
     assert [(item.relative_path.as_posix(), item.reason) for item in snapshot.skipped] == [
         ("linked.py", "symlink")
+    ]
+
+
+def test_symlink_directories_are_not_traversed_when_available(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    _write(outside / "escaped.py", "print('outside')\n")
+
+    try:
+        (root / "linked").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("Directory symlink creation is not available in this environment")
+
+    assert find_source_files(root) == []
+    with pytest.raises(SymlinkSourceFileError):
+        load_source_file(root, root / "linked" / "escaped.py")
+
+
+def test_junction_directories_are_pruned(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "repo"
+    _write(root / "junction" / "escaped.py", "print('outside')\n")
+    original_is_junction = Path.is_junction
+
+    def fake_is_junction(path: Path) -> bool:
+        return path.name == "junction" or original_is_junction(path)
+
+    monkeypatch.setattr(Path, "is_junction", fake_is_junction)
+
+    assert find_source_files(root) == []
+
+
+@pytest.mark.parametrize(
+    "read_error",
+    [
+        FileNotFoundError("test disappearance"),
+        PermissionError("test permission failure"),
+        OSError("test read failure"),
+    ],
+)
+def test_ingest_repository_records_read_errors_and_continues(
+    tmp_path: Path,
+    monkeypatch,
+    read_error: OSError,
+) -> None:
+    root = tmp_path / "repo"
+    broken = root / "broken.py"
+    healthy = root / "healthy.py"
+    _write(broken, "broken = True\n")
+    _write(healthy, "healthy = True\n")
+    original_open = Path.open
+
+    def fail_read(path: Path, *args, **kwargs):
+        if path.name == "broken.py":
+            raise read_error
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fail_read)
+
+    snapshot = ingest_repository(root)
+
+    assert [source.relative_path.as_posix() for source in snapshot.files] == ["healthy.py"]
+    assert [(item.relative_path.as_posix(), item.reason) for item in snapshot.skipped] == [
+        ("broken.py", SourceReadError.reason)
     ]
 
 
