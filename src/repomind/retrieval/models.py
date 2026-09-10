@@ -67,3 +67,18 @@ class EmbeddedChunk(BaseModel):
 
     chunk: CodeChunk
     embedding: EmbeddingVector
+
+
+class SemanticSearchResult(BaseModel):
+    """One ranked source chunk returned by semantic search."""
+
+    chunk: CodeChunk
+    score: float = Field(ge=-1.0, le=1.0)
+    rank: int = Field(ge=1)
+
+    @field_validator("score")
+    @classmethod
+    def _validate_score_is_finite(cls, value: float) -> float:
+        if not isfinite(value):
+            raise ValueError("semantic search score must be finite")
+        return value

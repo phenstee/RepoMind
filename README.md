@@ -32,10 +32,12 @@ metadata have additional safety checks.
 text batches, and `CodeChunk` objects into validated numerical vectors using a
 separate synchronous/asynchronous OpenAI embedding client.
 
-Later milestones will add semantic/hybrid retrieval, RAG, tools, the handwritten
-agent loop, code editing, tests/self-correction, permissions, memory, multi-agent
-orchestration, observability, evaluations, FastAPI, a Next.js frontend, Redis,
-Docker, and CI.
+**Milestone 5: in-memory semantic search** is complete. RepoMind can embed a
+natural-language query once, compare it with existing `EmbeddedChunk` vectors,
+and return deterministic top-k source chunks ranked by cosine similarity.
+
+Milestone 6 will add basic RAG. Later milestones will add persistence, hybrid
+retrieval, tools, agent behavior, application services, and deployment support.
 
 ## Repository ingestion
 
@@ -123,10 +125,47 @@ Chunk content is sent exactly as stored, including indentation and newline
 characters. Empty strings are rejected; whitespace-only strings are deliberately
 allowed without stripping.
 
-Vectors are immutable Python tuples held only in memory. RepoMind does **not**
-yet compare vectors, perform semantic search or retrieval, or store embeddings
-in a vector database. Automated embedding tests inject fake SDK clients and
-never make live API calls.
+Vectors are immutable Python tuples held only in memory. Automated embedding
+tests inject fake SDK clients and never make live API calls. Semantic search
+uses temporary NumPy arrays for calculation without changing the stored vector
+values.
+
+## Semantic search
+
+Milestone 5 adds retrieval without answer generation or persistence:
+
+```text
+Query text
+    ↓ embed exactly once
+EmbeddingVector
+    ↓ compare with existing EmbeddedChunk vectors
+cosine similarity
+    ↓ sort descending
+top-k SemanticSearchResult objects
+```
+
+For a query vector `q` and chunk vector `c`, RepoMind calculates:
+
+```text
+cosine_similarity(q, c) = dot(q, c) / (||q|| * ||c||)
+```
+
+Cosine similarity compares vector direction rather than raw magnitude. Higher
+scores indicate more similar directions. Inputs must be one-dimensional,
+non-empty, finite, equal in dimension, and non-zero in magnitude. Query and
+chunk vectors must also name the same embedding model.
+
+`rank_by_similarity` is a pure, offline function over pre-embedded chunks.
+`semantic_search` validates the query, embeds its exact text once, and delegates
+to that function; source chunks are never re-embedded per query. Results are
+ordered by score descending, and Python's stable sort preserves original corpus
+order for exact ties. No arbitrary score threshold is applied.
+
+This baseline performs brute-force comparison in memory using NumPy. Its time
+complexity is O(N × D), where N is the number of chunks and D is vector
+dimensionality. It is intended for correctness and learning, not large-scale
+indexing. There is no vector database, keyword or hybrid search, reranking, RAG,
+or LLM answer generation yet.
 
 ## Repository layout
 
@@ -147,10 +186,13 @@ RepoMind/
 │       └── retrieval/
 │           ├── __init__.py
 │           ├── embeddings.py
-│           └── models.py
+│           ├── models.py
+│           ├── semantic_search.py
+│           └── similarity.py
 ├── scripts/
 │   ├── inspect_repository.py
 │   ├── manual_embedding_check.py
+│   ├── manual_semantic_search.py
 │   └── manual_llm_check.py
 ├── tests/
 │   └── unit/
@@ -161,7 +203,9 @@ RepoMind/
 │       │   └── test_repository.py
 │       ├── retrieval/
 │       │   ├── test_embedding_models.py
-│       │   └── test_embeddings.py
+│       │   ├── test_embeddings.py
+│       │   ├── test_semantic_search.py
+│       │   └── test_similarity.py
 │       ├── test_config.py
 │       └── test_llm_client.py
 ├── .env.example
@@ -190,7 +234,11 @@ flowchart LR
     Chunk --> EmbedClient[OpenAI Embedding Client]
     EmbedClient --> Vector[EmbeddingVector]
     Vector --> Embedded[EmbeddedChunk]
-    Embedded --> Future[Future semantic search]
+    Query[User query] --> QueryEmbed[Query embedding]
+    QueryEmbed --> Similarity[Cosine similarity]
+    Embedded --> Similarity
+    Similarity --> Results[Ranked CodeChunks]
+    Results -. future .-> RAG[Basic RAG / LLM answer]
 ```
 
 `OpenAILLMClient` wraps the official OpenAI SDK. The rest of the codebase
@@ -252,6 +300,17 @@ uv run python scripts/manual_embedding_check.py
 It prints the model, dimensions, usage, and only the first five vector values.
 Without an API key it exits without making a request.
 
+Run a deliberately bounded semantic-search check with:
+
+```powershell
+uv run python scripts/manual_semantic_search.py `
+    "Where is retry logic implemented?" --max-chunks 10
+```
+
+It embeds at most 10 source chunks by default, embeds the query once, and prints
+up to five ranked locations. Without an API key it exits before ingestion or
+network activity.
+
 ## Optional ingestion check
 
 Inspect a repository without using the LLM:
@@ -282,10 +341,12 @@ uv run python scripts/inspect_repository.py . --chunks
 - **Embedding generation stays separate.** It uses the official OpenAI SDK
   directly, normalizes provider responses, and keeps vectors associated with
   their source chunks.
-- **No NumPy yet.** Tuples are sufficient to generate and hold vectors. NumPy
-  belongs in Milestone 5, when vector comparison is introduced.
+- **NumPy is limited to vector mathematics.** Raw provider vectors remain
+  immutable tuples; cosine similarity converts them to temporary arrays.
 - **Embeddings stay in memory.** Persistence and vector databases follow only
   after the in-memory retrieval pipeline is understood and verified.
+- **Raw semantic ranking stays visible.** There is no score threshold, keyword
+  boost, reranker, or framework retrieval abstraction in this baseline.
 
 ## Roadmap
 
@@ -295,8 +356,8 @@ The full project roadmap is described in the RepoMind engineering brief:
 2. Repository ingestion (complete)
 3. Code chunking (complete)
 4. Embeddings (complete)
-5. Semantic search (next)
-6. Basic RAG
+5. Semantic search (complete)
+6. Basic RAG (next)
 7. PostgreSQL + pgvector persistence
 8. Hybrid retrieval
 9. Reranking
