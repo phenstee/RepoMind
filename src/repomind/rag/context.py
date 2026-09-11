@@ -1,9 +1,17 @@
 """Deterministic formatting of ranked source chunks for RAG prompts."""
 
 from collections.abc import Sequence
+from typing import Protocol
 
+from repomind.ingestion import CodeChunk
 from repomind.rag.models import BuiltRepositoryContext, ContextSource
-from repomind.retrieval import SemanticSearchResult
+
+
+class RankedChunk(Protocol):
+    """Minimal retrieval result contract required by context construction."""
+
+    chunk: CodeChunk
+    rank: int
 
 
 class RAGError(ValueError):
@@ -39,7 +47,7 @@ def _assemble_context(blocks: Sequence[str]) -> str:
 
 
 def build_repository_context(
-    results: Sequence[SemanticSearchResult],
+    results: Sequence[RankedChunk],
     *,
     max_context_chars: int = 20_000,
 ) -> BuiltRepositoryContext:

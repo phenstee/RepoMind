@@ -44,9 +44,13 @@ source IDs, and map them to repository-owned file and line citations.
 persist repository snapshots, source files, chunks, and embeddings, reconstruct
 the existing domain models, and perform exact database-backed cosine retrieval.
 
-Milestone 8 will add keyword/BM25 and hybrid retrieval. Later milestones will
-add reranking, tools, agent behavior, application services, and deployment
-support.
+**Milestone 8: BM25 and hybrid retrieval** is complete. RepoMind can tokenize
+code-aware identifiers, rank chunks lexically with an explicit BM25
+implementation, and fuse semantic and lexical rankings with Reciprocal Rank
+Fusion (RRF).
+
+Milestone 9 will add reranking. Later milestones will add tools, agent behavior,
+application services, and deployment support.
 
 ## Repository ingestion
 
@@ -174,7 +178,7 @@ This baseline performs brute-force comparison in memory using NumPy. Its time
 complexity is O(N × D), where N is the number of chunks and D is vector
 dimensionality. It is intended for correctness and learning, not large-scale
 indexing. The retrieval layer itself does not generate answers, apply keyword
-or hybrid search, rerank results, or use a vector database.
+or hybrid scoring internally, rerank results, or use a vector database.
 
 ## Basic repository RAG
 
@@ -217,9 +221,9 @@ answer claiming sufficient evidence. The LLM never supplies paths or line
 numbers. Empty retrieval returns a deterministic insufficient-evidence answer
 without calling the LLM.
 
-The original RAG route can still operate entirely in memory. The persistence
-layer below adds a durable retrieval option without introducing keyword/hybrid
-search, reranking, tool use, or an agent loop.
+The original semantic-only RAG route remains available as a baseline. The
+context builder also accepts hybrid-ranked chunks through its small `chunk` and
+`rank` contract; it does not know about BM25 or RRF internals.
 
 ## PostgreSQL and pgvector persistence
 
@@ -283,6 +287,98 @@ Milestone 5 mathematics directly comparable and avoids imposing one fixed
 dimension on every embedding model. ANN design and measurement can follow when
 the corpus size justifies it.
 
+## BM25 and hybrid retrieval
+
+Semantic retrieval is strong when the query and source express the same idea
+with different words. BM25 lexical retrieval is strong when exact code terms
+such as `OPENAI_EMBEDDING_MODEL`, `persist_embedded_chunks`, or
+`RepositoryIngestionError` matter. Hybrid retrieval keeps both strengths:
+
+```text
+                    ┌── semantic ranking
+query ──────────────┤
+                    └── BM25 lexical ranking
+                              ↓
+                 Reciprocal Rank Fusion
+                              ↓
+                     hybrid top-k chunks
+```
+
+### Code-aware tokenization
+
+The deterministic tokenizer uses Unicode-aware case folding. It retains the
+normalized compound identifier and adds separator and case-transition
+components. For example:
+
+```text
+persist_embedded_chunks
+→ persist_embedded_chunks, persist, embedded, chunks
+
+OpenAILLMClient
+→ openaillmclient, open, ai, llm, client
+
+src/repomind/retrieval
+→ src/repomind/retrieval, src, repomind, retrieval
+```
+
+Dotted and kebab forms receive the same treatment. This is a small lexical
+tokenizer, not a parser, stemmer, AST index, or symbol table. Punctuation-only
+text produces no lexical tokens, and a BM25 query with no matching terms returns
+no results.
+
+### BM25
+
+`BM25Index` derives term frequencies, document frequencies, document lengths,
+and average document length once from `CodeChunk` content. It uses `k1 = 1.5`
+for term-frequency saturation and `b = 0.75` for length normalization. For each
+query term it calculates:
+
+```text
+idf(t) = log(1 + (N - df(t) + 0.5) / (df(t) + 0.5))
+
+score(D, Q) = Σ idf(t) ×
+    f(t,D) × (k1 + 1)
+    ─────────────────────────────────────────
+    f(t,D) + k1 × (1 - b + b × |D| / avgdl)
+```
+
+Only matching chunks are returned. Scores sort descending, with original corpus
+order preserved for exact ties. BM25 scores are retrieval signals, not
+probabilities or calibrated confidence.
+
+### Reciprocal Rank Fusion
+
+Cosine similarity and BM25 scores have unrelated scales, so RepoMind does not
+add or hand-normalize their raw values. RRF combines rank positions instead:
+
+```text
+RRF_score(chunk) = Σ 1 / (rrf_k + rank_i(chunk))
+```
+
+The default `rrf_k` is 60. A larger value makes differences between the very top
+ranks less sharp. A chunk can contribute from either ranking or both; an
+intersection is not required. Fused ties use best individual rank and then the
+stable source-domain identity `(relative_path, chunk_index, start_line,
+end_line)`, never a database ID or Python object identity.
+
+The high-level in-memory path embeds the unchanged query exactly once and asks
+each retriever for `top_k × 4` candidates by default before fusion. That depth is
+a simple correctness baseline, not an empirically optimal setting. Stored
+chunks are never re-embedded.
+
+For persisted repositories, `postgres_hybrid_search` combines exact pgvector
+semantic results with `load_chunks` → an in-memory `BM25Index` → RRF. The query
+embedding remains an input to the database layer, so neither BM25 nor database
+code calls OpenAI. Lexical indexing is currently rebuilt for each database
+hybrid call; callers performing repeated in-memory searches can reuse a
+`BM25Index`.
+
+Approximate costs are O(N × D) for in-memory semantic comparison, O(N × |Q|)
+for this straightforward BM25 scorer over N chunks and query terms Q, and
+O(candidate results) for RRF. PostgreSQL handles the exact database semantic
+scan, while database-backed lexical work still loads chunks into Python. This
+is not yet a production-scale persisted lexical index.
+
 ## Repository layout
 
 ```text
@@ -293,6 +389,7 @@ RepoMind/
 │       ├── db/
 │       │   ├── __init__.py
 │       │   ├── base.py
+│       │   ├── hybrid.py
 │       │   ├── models.py
 │       │   ├── repositories.py
 │       │   └── session.py
@@ -312,10 +409,13 @@ RepoMind/
 │       │   └── pipeline.py
 │       └── retrieval/
 │           ├── __init__.py
+│           ├── bm25.py
 │           ├── embeddings.py
+│           ├── hybrid.py
 │           ├── models.py
 │           ├── semantic_search.py
-│           └── similarity.py
+│           ├── similarity.py
+│           └── tokenization.py
 ├── scripts/
 │   ├── inspect_repository.py
 │   ├── manual_embedding_check.py
@@ -347,10 +447,13 @@ RepoMind/
 │       │   ├── test_rag_models.py
 │       │   └── test_pipeline.py
 │       ├── retrieval/
+│       │   ├── test_bm25.py
 │       │   ├── test_embedding_models.py
 │       │   ├── test_embeddings.py
+│       │   ├── test_hybrid.py
 │       │   ├── test_semantic_search.py
-│       │   └── test_similarity.py
+│       │   ├── test_similarity.py
+│       │   └── test_tokenization.py
 │       ├── test_config.py
 │       └── test_llm_client.py
 ├── .env.example
@@ -383,10 +486,17 @@ flowchart LR
     Vector --> Embedded[EmbeddedChunk]
     Embedded --> Persist[PostgreSQL + pgvector]
     Question[User question] --> QueryEmbed[Query embedding]
-    QueryEmbed --> Search[Exact vector search]
-    Persist --> Search
-    Embedded -. in-memory baseline .-> Search
-    Search --> Results[Ranked CodeChunks]
+    Question --> Tokenize[Code-aware tokenization]
+    QueryEmbed --> Semantic[Semantic ranking]
+    Persist --> Semantic
+    Embedded -. in-memory baseline .-> Semantic
+    Tokenize --> BM25[BM25 ranking]
+    Chunk --> BM25
+    Persist -. load persisted chunks .-> BM25
+    Semantic --> RRF[Reciprocal Rank Fusion]
+    Semantic -. semantic-only baseline .-> Results
+    BM25 --> RRF
+    RRF --> Results[Hybrid-ranked CodeChunks]
     Results --> Context[Deterministic context builder]
     Context --> Generation[Structured LLM generation]
     Client --> Generation
@@ -564,6 +674,18 @@ uv run python scripts/inspect_repository.py . --chunks
   flush for validation but do not commit repeatedly.
 - **Exact pgvector search comes first.** No HNSW or IVFFlat index is claimed or
   added before corpus-scale measurements justify approximate retrieval.
+- **BM25 stays explicit and dependency-free.** Its positive IDF, saturation,
+  and length-normalization math remain inspectable and independently testable.
+- **Tokenization understands common code forms.** Exact normalized identifiers
+  are retained while snake case, separators, and case transitions add useful
+  component terms without claiming full language parsing.
+- **Hybrid retrieval fuses ranks, not raw scores.** RRF avoids pretending cosine
+  similarity and BM25 have a naturally shared numerical scale.
+- **Lexical indexes are derived in memory.** They are reusable for in-memory
+  queries but rebuilt from persisted chunks for each database hybrid call until
+  corpus size justifies a durable lexical index.
+- **Reranking remains separate.** Milestone 8 stops after deterministic RRF so
+  the retrieval baseline can be evaluated before adding another model stage.
 
 ## Roadmap
 
@@ -576,8 +698,8 @@ The full project roadmap is described in the RepoMind engineering brief:
 5. Semantic search (complete)
 6. Basic RAG (complete)
 7. PostgreSQL + pgvector persistence (complete)
-8. Hybrid retrieval (next)
-9. Reranking
+8. BM25 + hybrid retrieval (complete)
+9. Reranking (next)
 10. Tool system
 11. Handwritten agent loop
 12. Read-only software engineering agent

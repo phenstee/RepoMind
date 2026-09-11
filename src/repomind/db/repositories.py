@@ -262,6 +262,44 @@ def load_embedded_chunks(
     ]
 
 
+def load_chunks(
+    session: Session,
+    repository_id: int,
+) -> list[CodeChunk]:
+    """Reconstruct every persisted chunk without loading embedding vectors."""
+
+    _repository_or_raise(session, repository_id)
+    rows = session.execute(
+        select(
+            RepositoryFileRecord.relative_path,
+            RepositoryFileRecord.language,
+            CodeChunkRecord.chunk_index,
+            CodeChunkRecord.start_line,
+            CodeChunkRecord.end_line,
+            CodeChunkRecord.content,
+        )
+        .join(RepositoryFileRecord)
+        .where(RepositoryFileRecord.repository_id == repository_id)
+        .order_by(
+            RepositoryFileRecord.relative_path,
+            CodeChunkRecord.start_line,
+            CodeChunkRecord.chunk_index,
+            CodeChunkRecord.id,
+        )
+    ).all()
+    return [
+        CodeChunk(
+            relative_path=relative_path,
+            language=language,
+            start_line=start_line,
+            end_line=end_line,
+            content=content,
+            chunk_index=chunk_index,
+        )
+        for relative_path, language, chunk_index, start_line, end_line, content in rows
+    ]
+
+
 def pgvector_semantic_search(
     session: Session,
     repository_id: int,

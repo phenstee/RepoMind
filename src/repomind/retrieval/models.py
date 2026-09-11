@@ -1,9 +1,9 @@
-"""Typed, provider-independent models for embedding generation."""
+"""Typed, provider-independent models for repository retrieval."""
 
 from collections.abc import Sequence
 from math import isfinite
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from repomind.ingestion.models import CodeChunk
 
@@ -82,3 +82,65 @@ class SemanticSearchResult(BaseModel):
         if not isfinite(value):
             raise ValueError("semantic search score must be finite")
         return value
+
+
+class BM25Config(BaseModel):
+    """Standard BM25 saturation and document-length parameters."""
+
+    k1: float = Field(default=1.5, gt=0)
+    b: float = Field(default=0.75, ge=0, le=1)
+
+    @field_validator("k1", "b", mode="before")
+    @classmethod
+    def _reject_boolean_parameters(cls, value: object) -> object:
+        if isinstance(value, bool):
+            # Pydantic turns ValueError into a model ValidationError for callers.
+            raise ValueError(  # noqa: TRY004
+                "BM25 parameters must be numerical, not boolean"
+            )
+        return value
+
+    @field_validator("k1")
+    @classmethod
+    def _validate_k1_is_finite(cls, value: float) -> float:
+        if not isfinite(value):
+            raise ValueError("BM25 k1 must be finite")
+        return value
+
+
+class BM25SearchResult(BaseModel):
+    """One lexical result; its BM25 score is a ranking signal, not confidence."""
+
+    chunk: CodeChunk
+    score: float = Field(ge=0)
+    rank: int = Field(ge=1)
+
+    @field_validator("score")
+    @classmethod
+    def _validate_score_is_finite(cls, value: float) -> float:
+        if not isfinite(value):
+            raise ValueError("BM25 score must be finite")
+        return value
+
+
+class HybridSearchResult(BaseModel):
+    """One fused chunk with its contributing semantic and lexical ranks."""
+
+    chunk: CodeChunk
+    rank: int = Field(ge=1)
+    fusion_score: float = Field(gt=0)
+    semantic_rank: int | None = Field(default=None, ge=1)
+    lexical_rank: int | None = Field(default=None, ge=1)
+
+    @field_validator("fusion_score")
+    @classmethod
+    def _validate_fusion_score_is_finite(cls, value: float) -> float:
+        if not isfinite(value):
+            raise ValueError("hybrid fusion score must be finite")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_contributing_rank(self) -> "HybridSearchResult":
+        if self.semantic_rank is None and self.lexical_rank is None:
+            raise ValueError("hybrid result requires at least one contributing rank")
+        return self

@@ -14,11 +14,13 @@ from sqlalchemy.orm import Session
 from repomind.db import (
     PersistenceError,
     content_sha256,
+    load_chunks,
     load_embedded_chunks,
     persist_chunks,
     persist_embedded_chunks,
     persist_repository_snapshot,
     pgvector_semantic_search,
+    postgres_hybrid_search,
 )
 from repomind.db.models import CodeChunkRecord, RepositoryFileRecord, RepositoryRecord
 from repomind.ingestion import CodeChunk, RepositorySnapshot, SourceFile
@@ -434,3 +436,69 @@ def test_failed_transaction_rolls_back_partial_repository(
             select(RepositoryRecord).where(RepositoryRecord.name == name)
         )
         assert stored is None
+
+
+def test_postgres_hybrid_search_fuses_persisted_chunks_with_repository_isolation(
+    db_session: Session,
+) -> None:
+    repository_sources = [
+        _source("src/retry.py", "bounded exponential backoff\n"),
+        _source(
+            "src/settings.py",
+            'OPENAI_EMBEDDING_MODEL = "text-embedding-test"\n',
+        ),
+    ]
+    repository = persist_repository_snapshot(
+        db_session,
+        _snapshot(_name("hybrid"), *repository_sources),
+    )
+    persisted = [
+        _embedded(
+            _chunk("src/retry.py", repository_sources[0].content, chunk_index=0),
+            (1.0, 0.0),
+        ),
+        _embedded(
+            _chunk("src/settings.py", repository_sources[1].content, chunk_index=0),
+            (0.5, 0.5),
+        ),
+    ]
+    persist_embedded_chunks(db_session, repository.id, persisted)
+
+    other_source = _source(
+        "src/other.py",
+        'OPENAI_EMBEDDING_MODEL = "must-not-leak"\n',
+    )
+    other_repository = persist_repository_snapshot(
+        db_session,
+        _snapshot(_name("hybrid-other"), other_source),
+    )
+    persist_embedded_chunks(
+        db_session,
+        other_repository.id,
+        [
+            _embedded(
+                _chunk("src/other.py", other_source.content, chunk_index=0),
+                (1.0, 0.0),
+            )
+        ],
+    )
+
+    loaded = load_chunks(db_session, repository.id)
+    results = postgres_hybrid_search(
+        db_session,
+        repository.id,
+        "OPENAI_EMBEDDING_MODEL",
+        EmbeddingVector(values=(1.0, 0.0), model="model-a"),
+        top_k=5,
+    )
+
+    assert loaded == [embedded.chunk for embedded in persisted]
+    assert [result.chunk.relative_path.as_posix() for result in results] == [
+        "src/settings.py",
+        "src/retry.py",
+    ]
+    assert results[0].semantic_rank == 2
+    assert results[0].lexical_rank == 1
+    assert all(result.chunk.relative_path.as_posix() != "src/other.py" for result in results)
+    context = build_repository_context(results)
+    assert context.sources[0].chunk.relative_path.as_posix() == "src/settings.py"

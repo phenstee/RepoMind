@@ -1,6 +1,6 @@
 """Basic in-memory retrieval-augmented generation for repository questions."""
 
-from repomind.rag.context import RAGError, build_repository_context
+from repomind.rag.context import RAGError, RankedChunk, build_repository_context
 from repomind.rag.models import (
     BuiltRepositoryContext,
     ContextSource,
@@ -15,6 +15,7 @@ __all__ = [
     "ContextSource",
     "RAGConfig",
     "RAGError",
+    "RankedChunk",
     "RepositoryAnswer",
     "SourceCitation",
     "StructuredLLMProvider",
