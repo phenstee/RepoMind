@@ -7,6 +7,7 @@ import pytest
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
+from pydantic import BaseModel
 from sqlalchemy import Engine, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -25,7 +26,12 @@ from repomind.db import (
 from repomind.db.models import CodeChunkRecord, RepositoryFileRecord, RepositoryRecord
 from repomind.ingestion import CodeChunk, RepositorySnapshot, SourceFile
 from repomind.rag import build_repository_context
-from repomind.retrieval import EmbeddedChunk, EmbeddingVector, rank_by_similarity
+from repomind.retrieval import (
+    EmbeddedChunk,
+    EmbeddingVector,
+    LLMReranker,
+    rank_by_similarity,
+)
 
 pytestmark = pytest.mark.postgres
 
@@ -86,6 +92,23 @@ def _embedded(
         chunk=chunk,
         embedding=EmbeddingVector(values=values, model=model),
     )
+
+
+class _FakeRerankLLM:
+    def __init__(self, candidate_ids: list[str]) -> None:
+        self.candidate_ids = candidate_ids
+        self.prompts: list[str] = []
+
+    def generate_structured(
+        self,
+        prompt: str,
+        response_model: type[BaseModel],
+        *,
+        system_prompt: str | None = None,
+        temperature: float | None = None,
+    ) -> BaseModel:
+        self.prompts.append(prompt)
+        return response_model(ranked_candidate_ids=self.candidate_ids)
 
 
 def test_migration_is_at_head_and_vector_extension_exists(
@@ -502,3 +525,71 @@ def test_postgres_hybrid_search_fuses_persisted_chunks_with_repository_isolation
     assert all(result.chunk.relative_path.as_posix() != "src/other.py" for result in results)
     context = build_repository_context(results)
     assert context.sources[0].chunk.relative_path.as_posix() == "src/settings.py"
+
+
+def test_postgres_hybrid_results_are_reranked_as_domain_chunks(
+    db_session: Session,
+) -> None:
+    sources = [
+        _source("README.md", "Retry behavior for failed OpenAI requests.\n", "markdown"),
+        _source("src/llm/client.py", "def retry_failed_request(): pass\n"),
+    ]
+    repository = persist_repository_snapshot(
+        db_session,
+        _snapshot(_name("rerank"), *sources),
+    )
+    persist_embedded_chunks(
+        db_session,
+        repository.id,
+        [
+            _embedded(
+                _chunk("README.md", sources[0].content, chunk_index=0),
+                (1.0, 0.0),
+            ),
+            _embedded(
+                _chunk("src/llm/client.py", sources[1].content, chunk_index=0),
+                (0.8, 0.2),
+            ),
+        ],
+    )
+
+    other_source = _source("src/other.py", "retry_failed_request\n")
+    other_repository = persist_repository_snapshot(
+        db_session,
+        _snapshot(_name("rerank-other"), other_source),
+    )
+    persist_embedded_chunks(
+        db_session,
+        other_repository.id,
+        [
+            _embedded(
+                _chunk("src/other.py", other_source.content, chunk_index=0),
+                (1.0, 0.0),
+            )
+        ],
+    )
+
+    hybrid_results = postgres_hybrid_search(
+        db_session,
+        repository.id,
+        "Where is retry behavior for failed OpenAI requests implemented?",
+        EmbeddingVector(values=(1.0, 0.0), model="model-a"),
+        top_k=2,
+    )
+    llm = _FakeRerankLLM(["C2", "C1"])
+    reranked = LLMReranker(llm).rerank(
+        "Where is retry behavior for failed OpenAI requests implemented?",
+        hybrid_results,
+        top_k=2,
+    )
+
+    assert all(isinstance(result.chunk, CodeChunk) for result in reranked)
+    assert [result.chunk.relative_path.as_posix() for result in reranked] == [
+        "src/llm/client.py",
+        "README.md",
+    ]
+    assert [result.original_rank for result in reranked] == [2, 1]
+    assert all(result.chunk.relative_path.as_posix() != "src/other.py" for result in reranked)
+    assert "src/llm/client.py" in llm.prompts[0]
+    context = build_repository_context(reranked)
+    assert context.sources[0].chunk.relative_path.as_posix() == "src/llm/client.py"

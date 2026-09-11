@@ -49,8 +49,12 @@ code-aware identifiers, rank chunks lexically with an explicit BM25
 implementation, and fuse semantic and lexical rankings with Reciprocal Rank
 Fusion (RRF).
 
-Milestone 9 will add reranking. Later milestones will add tools, agent behavior,
-application services, and deployment support.
+**Milestone 9: LLM-based reranking** is complete. RepoMind can send a bounded
+retrieval candidate set to the existing structured-output LLM interface, strictly
+validate a candidate-ID ordering, and preserve original retrieval ranks.
+
+Milestone 10 will begin the read-only tool system. Later milestones will add
+agent behavior, application services, and deployment support.
 
 ## Repository ingestion
 
@@ -379,6 +383,70 @@ O(candidate results) for RRF. PostgreSQL handles the exact database semantic
 scan, while database-backed lexical work still loads chunks into Python. This
 is not yet a production-scale persisted lexical index.
 
+## LLM-based reranking
+
+Retrieval and reranking solve different parts of source discovery:
+
+```text
+large repository
+      ↓
+semantic + BM25 retrieval
+      ↓
+RRF hybrid candidates
+      ↓ bounded second stage
+LLM relevance ordering
+      ↓
+reranked chunks
+      ↓
+existing RAG context and grounded generation
+```
+
+Retrieval broadly discovers plausible chunks using comparatively cheap vector
+and lexical signals. Reranking spends one structured LLM request on only that
+small candidate set so the model can compare the question with complete source
+excerpts. Generation then answers from the final context. Reranking is optional:
+semantic-only, BM25-only, hybrid, and RAG-without-reranking paths remain valid
+baselines.
+
+`LLMReranker` assigns deterministic IDs `C1`, `C2`, and so on in retrieval
+order. The model returns only an ordered `ranked_candidate_ids` list and must
+return every included ID exactly once. Unknown, duplicate, or missing IDs are
+rejected. The LLM never creates paths, line ranges, chunk indexes, or database
+IDs; RepoMind maps the validated IDs back to the original `CodeChunk` objects.
+This mirrors the source-ID safety boundary used by grounded RAG citations.
+
+Candidate context contains relative path, line range, optional language, and
+exact complete content. It does not contain cosine, BM25, or RRF scores, which
+prevents those incompatible signals from biasing the model toward simply
+repeating retrieval order. `RerankedSearchResult` contains the new `rank` and
+the candidate's `original_rank`, but deliberately has no artificial confidence
+score.
+
+`RerankingConfig` defaults to at most 20 candidates and 30,000 candidate-context
+characters. Candidates are considered in retrieval order, never split, and
+renumbered contiguously after bounding. As in RAG context construction, the
+first candidate is included whole even when it alone exceeds the character
+budget; a later candidate that would exceed the budget ends collection. Empty
+candidate input returns `[]` without an LLM call. `top_k` is applied only after
+the model has returned the complete included ID ordering.
+
+Repository excerpts are explicitly marked as untrusted data in the candidate
+context and system prompt. Instructions inside code, comments, or documentation
+cannot override the ranking task. The prompt requests ordering only—no
+chain-of-thought, explanation, relevance percentage, or generated source
+metadata.
+
+`hybrid_search_with_reranking` reuses hybrid retrieval rather than duplicating
+it: by default up to 20 hybrid candidates become input to the bounded reranker,
+which returns the best five. Semantic-only or PostgreSQL-backed hybrid results
+can also be passed directly because the reranker depends only on the shared
+`RankedChunk` contract. Database modules never call the LLM.
+
+Reranking adds latency, tokens, and cost. Without it, the path is retrieval → RAG
+generation; with it, the path is retrieval → reranking LLM → RAG generation.
+The extra judgment may improve context ordering, but RepoMind does not claim it
+always improves results—evaluation must establish that later.
+
 ## Repository layout
 
 ```text
@@ -413,6 +481,7 @@ RepoMind/
 │           ├── embeddings.py
 │           ├── hybrid.py
 │           ├── models.py
+│           ├── reranking.py
 │           ├── semantic_search.py
 │           ├── similarity.py
 │           └── tokenization.py
@@ -451,6 +520,7 @@ RepoMind/
 │       │   ├── test_embedding_models.py
 │       │   ├── test_embeddings.py
 │       │   ├── test_hybrid.py
+│       │   ├── test_reranking.py
 │       │   ├── test_semantic_search.py
 │       │   ├── test_similarity.py
 │       │   └── test_tokenization.py
@@ -496,8 +566,11 @@ flowchart LR
     Semantic --> RRF[Reciprocal Rank Fusion]
     Semantic -. semantic-only baseline .-> Results
     BM25 --> RRF
-    RRF --> Results[Hybrid-ranked CodeChunks]
-    Results --> Context[Deterministic context builder]
+    RRF --> Results[Hybrid candidates]
+    Results --> Reranker[Bounded LLM reranker]
+    Results -. no-rerank baseline .-> Context
+    Reranker --> Reranked[Reranked chunks]
+    Reranked --> Context[Deterministic context builder]
     Context --> Generation[Structured LLM generation]
     Client --> Generation
     Generation --> Validation[Source-ID validation]
@@ -657,8 +730,8 @@ uv run python scripts/inspect_repository.py . --chunks
   immutable tuples; cosine similarity converts them to temporary arrays.
 - **In-memory retrieval remains available.** PostgreSQL is an optional durable
   path, while the original in-memory pipeline stays useful as a simple baseline.
-- **Raw semantic ranking stays visible.** There is no score threshold, keyword
-  boost, reranker, or framework retrieval abstraction in this baseline.
+- **Raw semantic ranking stays visible.** The semantic-only baseline has no
+  score threshold, keyword boost, reranker, or framework retrieval abstraction.
 - **Citations use deterministic source IDs.** The LLM selects `S1`, `S2`, and
   similar identifiers; RepoMind owns and validates the corresponding paths and
   line ranges.
@@ -684,8 +757,13 @@ uv run python scripts/inspect_repository.py . --chunks
 - **Lexical indexes are derived in memory.** They are reusable for in-memory
   queries but rebuilt from persisted chunks for each database hybrid call until
   corpus size justifies a durable lexical index.
-- **Reranking remains separate.** Milestone 8 stops after deterministic RRF so
-  the retrieval baseline can be evaluated before adding another model stage.
+- **Reranking remains an optional second stage.** It sees only bounded retriever
+  output, uses one structured ordering request, and preserves original ranks so
+  future evaluation can compare results with and without it.
+- **Candidate IDs protect source ownership.** The LLM controls ordering only;
+  RepoMind retains authority over chunks, paths, line numbers, and identities.
+- **No rerank confidence is invented.** Model ordering is not calibrated, and
+  raw semantic, BM25, and RRF scores are deliberately absent from its prompt.
 
 ## Roadmap
 
@@ -699,8 +777,8 @@ The full project roadmap is described in the RepoMind engineering brief:
 6. Basic RAG (complete)
 7. PostgreSQL + pgvector persistence (complete)
 8. BM25 + hybrid retrieval (complete)
-9. Reranking (next)
-10. Tool system
+9. LLM-based reranking (complete)
+10. Tool system (next)
 11. Handwritten agent loop
 12. Read-only software engineering agent
 13. Planning

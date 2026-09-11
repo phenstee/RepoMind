@@ -20,7 +20,16 @@ from repomind.retrieval.models import (
     EmbeddingUsage,
     EmbeddingVector,
     HybridSearchResult,
+    RankedChunk,
+    RerankedSearchResult,
+    RerankingConfig,
     SemanticSearchResult,
+)
+from repomind.retrieval.reranking import (
+    LLMReranker,
+    Reranker,
+    RerankingError,
+    hybrid_search_with_reranking,
 )
 from repomind.retrieval.semantic_search import (
     EmbeddingProvider,
@@ -48,7 +57,13 @@ __all__ = [
     "EmbeddingVector",
     "HybridSearchError",
     "HybridSearchResult",
+    "LLMReranker",
     "OpenAIEmbeddingClient",
+    "RankedChunk",
+    "RerankedSearchResult",
+    "Reranker",
+    "RerankingConfig",
+    "RerankingError",
     "RetrievalError",
     "SemanticSearchError",
     "SemanticSearchResult",
@@ -56,6 +71,7 @@ __all__ = [
     "chunk_identity",
     "cosine_similarity",
     "hybrid_search",
+    "hybrid_search_with_reranking",
     "rank_by_similarity",
     "reciprocal_rank_fusion",
     "semantic_search",

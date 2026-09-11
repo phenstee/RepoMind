@@ -1,17 +1,9 @@
 """Deterministic formatting of ranked source chunks for RAG prompts."""
 
 from collections.abc import Sequence
-from typing import Protocol
 
-from repomind.ingestion import CodeChunk
 from repomind.rag.models import BuiltRepositoryContext, ContextSource
-
-
-class RankedChunk(Protocol):
-    """Minimal retrieval result contract required by context construction."""
-
-    chunk: CodeChunk
-    rank: int
+from repomind.retrieval.models import RankedChunk
 
 
 class RAGError(ValueError):

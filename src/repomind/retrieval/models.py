@@ -2,10 +2,18 @@
 
 from collections.abc import Sequence
 from math import isfinite
+from typing import Protocol
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from repomind.ingestion.models import CodeChunk
+
+
+class RankedChunk(Protocol):
+    """Minimal source-ranking contract shared by retrieval, reranking, and RAG."""
+
+    chunk: CodeChunk
+    rank: int
 
 
 class EmbeddingConfig(BaseModel):
@@ -144,3 +152,18 @@ class HybridSearchResult(BaseModel):
         if self.semantic_rank is None and self.lexical_rank is None:
             raise ValueError("hybrid result requires at least one contributing rank")
         return self
+
+
+class RerankingConfig(BaseModel):
+    """Hard limits for the candidate set sent to an LLM reranker."""
+
+    max_candidates: int = Field(default=20, gt=0, strict=True)
+    max_context_chars: int = Field(default=30_000, gt=0, strict=True)
+
+
+class RerankedSearchResult(BaseModel):
+    """One LLM-ordered chunk with its original retrieval position preserved."""
+
+    chunk: CodeChunk
+    rank: int = Field(ge=1)
+    original_rank: int = Field(ge=1)
