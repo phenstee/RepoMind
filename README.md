@@ -40,9 +40,13 @@ and return deterministic top-k source chunks ranked by cosine similarity.
 chunks into bounded context, request a structured grounded answer, validate its
 source IDs, and map them to repository-owned file and line citations.
 
-Milestone 7 will add PostgreSQL and pgvector persistence. Later milestones will
-add hybrid retrieval, tools, agent behavior, application services, and
-deployment support.
+**Milestone 7: PostgreSQL and pgvector persistence** is complete. RepoMind can
+persist repository snapshots, source files, chunks, and embeddings, reconstruct
+the existing domain models, and perform exact database-backed cosine retrieval.
+
+Milestone 8 will add keyword/BM25 and hybrid retrieval. Later milestones will
+add reranking, tools, agent behavior, application services, and deployment
+support.
 
 ## Repository ingestion
 
@@ -213,8 +217,71 @@ answer claiming sufficient evidence. The LLM never supplies paths or line
 numbers. Empty retrieval returns a deterministic insufficient-evidence answer
 without calling the LLM.
 
-All chunks, vectors, retrieval results, and context remain in memory. There is
-no persistence, keyword/hybrid search, reranking, tool use, or agent loop.
+The original RAG route can still operate entirely in memory. The persistence
+layer below adds a durable retrieval option without introducing keyword/hybrid
+search, reranking, tool use, or an agent loop.
+
+## PostgreSQL and pgvector persistence
+
+Milestone 7 adds a durable alternative to the in-memory retrieval baseline:
+
+```text
+RepositorySnapshot
+    ↓ replace named repository snapshot
+repositories
+    ↓ one-to-many
+repository_files (metadata, exact decoded content, SHA-256)
+    ↓ one-to-many
+code_chunks (line ranges, exact content, SHA-256, model, dimensions, vector)
+    ↓
+exact pgvector cosine search
+    ↓
+SemanticSearchResult[]
+```
+
+PostgreSQL is the general relational database that stores repository, file,
+metadata, and text records. pgvector is a PostgreSQL extension that adds the
+`vector` type and vector-distance operators. RepoMind uses them together: normal
+relational filters isolate the repository and embedding model before pgvector
+orders compatible vectors by cosine distance.
+
+Persistence means an indexed repository can survive process restarts,
+embeddings do not need to be regenerated for every process, and retrieval can
+be scoped in the database. Only safe repository-relative file paths are stored;
+the absolute local `RepositorySnapshot.root` is deliberately excluded. Decoded
+source content is stored so the indexed snapshot can later be inspected or
+re-chunked without rereading a potentially changed working tree.
+
+`persist_repository_snapshot` uses repository name as the current canonical
+key. Repeating it replaces that repository's complete file snapshot and removes
+old chunks through cascades. `persist_chunks` and `persist_embedded_chunks`
+replace the repository's complete chunk index. These functions flush but never
+commit, so the caller controls one understandable transaction and can roll back
+the whole operation after any failure. Incremental file reconciliation is not
+implemented yet.
+
+Files and chunks carry SHA-256 hashes of their exact UTF-8 text. These hashes
+prepare for future change detection and invalidation; Milestone 7 does not use
+them to implement incremental indexing or deduplication.
+
+The vector column intentionally has no schema-wide fixed dimension. Each
+embedding stores and validates its model and dimension, including a database
+constraint using `vector_dims`. This supports small test vectors and different
+configured embedding models without hardcoding 1,536 dimensions. Exact search
+first checks the stored dimension for the requested model; no embeddings for
+that model returns `[]`, while an incompatible query dimension fails clearly.
+
+Database ranking uses ascending pgvector cosine distance and converts it back
+to the existing score contract with `cosine_similarity = 1 - cosine_distance`.
+Results are filtered by repository, model, and dimension. Exact ties use
+relative path, start line, chunk index, and database ID as deterministic
+secondary ordering. This differs deliberately from the in-memory baseline,
+which preserves caller input order for ties.
+
+No approximate-nearest-neighbor index is created yet. Exact search keeps the
+Milestone 5 mathematics directly comparable and avoids imposing one fixed
+dimension on every embedding model. ANN design and measurement can follow when
+the corpus size justifies it.
 
 ## Repository layout
 
@@ -223,6 +290,12 @@ RepoMind/
 ├── src/
 │   └── repomind/
 │       ├── config.py
+│       ├── db/
+│       │   ├── __init__.py
+│       │   ├── base.py
+│       │   ├── models.py
+│       │   ├── repositories.py
+│       │   └── session.py
 │       ├── ingestion/
 │       │   ├── __init__.py
 │       │   ├── chunker.py
@@ -249,8 +322,21 @@ RepoMind/
 │   ├── manual_rag_check.py
 │   ├── manual_semantic_search.py
 │   └── manual_llm_check.py
+├── alembic/
+│   ├── versions/
+│   │   └── 20260910_01_initial_pgvector_schema.py
+│   ├── env.py
+│   └── script.py.mako
 ├── tests/
+│   ├── integration/
+│   │   ├── conftest.py
+│   │   └── test_postgres_persistence.py
 │   └── unit/
+│       ├── db/
+│       │   ├── test_db_models.py
+│       │   ├── test_hashing.py
+│       │   ├── test_repositories.py
+│       │   └── test_session.py
 │       ├── ingestion/
 │       │   ├── test_chunker.py
 │       │   ├── test_language.py
@@ -269,6 +355,8 @@ RepoMind/
 │       └── test_llm_client.py
 ├── .env.example
 ├── .gitignore
+├── alembic.ini
+├── docker-compose.yml
 ├── pyproject.toml
 ├── uv.lock
 └── README.md
@@ -293,9 +381,11 @@ flowchart LR
     Chunk --> EmbedClient[OpenAI Embedding Client]
     EmbedClient --> Vector[EmbeddingVector]
     Vector --> Embedded[EmbeddedChunk]
+    Embedded --> Persist[PostgreSQL + pgvector]
     Question[User question] --> QueryEmbed[Query embedding]
-    QueryEmbed --> Search[Semantic search]
-    Embedded --> Search
+    QueryEmbed --> Search[Exact vector search]
+    Persist --> Search
+    Embedded -. in-memory baseline .-> Search
     Search --> Results[Ranked CodeChunks]
     Results --> Context[Deterministic context builder]
     Context --> Generation[Structured LLM generation]
@@ -330,6 +420,31 @@ Copy-Item .env.example .env
 
 Then set `OPENAI_API_KEY` in `.env`. Never commit `.env`.
 
+## Local database
+
+Start only the PostgreSQL/pgvector dependency:
+
+```powershell
+docker compose up -d postgres
+```
+
+Apply migrations from an empty or existing development database:
+
+```powershell
+uv run alembic upgrade head
+```
+
+The Compose credentials are intentionally local-only defaults. Override
+`DATABASE_URL` outside local development. Stop the service without deleting its
+named data volume:
+
+```powershell
+docker compose down
+```
+
+Use `docker compose down -v` only when intentionally resetting all local
+RepoMind database data.
+
 ## Tests
 
 Run the full unit test suite:
@@ -343,6 +458,19 @@ Run linting:
 ```powershell
 uv run ruff check .
 ```
+
+Ordinary pytest runs remain database-independent; PostgreSQL integration tests
+skip unless an explicit test URL is supplied. With the Compose database healthy
+and migrated, run the real pgvector suite in PowerShell with:
+
+```powershell
+$env:REPOMIND_TEST_DATABASE_URL = `
+    "postgresql+psycopg://repomind:repomind@localhost:5432/repomind"
+uv run pytest -m postgres
+```
+
+These tests use manual vectors and never require an OpenAI API key. They test
+real PostgreSQL and pgvector rather than substituting SQLite.
 
 ## Optional live checks
 
@@ -417,8 +545,8 @@ uv run python scripts/inspect_repository.py . --chunks
   their source chunks.
 - **NumPy is limited to vector mathematics.** Raw provider vectors remain
   immutable tuples; cosine similarity converts them to temporary arrays.
-- **Embeddings stay in memory.** Persistence and vector databases follow only
-  after the in-memory retrieval pipeline is understood and verified.
+- **In-memory retrieval remains available.** PostgreSQL is an optional durable
+  path, while the original in-memory pipeline stays useful as a simple baseline.
 - **Raw semantic ranking stays visible.** There is no score threshold, keyword
   boost, reranker, or framework retrieval abstraction in this baseline.
 - **Citations use deterministic source IDs.** The LLM selects `S1`, `S2`, and
@@ -429,6 +557,13 @@ uv run python scripts/inspect_repository.py . --chunks
   and overlapping intervals are not merged yet.
 - **Basic RAG is not an agent.** It performs one retrieval, one context build,
   and one generation request without tools, planning, iteration, or editing.
+- **Domain and ORM models stay separate.** Loading persistence records rebuilds
+  `CodeChunk`, `EmbeddingVector`, and `EmbeddedChunk` objects, so retrieval and
+  RAG do not depend on SQLAlchemy.
+- **Persistence is transaction-controlled by callers.** Low-level operations
+  flush for validation but do not commit repeatedly.
+- **Exact pgvector search comes first.** No HNSW or IVFFlat index is claimed or
+  added before corpus-scale measurements justify approximate retrieval.
 
 ## Roadmap
 
@@ -440,8 +575,8 @@ The full project roadmap is described in the RepoMind engineering brief:
 4. Embeddings (complete)
 5. Semantic search (complete)
 6. Basic RAG (complete)
-7. PostgreSQL + pgvector persistence (next)
-8. Hybrid retrieval
+7. PostgreSQL + pgvector persistence (complete)
+8. Hybrid retrieval (next)
 9. Reranking
 10. Tool system
 11. Handwritten agent loop

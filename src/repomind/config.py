@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     openai_api_key: SecretStr | None = None
     openai_model: str = "gpt-4.1-mini"
     openai_embedding_model: str = "text-embedding-3-small"
-    database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/repomind"
+    database_url: str = "postgresql+psycopg://repomind:repomind@localhost:5432/repomind"
     redis_url: str = "redis://localhost:6379/0"
 
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
