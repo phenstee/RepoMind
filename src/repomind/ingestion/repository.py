@@ -13,6 +13,7 @@ from repomind.ingestion.models import (
     RepositorySnapshot,
     SkippedFile,
     SourceFile,
+    validate_repository_relative_path,
 )
 
 
@@ -66,6 +67,48 @@ def validate_repository_root(root: str | Path) -> Path:
     if not resolved.is_dir():
         raise InvalidRepositoryRootError(f"Repository root is not a directory: {root}")
     return resolved
+
+
+def resolve_repository_path(
+    root: str | Path,
+    path: str | Path,
+    *,
+    allow_root: bool = False,
+) -> Path:
+    """Resolve a safe repository-relative path without following links or junctions.
+
+    The returned path may not exist; callers retain responsibility for applying
+    operation-specific existence and file-type checks.
+    """
+
+    resolved_root = validate_repository_root(root)
+    relative_path = Path(path)
+    if relative_path == Path("."):
+        if not allow_root:
+            raise PathOutsideRepositoryError(
+                "Repository root is not valid for this operation"
+            )
+        return resolved_root
+
+    try:
+        validate_repository_relative_path(relative_path)
+    except ValueError as exc:
+        raise PathOutsideRepositoryError(
+            f"Path must be repository-relative: {path}"
+        ) from exc
+
+    candidate = resolved_root / relative_path
+    if _has_link_or_junction_component(resolved_root, candidate):
+        raise SymlinkSourceFileError(
+            f"Symlinks and junctions are not permitted: {relative_path.as_posix()}"
+        )
+
+    resolved_path = candidate.resolve(strict=False)
+    if not _is_path_within(resolved_root, resolved_path):
+        raise PathOutsideRepositoryError(
+            f"Path is outside the repository root: {relative_path.as_posix()}"
+        )
+    return resolved_path
 
 
 def _relative_path(root: Path, path: Path) -> Path:
@@ -214,20 +257,14 @@ def load_source_file(
     resolved_root = validate_repository_root(root)
     resolved_config = config or IngestionConfig()
     candidate = Path(path).expanduser()
-
-    if not candidate.is_absolute():
-        candidate = resolved_root / candidate
-
-    if _has_link_or_junction_component(resolved_root, candidate):
-        raise SymlinkSourceFileError(
-            f"Symlinks and junctions are not ingested: {candidate}"
-        )
-
-    resolved_path = candidate.resolve(strict=False)
-    if not _is_path_within(resolved_root, resolved_path):
-        raise PathOutsideRepositoryError(
-            f"Source file is outside the repository root: {resolved_path}"
-        )
+    if candidate.is_absolute():
+        try:
+            candidate = candidate.relative_to(resolved_root)
+        except ValueError as exc:
+            raise PathOutsideRepositoryError(
+                f"Source file is outside the repository root: {candidate}"
+            ) from exc
+    resolved_path = resolve_repository_path(resolved_root, candidate)
     if not is_supported_source_file(resolved_path):
         raise UnsupportedSourceFileError(
             f"Unsupported source-file extension: {resolved_path.suffix}"

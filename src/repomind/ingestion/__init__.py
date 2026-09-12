@@ -23,6 +23,7 @@ from repomind.ingestion.repository import (
     find_source_files,
     ingest_repository,
     load_source_file,
+    resolve_repository_path,
     validate_repository_root,
 )
 
@@ -45,6 +46,7 @@ __all__ = [
     "is_supported_source_file",
     "language_for_path",
     "load_source_file",
+    "resolve_repository_path",
     "validate_repository_relative_path",
     "validate_repository_root",
 ]

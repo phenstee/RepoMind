@@ -53,8 +53,12 @@ Fusion (RRF).
 retrieval candidate set to the existing structured-output LLM interface, strictly
 validate a candidate-ID ordering, and preserve original retrieval ranks.
 
-Milestone 10 will begin the read-only tool system. Later milestones will add
-agent behavior, application services, and deployment support.
+**Milestone 10: read-only tool system** is complete. RepoMind now exposes six
+bounded inspection operations through strict Pydantic inputs, structured outputs,
+and a deterministic registry confined to one repository workspace.
+
+Milestone 11 will connect these tools to a handwritten agent loop. The LLM does
+not select or invoke tools yet.
 
 ## Repository ingestion
 
@@ -447,6 +451,78 @@ generation; with it, the path is retrieval → reranking LLM → RAG generation.
 The extra judgment may improve context ordering, but RepoMind does not claim it
 always improves results—evaluation must establish that later.
 
+## Read-only tool system
+
+A tool is an explicit validated Python operation, not an autonomous agent:
+
+```text
+tool name
+    ↓
+Pydantic input validation
+    ↓
+deterministic ToolRegistry dispatch
+    ↓
+safe read-only handler
+    ↓
+structured Pydantic observation
+```
+
+`create_default_tool_registry` builds an isolated registry for one immutable
+`ToolContext`. It provides:
+
+- `read_file`: reads a complete text file or a 1-based inclusive line range;
+  requested end lines beyond EOF are clamped, while a start beyond EOF fails
+  clearly rather than returning an ambiguous range.
+- `list_directory`: lists files, directories, and link entries in deterministic
+  order; recursive traversal does not follow links and prunes common generated
+  directories such as `.git`, `.venv`, and `node_modules`.
+- `search_code`: performs case-insensitive literal substring search by default
+  over supported source files, with optional case-sensitive and scoped searches.
+- `find_symbol`: locates likely Python and JavaScript/TypeScript declarations
+  using conservative regular-expression heuristics. It is not AST resolution
+  and does not fall back to references.
+- `git_status`: returns the branch and structured working-tree changes.
+- `git_diff`: returns a bounded staged or unstaged diff, optionally restricted
+  to one validated repository-relative path.
+
+Every path supplied to a tool is treated as untrusted. Absolute, drive-relative,
+and parent-traversal paths are rejected. Resolution reuses ingestion's containment
+checks, and paths containing symlink or Windows junction components cannot be
+opened or traversed. Directory listings may report a link entry but never follow
+it. Git inspection uses hardcoded argument arrays, an explicit working directory,
+and `--` before the only user-controlled pathspec; it never uses `shell=True`.
+
+`ToolConfig` centrally bounds file reads (1 MiB), directory results (500), source
+matches (50), and diff output (20,000 characters). Directory and search limits
+report `truncated=True`; oversized file reads fail instead of silently truncating.
+Tool outputs contain repository-relative paths rather than machine-specific
+absolute paths and serialize through `model_dump(mode="json")`.
+
+Retrieval and tools intentionally answer different kinds of questions. Semantic,
+BM25, and hybrid retrieval search a previously indexed repository representation
+for conceptually relevant chunks. Live tools inspect the current checkout:
+`search_code` finds exact occurrences such as `RepositoryIngestionError`, while
+`read_file` can show a precise range from `client.py`. Consequently, tools can see
+uncommitted changes that a persisted vector index has not ingested. Tool calls do
+not automatically ingest, embed, update PostgreSQL, or synchronize that index.
+
+Tools are currently invoked directly from Python:
+
+```python
+from repomind.tools import ToolContext, create_default_tool_registry
+
+registry = create_default_tool_registry(ToolContext(repository_root="."))
+status = registry.execute("git_status", {})
+matches = registry.execute(
+    "search_code",
+    {"query": "RepositoryIngestionError", "path": "src"},
+)
+```
+
+The registry has no OpenAI dependency and performs no LLM calls. Milestone 11
+will add the future loop: LLM chooses a tool → registry executes it → structured
+observation returns to the LLM.
+
 ## Repository layout
 
 ```text
@@ -475,16 +551,23 @@ RepoMind/
 │       │   ├── context.py
 │       │   ├── models.py
 │       │   └── pipeline.py
-│       └── retrieval/
+│       ├── retrieval/
+│       │   ├── __init__.py
+│       │   ├── bm25.py
+│       │   ├── embeddings.py
+│       │   ├── hybrid.py
+│       │   ├── models.py
+│       │   ├── reranking.py
+│       │   ├── semantic_search.py
+│       │   ├── similarity.py
+│       │   └── tokenization.py
+│       └── tools/
 │           ├── __init__.py
-│           ├── bm25.py
-│           ├── embeddings.py
-│           ├── hybrid.py
+│           ├── filesystem.py
+│           ├── git.py
 │           ├── models.py
-│           ├── reranking.py
-│           ├── semantic_search.py
-│           ├── similarity.py
-│           └── tokenization.py
+│           ├── registry.py
+│           └── search.py
 ├── scripts/
 │   ├── inspect_repository.py
 │   ├── manual_embedding_check.py
@@ -524,6 +607,12 @@ RepoMind/
 │       │   ├── test_semantic_search.py
 │       │   ├── test_similarity.py
 │       │   └── test_tokenization.py
+│       ├── tools/
+│       │   ├── test_filesystem_tools.py
+│       │   ├── test_git_tools.py
+│       │   ├── test_registry.py
+│       │   ├── test_search_tools.py
+│       │   └── test_tool_models.py
 │       ├── test_config.py
 │       └── test_llm_client.py
 ├── .env.example
@@ -575,6 +664,21 @@ flowchart LR
     Client --> Generation
     Generation --> Validation[Source-ID validation]
     Validation --> Answer[RepositoryAnswer]
+
+    Workspace[Live repository workspace] --> ToolRegistry[Tool Registry]
+    ToolRegistry --> ReadFile[read_file]
+    ToolRegistry --> ListDirectory[list_directory]
+    ToolRegistry --> SearchCode[search_code]
+    ToolRegistry --> FindSymbol[find_symbol]
+    ToolRegistry --> GitStatus[git_status]
+    ToolRegistry --> GitDiff[git_diff]
+    ReadFile --> Observation[Structured observations]
+    ListDirectory --> Observation
+    SearchCode --> Observation
+    FindSymbol --> Observation
+    GitStatus --> Observation
+    GitDiff --> Observation
+    FutureLLM[Future Milestone 11 LLM loop] -. chooses tools .-> ToolRegistry
 ```
 
 `OpenAILLMClient` wraps the official OpenAI SDK. The rest of the codebase
@@ -764,6 +868,18 @@ uv run python scripts/inspect_repository.py . --chunks
   RepoMind retains authority over chunks, paths, line numbers, and identities.
 - **No rerank confidence is invented.** Model ordering is not calibrated, and
   raw semantic, BM25, and RRF scores are deliberately absent from its prompt.
+- **Tool inputs and outputs are owned schemas.** Strict Pydantic inputs reject
+  undeclared arguments before handlers run, while structured outputs are stable
+  JSON-ready observations for the future agent loop.
+- **Live inspection is separate from indexing.** Read-only tools see the current
+  working tree, including uncommitted changes, without mutating or synchronizing
+  persisted retrieval indexes.
+- **Exact search is not retrieval.** `search_code` provides predictable literal
+  matching; BM25 and semantic search remain the indexed relevance mechanisms.
+- **The registry is provider-independent.** It validates and dispatches Python
+  handlers without importing OpenAI or parsing model tool calls.
+- **No broad execution capability exists.** Only fixed read-only Git commands
+  are subprocesses; there are no write, shell, test-running, or editing tools.
 
 ## Roadmap
 
@@ -778,8 +894,8 @@ The full project roadmap is described in the RepoMind engineering brief:
 7. PostgreSQL + pgvector persistence (complete)
 8. BM25 + hybrid retrieval (complete)
 9. LLM-based reranking (complete)
-10. Tool system (next)
-11. Handwritten agent loop
+10. Read-only tool system (complete)
+11. Handwritten agent loop (next)
 12. Read-only software engineering agent
 13. Planning
 14. Controlled code editing
