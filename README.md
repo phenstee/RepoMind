@@ -57,8 +57,13 @@ validate a candidate-ID ordering, and preserve original retrieval ranks.
 bounded inspection operations through strict Pydantic inputs, structured outputs,
 and a deterministic registry confined to one repository workspace.
 
-Milestone 11 will connect these tools to a handwritten agent loop. The LLM does
-not select or invoke tools yet.
+**Milestone 11: handwritten read-only agent loop** is complete. RepoMind now asks
+the existing structured-output LLM for one validated tool-or-final decision,
+executes read-only tools sequentially, records observations, and repeats within
+hard iteration and history limits.
+
+Milestone 12 will introduce controlled write/edit tools and safe command/test
+execution as a separate permission boundary.
 
 ## Repository ingestion
 
@@ -519,9 +524,97 @@ matches = registry.execute(
 )
 ```
 
-The registry has no OpenAI dependency and performs no LLM calls. Milestone 11
-will add the future loop: LLM chooses a tool → registry executes it → structured
-observation returns to the LLM.
+The registry itself has no OpenAI dependency. It can still be invoked directly
+without an LLM; the agent loop composes it with structured generation separately.
+
+## Handwritten read-only agent loop
+
+Milestone 11 implements the agent mechanism directly rather than hiding it behind
+an agent framework:
+
+```text
+user query
+    ↓
+LLM structured decision
+    ↓
+tool action ──→ ToolRegistry ──→ observation ──┐
+    │                                          │
+    └────────────────── LLM again ←────────────┘
+
+final action ──→ user-facing answer
+```
+
+Each `AgentDecision` selects exactly one action. A tool action contains one
+registered `tool_name` and a JSON argument object; a final action contains only
+the final answer. Pydantic rejects missing, contradictory, blank, or additional
+decision fields. The model therefore cannot express an executable action as vague
+prose such as “I will inspect client.py.” It must return data like:
+
+```json
+{
+  "action": "tool",
+  "tool_name": "read_file",
+  "tool_arguments": {
+    "path": "src/repomind/llm/client.py",
+    "start_line": 40,
+    "end_line": 100
+  }
+}
+```
+
+RepoMind—not the model—then validates and executes that call. Tool names,
+descriptions, and argument JSON schemas are generated deterministically from the
+actual `ToolRegistry`; there is no parallel hand-maintained schema list and no
+provider-native function calling.
+
+An `AgentRun` preserves the exact query, terminal status, final answer, immutable
+tuple of `AgentStep` values, iteration count, LLM calls, and registry execution
+attempts. Each tool step contains its structured decision and a JSON-compatible
+`ToolObservation`. No chain-of-thought, scratchpad, hidden reasoning, timestamp,
+or random identifier is requested or stored.
+
+Expected tool failures are observations rather than fatal run errors. For example:
+
+```text
+LLM:  read_file(path="wrong.py")
+Tool: error: file does not exist
+LLM:  search_code(query="OpenAILLMClient")
+Tool: found src/repomind/llm/client.py
+LLM:  read_file(path="src/repomind/llm/client.py")
+```
+
+Unknown tools and invalid arguments follow the same recovery path and never
+bypass the registry. An identical normalized tool call may execute twice; its
+third and later occurrences receive a failure observation instructing the model
+to choose a different action. Normalization uses sorted-key JSON rather than dict
+insertion order or object identity.
+
+`AgentConfig` defaults to eight LLM decisions and 60,000 characters of history.
+When history exceeds that budget, the prompt keeps the most recent complete tool
+interactions that fit and omits older interactions; observations are never cut in
+the middle of their JSON block. System instructions, the exact original query,
+and current registry schemas remain present on every call. Reaching the decision
+limit returns `max_iterations_reached`, never a false successful completion.
+
+Repository content, diffs, and tool observations are explicitly marked as
+untrusted data in the centralized system prompt and history boundaries.
+Instructions found inside them cannot override the user task or agent safety
+rules. This establishes the architectural prompt-injection boundary without
+claiming perfect model-level resistance.
+
+RAG and an agent use different control flows:
+
+```text
+RAG:   question → retrieve fixed context → one generation → answer
+
+Agent: question → decision → live tool → observation → decision → ... → answer
+```
+
+RAG supplies a predetermined retrieved context. The agent can dynamically choose
+what live working-tree evidence to inspect next, recover from failed inspection,
+or answer immediately without tools. The current agent remains strictly read-only
+and does not expose retrieval, databases, file mutation, tests, or arbitrary shell
+commands as tools.
 
 ## Repository layout
 
@@ -529,6 +622,11 @@ observation returns to the LLM.
 RepoMind/
 ├── src/
 │   └── repomind/
+│       ├── agent/
+│       │   ├── __init__.py
+│       │   ├── loop.py
+│       │   ├── models.py
+│       │   └── prompts.py
 │       ├── config.py
 │       ├── db/
 │       │   ├── __init__.py
@@ -570,6 +668,7 @@ RepoMind/
 │           └── search.py
 ├── scripts/
 │   ├── inspect_repository.py
+│   ├── manual_agent_check.py
 │   ├── manual_embedding_check.py
 │   ├── manual_rag_check.py
 │   ├── manual_semantic_search.py
@@ -584,6 +683,10 @@ RepoMind/
 │   │   ├── conftest.py
 │   │   └── test_postgres_persistence.py
 │   └── unit/
+│       ├── agent/
+│       │   ├── test_agent_models.py
+│       │   ├── test_loop.py
+│       │   └── test_prompts.py
 │       ├── db/
 │       │   ├── test_db_models.py
 │       │   ├── test_hashing.py
@@ -678,7 +781,12 @@ flowchart LR
     FindSymbol --> Observation
     GitStatus --> Observation
     GitDiff --> Observation
-    FutureLLM[Future Milestone 11 LLM loop] -. chooses tools .-> ToolRegistry
+    UserTask[User task] --> AgentLoop[Handwritten Agent Loop]
+    Client --> AgentLoop
+    AgentLoop --> Decision[Structured tool or final decision]
+    Decision -->|tool| ToolRegistry
+    Decision -->|final| AgentAnswer[Agent final answer]
+    Observation --> AgentLoop
 ```
 
 `OpenAILLMClient` wraps the official OpenAI SDK. The rest of the codebase
@@ -800,6 +908,17 @@ It embeds at most 10 source chunks, embeds the question once, makes one
 structured generation request, and prints only validated citations. Without an
 API key it exits before ingestion or network activity.
 
+Run one bounded live query through the handwritten read-only agent with:
+
+```powershell
+uv run python scripts/manual_agent_check.py `
+    "Where is async retry behavior implemented?"
+```
+
+The script prints compact tool outcomes and the final run status. It cannot edit
+files, mutate Git, run tests, or execute arbitrary commands. Without an API key it
+exits before constructing the OpenAI client or making a network request.
+
 ## Optional ingestion check
 
 Inspect a repository without using the LLM:
@@ -816,8 +935,8 @@ uv run python scripts/inspect_repository.py . --chunks
 
 ## Design decisions
 
-- **No agent framework yet.** Milestone 1 uses only the official OpenAI SDK. The
-  first agent loop will be handwritten so its mechanics remain visible.
+- **The agent loop is handwritten.** One structured decision, registry execution,
+  observation, and repeat are explicit rather than delegated to a framework.
 - **Provider abstraction stays small.** Normalized response models keep the
   SDK boundary contained and testable.
 - **Secrets are externalized.** All environment configuration flows through
@@ -870,7 +989,7 @@ uv run python scripts/inspect_repository.py . --chunks
   raw semantic, BM25, and RRF scores are deliberately absent from its prompt.
 - **Tool inputs and outputs are owned schemas.** Strict Pydantic inputs reject
   undeclared arguments before handlers run, while structured outputs are stable
-  JSON-ready observations for the future agent loop.
+  JSON-ready observations for direct use by the agent loop.
 - **Live inspection is separate from indexing.** Read-only tools see the current
   working tree, including uncommitted changes, without mutating or synchronizing
   persisted retrieval indexes.
@@ -880,6 +999,18 @@ uv run python scripts/inspect_repository.py . --chunks
   handlers without importing OpenAI or parsing model tool calls.
 - **No broad execution capability exists.** Only fixed read-only Git commands
   are subprocesses; there are no write, shell, test-running, or editing tools.
+- **Structured decisions control execution.** Pydantic invariants permit one tool
+  call or final answer per iteration, with no free-form action parsing.
+- **Tool failures enable self-correction.** Expected registry failures become
+  observations so the model can select a valid alternative on its next decision.
+- **Agent history stores evidence, not reasoning.** Runs preserve decisions and
+  observations without requesting or retaining chain-of-thought.
+- **Provider-native tool calling remains deferred.** The first loop uses the
+  existing structured-output interface so validation and dispatch stay visible.
+- **Finite limits are mandatory.** Eight decisions, bounded recent history, and
+  repeated-call protection prevent an accidental unbounded inspection loop.
+- **The first agent is read-only.** Mutation and command execution require new
+  permission, timeout, resource, and recovery designs in a later milestone.
 
 ## Roadmap
 
@@ -895,10 +1026,10 @@ The full project roadmap is described in the RepoMind engineering brief:
 8. BM25 + hybrid retrieval (complete)
 9. LLM-based reranking (complete)
 10. Read-only tool system (complete)
-11. Handwritten agent loop (next)
-12. Read-only software engineering agent
+11. Handwritten read-only agent loop (complete)
+12. Write/edit tools + controlled command/test execution (next)
 13. Planning
-14. Controlled code editing
+14. Read-only software engineering agent
 15. Test execution and self-correction
 16. Human approval and security
 17. Memory

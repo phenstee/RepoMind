@@ -89,7 +89,7 @@ class ReadFileOutput(BaseModel):
 
 
 class ListDirectoryInput(ToolInput):
-    path: Path = Path(".")
+    path: Path = Field(default_factory=lambda: Path("."))
     recursive: bool = False
 
     @field_validator("path")
@@ -113,7 +113,7 @@ class ListDirectoryOutput(BaseModel):
 
 class SearchCodeInput(ToolInput):
     query: str = Field(min_length=1, max_length=1_000)
-    path: Path = Path(".")
+    path: Path = Field(default_factory=lambda: Path("."))
     max_results: int = Field(default=DEFAULT_MAX_SEARCH_RESULTS, gt=0, strict=True)
     case_sensitive: bool = False
 
@@ -144,7 +144,7 @@ class SearchCodeOutput(BaseModel):
 
 class FindSymbolInput(ToolInput):
     symbol: str = Field(min_length=1, max_length=256)
-    path: Path = Path(".")
+    path: Path = Field(default_factory=lambda: Path("."))
     max_results: int = Field(default=25, gt=0, strict=True)
 
     @field_validator("symbol")
