@@ -30,6 +30,11 @@ def test_tool_context_resolves_and_freezes_repository_root(tmp_path: Path) -> No
         {"max_directory_entries": -1},
         {"max_search_results": True},
         {"max_diff_chars": 1.5},
+        {"max_write_bytes": 0},
+        {"max_replacement_chars": True},
+        {"verification_timeout_seconds": -1},
+        {"max_verification_output_chars": 0},
+        {"max_test_failures": 2.5},
     ],
 )
 def test_tool_config_requires_strict_positive_limits(values: dict[str, object]) -> None:

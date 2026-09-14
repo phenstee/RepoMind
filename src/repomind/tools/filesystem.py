@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 from repomind.ingestion import (
@@ -44,7 +45,7 @@ def _is_link_or_junction(path: Path) -> bool:
         return True
 
 
-def _read_text(path: Path, max_bytes: int) -> str:
+def _read_bounded_bytes(path: Path, max_bytes: int) -> bytes:
     try:
         with path.open("rb") as source:
             data = source.read(max_bytes + 1)
@@ -56,6 +57,10 @@ def _read_text(path: Path, max_bytes: int) -> str:
     if b"\x00" in data:
         raise ToolExecutionError("File appears to contain binary data")
 
+    return data
+
+
+def _decode_text(data: bytes) -> str:
     try:
         return data.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -63,6 +68,12 @@ def _read_text(path: Path, max_bytes: int) -> str:
             return data.decode("cp1252")
         except UnicodeDecodeError as exc:
             raise ToolExecutionError("File could not be decoded as repository text") from exc
+
+
+def _read_text(path: Path, max_bytes: int) -> str:
+    """Read bounded text for existing inspection/search tool internals."""
+
+    return _decode_text(_read_bounded_bytes(path, max_bytes))
 
 
 def read_file(
@@ -80,7 +91,9 @@ def read_file(
     if not path.is_file():
         raise ToolExecutionError(f"Path is not a regular file: {arguments.path.as_posix()}")
 
-    content = _read_text(path, resolved_config.max_file_bytes)
+    data = _read_bounded_bytes(path, resolved_config.max_file_bytes)
+    content = _decode_text(data)
+    sha256 = hashlib.sha256(data).hexdigest()
     lines = content.splitlines(keepends=True)
     total_lines = len(lines)
     if total_lines == 0:
@@ -92,6 +105,7 @@ def read_file(
             end_line=0,
             content="",
             total_lines=0,
+            sha256=sha256,
         )
 
     start_line = arguments.start_line or 1
@@ -108,6 +122,7 @@ def read_file(
         end_line=end_line,
         content="".join(lines[start_line - 1 : end_line]),
         total_lines=total_lines,
+        sha256=sha256,
     )
 
 

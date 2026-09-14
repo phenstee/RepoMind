@@ -1,4 +1,4 @@
-"""Pydantic inputs, outputs, and limits for RepoMind's read-only tools."""
+"""Pydantic inputs, outputs, and hard limits for RepoMind tools."""
 
 from pathlib import Path
 from typing import Literal
@@ -11,12 +11,25 @@ DEFAULT_MAX_TOOL_FILE_BYTES = 1_048_576
 DEFAULT_MAX_DIRECTORY_ENTRIES = 500
 DEFAULT_MAX_SEARCH_RESULTS = 50
 DEFAULT_MAX_DIFF_CHARS = 20_000
+DEFAULT_MAX_WRITE_BYTES = 1_048_576
+DEFAULT_MAX_REPLACEMENT_CHARS = 262_144
+DEFAULT_VERIFICATION_TIMEOUT_SECONDS = 120
+DEFAULT_MAX_VERIFICATION_OUTPUT_CHARS = 20_000
+DEFAULT_MAX_TEST_FAILURES = 10
+DEFAULT_MAX_VERIFICATION_PATHS = 32
 
 
 def _validate_tool_path(path: Path, *, allow_root: bool) -> Path:
     if allow_root and path == Path("."):
         return path
     return validate_repository_relative_path(path)
+
+
+def _validate_verification_path(path: Path, *, allow_root: bool) -> Path:
+    validated = _validate_tool_path(path, allow_root=allow_root)
+    if any(part.startswith("-") for part in validated.parts):
+        raise ValueError("verification paths must not contain option-like components")
+    return validated
 
 
 class ToolConfig(BaseModel):
@@ -36,6 +49,27 @@ class ToolConfig(BaseModel):
         strict=True,
     )
     max_diff_chars: int = Field(default=DEFAULT_MAX_DIFF_CHARS, gt=0, strict=True)
+    max_write_bytes: int = Field(default=DEFAULT_MAX_WRITE_BYTES, gt=0, strict=True)
+    max_replacement_chars: int = Field(
+        default=DEFAULT_MAX_REPLACEMENT_CHARS,
+        gt=0,
+        strict=True,
+    )
+    verification_timeout_seconds: int = Field(
+        default=DEFAULT_VERIFICATION_TIMEOUT_SECONDS,
+        gt=0,
+        strict=True,
+    )
+    max_verification_output_chars: int = Field(
+        default=DEFAULT_MAX_VERIFICATION_OUTPUT_CHARS,
+        gt=0,
+        strict=True,
+    )
+    max_test_failures: int = Field(
+        default=DEFAULT_MAX_TEST_FAILURES,
+        gt=0,
+        strict=True,
+    )
 
 
 class ToolContext(BaseModel):
@@ -86,6 +120,99 @@ class ReadFileOutput(BaseModel):
     end_line: int = Field(ge=0)
     content: str
     total_lines: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class CreateFileInput(ToolInput):
+    path: Path
+    content: str
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, value: Path) -> Path:
+        return _validate_tool_path(value, allow_root=False)
+
+
+class CreateFileOutput(BaseModel):
+    path: Path
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    bytes_written: int = Field(ge=0)
+
+
+class ReplaceTextInput(ToolInput):
+    path: Path
+    old_text: str = Field(min_length=1)
+    new_text: str
+    expected_sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, value: Path) -> Path:
+        return _validate_tool_path(value, allow_root=False)
+
+    @field_validator("expected_sha256")
+    @classmethod
+    def _normalize_hash(cls, value: str) -> str:
+        return value.lower()
+
+
+class ReplaceTextOutput(BaseModel):
+    path: Path
+    replacements: int = Field(ge=1)
+    before_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    after_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    bytes_before: int = Field(ge=0)
+    bytes_after: int = Field(ge=0)
+
+
+class RunTestsInput(ToolInput):
+    paths: list[Path] = Field(
+        default_factory=lambda: [Path("tests")],
+        min_length=1,
+        max_length=DEFAULT_MAX_VERIFICATION_PATHS,
+    )
+    max_failures: int = Field(default=1, gt=0, le=DEFAULT_MAX_TEST_FAILURES, strict=True)
+    timeout_seconds: int | None = Field(default=None, gt=0, strict=True)
+
+    @field_validator("paths")
+    @classmethod
+    def _validate_paths(cls, values: list[Path]) -> list[Path]:
+        return [
+            _validate_verification_path(value, allow_root=False) for value in values
+        ]
+
+
+class RunRuffInput(ToolInput):
+    paths: list[Path] = Field(
+        default_factory=lambda: [Path(".")],
+        min_length=1,
+        max_length=DEFAULT_MAX_VERIFICATION_PATHS,
+    )
+    timeout_seconds: int | None = Field(default=None, gt=0, strict=True)
+
+    @field_validator("paths")
+    @classmethod
+    def _validate_paths(cls, values: list[Path]) -> list[Path]:
+        return [_validate_verification_path(value, allow_root=True) for value in values]
+
+
+class VerificationOutput(BaseModel):
+    paths: list[Path]
+    exit_code: int | None
+    passed: bool
+    stdout: str
+    stderr: str
+    truncated: bool
+    timed_out: bool
+    duration_seconds: float = Field(ge=0)
+
+
+class RunTestsOutput(VerificationOutput):
+    """Structured outcome from the fixed pytest verifier."""
+
+
+class RunRuffOutput(VerificationOutput):
+    """Structured outcome from the fixed Ruff verifier."""
 
 
 class ListDirectoryInput(ToolInput):

@@ -1,5 +1,6 @@
 """Tests for bounded repository filesystem inspection."""
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ def test_read_file_preserves_unicode_crlf_and_full_range(tmp_path: Path) -> None
     assert output.content == content
     assert (output.start_line, output.end_line, output.total_lines) == (1, 2, 2)
     assert output.model_dump(mode="json")["path"] == "sample.py"
+    assert output.sha256 == hashlib.sha256(content.encode()).hexdigest()
 
 
 def test_read_file_returns_bounded_range_and_clamps_end_to_eof(tmp_path: Path) -> None:
@@ -38,6 +40,7 @@ def test_read_file_returns_bounded_range_and_clamps_end_to_eof(tmp_path: Path) -
     assert output.content == "two\nthree"
     assert (output.start_line, output.end_line) == (2, 3)
     assert (output.requested_start_line, output.requested_end_line) == (2, 99)
+    assert output.sha256 == hashlib.sha256(b"one\ntwo\nthree").hexdigest()
 
 
 def test_read_file_handles_empty_file(tmp_path: Path) -> None:

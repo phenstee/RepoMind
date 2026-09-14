@@ -1,4 +1,4 @@
-"""Inspectable state models for RepoMind's handwritten read-only agent."""
+"""Inspectable state models for RepoMind's handwritten agents."""
 
 from enum import StrEnum
 from typing import Any, Literal
@@ -13,6 +13,12 @@ class AgentConfig(BaseModel):
 
     max_iterations: int = Field(default=8, gt=0, strict=True)
     max_history_chars: int = Field(default=60_000, gt=0, strict=True)
+
+
+class EditingAgentConfig(AgentConfig):
+    """Finite run limits including a successful-mutation budget."""
+
+    max_mutations_per_run: int = Field(default=8, gt=0, strict=True)
 
 
 class AgentDecision(BaseModel):

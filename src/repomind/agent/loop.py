@@ -1,4 +1,4 @@
-"""Explicit finite decision/tool/observation loop for read-only analysis."""
+"""Explicit finite decision/tool/observation loop for repository agents."""
 
 import json
 from collections.abc import Mapping
@@ -12,9 +12,14 @@ from repomind.agent.models import (
     AgentRun,
     AgentRunStatus,
     AgentStep,
+    EditingAgentConfig,
     ToolObservation,
 )
-from repomind.agent.prompts import READ_ONLY_AGENT_SYSTEM_PROMPT, build_agent_prompt
+from repomind.agent.prompts import (
+    EDITING_AGENT_SYSTEM_PROMPT,
+    READ_ONLY_AGENT_SYSTEM_PROMPT,
+    build_agent_prompt,
+)
 from repomind.llm import LLMError
 from repomind.tools import ToolError, ToolRegistry
 
@@ -76,34 +81,37 @@ def _execute_tool(
     )
 
 
-def run_read_only_agent(
+def _run_agent(
     query: str,
     llm_provider: StructuredAgentLLM,
     tool_registry: ToolRegistry,
     *,
-    config: AgentConfig | None = None,
+    config: AgentConfig,
+    system_prompt: str,
+    mutation_tool_names: frozenset[str] = frozenset(),
+    max_mutations: int | None = None,
 ) -> AgentRun:
-    """Run sequential decisions until a final answer or hard iteration limit."""
+    """Run shared sequential loop mechanics with application-chosen capabilities."""
 
     if not isinstance(query, str) or not query.strip():
         raise AgentError("query must not be empty or whitespace-only")
-    resolved_config = config or AgentConfig()
     steps: list[AgentStep] = []
     tool_call_counts: dict[str, int] = {}
     tool_calls = 0
+    successful_mutations = 0
 
-    for iteration in range(1, resolved_config.max_iterations + 1):
+    for iteration in range(1, config.max_iterations + 1):
         prompt = build_agent_prompt(
             query,
             tool_registry,
             steps,
-            max_history_chars=resolved_config.max_history_chars,
+            max_history_chars=config.max_history_chars,
         )
         try:
             decision = llm_provider.generate_structured(
                 prompt,
                 AgentDecision,
-                system_prompt=READ_ONLY_AGENT_SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 temperature=0.0,
             )
         except (LLMError, ValidationError) as exc:
@@ -128,7 +136,19 @@ def run_read_only_agent(
             raise AgentError("Validated tool decision is missing tool fields")
         identity = _tool_call_identity(decision.tool_name, decision.tool_arguments)
         prior_executions = tool_call_counts.get(identity, 0)
-        if prior_executions >= MAX_IDENTICAL_TOOL_EXECUTIONS:
+        is_mutation = decision.tool_name in mutation_tool_names
+        if (
+            is_mutation
+            and max_mutations is not None
+            and successful_mutations >= max_mutations
+        ):
+            observation = ToolObservation(
+                tool_name=decision.tool_name,
+                arguments=decision.tool_arguments,
+                success=False,
+                error="Successful mutation budget exhausted; do not modify another file.",
+            )
+        elif prior_executions >= MAX_IDENTICAL_TOOL_EXECUTIONS:
             observation = ToolObservation(
                 tool_name=decision.tool_name,
                 arguments=decision.tool_arguments,
@@ -139,6 +159,8 @@ def run_read_only_agent(
             tool_call_counts[identity] = prior_executions + 1
             tool_calls += 1
             observation = _execute_tool(tool_registry, decision)
+            if is_mutation and observation.success:
+                successful_mutations += 1
         steps.append(
             AgentStep(
                 iteration=iteration,
@@ -151,7 +173,46 @@ def run_read_only_agent(
         query=query,
         status=AgentRunStatus.MAX_ITERATIONS,
         steps=tuple(steps),
-        iterations=resolved_config.max_iterations,
-        llm_calls=resolved_config.max_iterations,
+        iterations=config.max_iterations,
+        llm_calls=config.max_iterations,
         tool_calls=tool_calls,
+    )
+
+
+def run_read_only_agent(
+    query: str,
+    llm_provider: StructuredAgentLLM,
+    tool_registry: ToolRegistry,
+    *,
+    config: AgentConfig | None = None,
+) -> AgentRun:
+    """Run with caller-supplied capabilities under the read-only agent contract."""
+
+    return _run_agent(
+        query,
+        llm_provider,
+        tool_registry,
+        config=config or AgentConfig(),
+        system_prompt=READ_ONLY_AGENT_SYSTEM_PROMPT,
+    )
+
+
+def run_editing_agent(
+    query: str,
+    llm_provider: StructuredAgentLLM,
+    tool_registry: ToolRegistry,
+    *,
+    config: EditingAgentConfig | None = None,
+) -> AgentRun:
+    """Run an explicitly provisioned editing registry with a mutation budget."""
+
+    resolved_config = config or EditingAgentConfig()
+    return _run_agent(
+        query,
+        llm_provider,
+        tool_registry,
+        config=resolved_config,
+        system_prompt=EDITING_AGENT_SYSTEM_PROMPT,
+        mutation_tool_names=frozenset({"create_file", "replace_text"}),
+        max_mutations=resolved_config.max_mutations_per_run,
     )

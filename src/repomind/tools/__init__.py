@@ -1,10 +1,13 @@
-"""Safe read-only tools for direct inspection of a repository workspace."""
+"""Explicit read-only and controlled-editing repository tool registries."""
 
 from functools import partial
 
+from repomind.tools.editing import create_file, replace_text
 from repomind.tools.filesystem import list_directory, read_file
 from repomind.tools.git import git_diff, git_status
 from repomind.tools.models import (
+    CreateFileInput,
+    CreateFileOutput,
     DirectoryEntry,
     FindSymbolInput,
     FindSymbolOutput,
@@ -17,6 +20,12 @@ from repomind.tools.models import (
     ListDirectoryOutput,
     ReadFileInput,
     ReadFileOutput,
+    ReplaceTextInput,
+    ReplaceTextOutput,
+    RunRuffInput,
+    RunRuffOutput,
+    RunTestsInput,
+    RunTestsOutput,
     SearchCodeInput,
     SearchCodeMatch,
     SearchCodeOutput,
@@ -33,6 +42,7 @@ from repomind.tools.registry import (
     ToolValidationError,
 )
 from repomind.tools.search import find_symbol, search_code
+from repomind.tools.verification import run_ruff, run_tests
 
 
 def create_default_tool_registry(
@@ -101,7 +111,60 @@ def create_default_tool_registry(
     return registry
 
 
+def create_editing_tool_registry(
+    context: ToolContext,
+    *,
+    config: ToolConfig | None = None,
+) -> ToolRegistry:
+    """Explicitly opt into precise mutation and fixed local verification tools."""
+
+    resolved_config = config or ToolConfig()
+    registry = create_default_tool_registry(context, config=resolved_config)
+    registry.register(
+        ToolDefinition(
+            name="create_file",
+            description="Create one bounded UTF-8 file in an existing repository directory.",
+            input_model=CreateFileInput,
+            output_model=CreateFileOutput,
+            handler=partial(create_file, context, config=resolved_config),
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="replace_text",
+            description=(
+                "Replace one exact literal occurrence in a repository text file using "
+                "an expected SHA-256 precondition."
+            ),
+            input_model=ReplaceTextInput,
+            output_model=ReplaceTextOutput,
+            handler=partial(replace_text, context, config=resolved_config),
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="run_tests",
+            description="Run fixed, bounded pytest verification on validated test paths.",
+            input_model=RunTestsInput,
+            output_model=RunTestsOutput,
+            handler=partial(run_tests, context, config=resolved_config),
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="run_ruff",
+            description="Run fixed, bounded Ruff checks on validated repository paths.",
+            input_model=RunRuffInput,
+            output_model=RunRuffOutput,
+            handler=partial(run_ruff, context, config=resolved_config),
+        )
+    )
+    return registry
+
+
 __all__ = [
+    "CreateFileInput",
+    "CreateFileOutput",
     "DirectoryEntry",
     "FindSymbolInput",
     "FindSymbolOutput",
@@ -114,6 +177,12 @@ __all__ = [
     "ListDirectoryOutput",
     "ReadFileInput",
     "ReadFileOutput",
+    "ReplaceTextInput",
+    "ReplaceTextOutput",
+    "RunRuffInput",
+    "RunRuffOutput",
+    "RunTestsInput",
+    "RunTestsOutput",
     "SearchCodeInput",
     "SearchCodeMatch",
     "SearchCodeOutput",
@@ -127,10 +196,15 @@ __all__ = [
     "ToolRegistry",
     "ToolValidationError",
     "create_default_tool_registry",
+    "create_editing_tool_registry",
+    "create_file",
     "find_symbol",
     "git_diff",
     "git_status",
     "list_directory",
     "read_file",
+    "replace_text",
+    "run_ruff",
+    "run_tests",
     "search_code",
 ]

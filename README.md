@@ -62,8 +62,10 @@ the existing structured-output LLM for one validated tool-or-final decision,
 executes read-only tools sequentially, records observations, and repeats within
 hard iteration and history limits.
 
-Milestone 12 will introduce controlled write/edit tools and safe command/test
-execution as a separate permission boundary.
+**Milestone 12: controlled editing and safe verification** is complete. An
+application can now explicitly opt into precise file creation/replacement and
+fixed pytest/Ruff checks while the default registry and read-only agent remain
+strictly read-only.
 
 ## Repository ingestion
 
@@ -497,11 +499,13 @@ opened or traversed. Directory listings may report a link entry but never follow
 it. Git inspection uses hardcoded argument arrays, an explicit working directory,
 and `--` before the only user-controlled pathspec; it never uses `shell=True`.
 
-`ToolConfig` centrally bounds file reads (1 MiB), directory results (500), source
-matches (50), and diff output (20,000 characters). Directory and search limits
-report `truncated=True`; oversized file reads fail instead of silently truncating.
-Tool outputs contain repository-relative paths rather than machine-specific
-absolute paths and serialize through `model_dump(mode="json")`.
+`ToolConfig` centrally bounds file reads and writes (1 MiB), replacement text,
+directory results (500), source matches (50), diff output, verification output,
+test failures, and verification time. Directory, search, diff, and subprocess
+limits report truncation where applicable; oversized reads and writes fail
+instead of silently truncating. Tool outputs contain repository-relative paths
+rather than machine-specific absolute paths and serialize through
+`model_dump(mode="json")`.
 
 Retrieval and tools intentionally answer different kinds of questions. Semantic,
 BM25, and hybrid retrieval search a previously indexed repository representation
@@ -612,9 +616,88 @@ Agent: question → decision → live tool → observation → decision → ... 
 
 RAG supplies a predetermined retrieved context. The agent can dynamically choose
 what live working-tree evidence to inspect next, recover from failed inspection,
-or answer immediately without tools. The current agent remains strictly read-only
-and does not expose retrieval, databases, file mutation, tests, or arbitrary shell
-commands as tools.
+or answer immediately without tools. `run_read_only_agent` and the default
+registry remain strictly read-only and do not expose retrieval, databases, file
+mutation, tests, or arbitrary shell commands as tools.
+
+## Controlled editing and safe verification
+
+Editing is a separate, explicit application capability:
+
+```text
+                   User coding task
+                          |
+                     Agent loop
+                          |
+                 inspect repository
+                          |
+                precise controlled edit
+                          |
+                      git_diff
+                          |
+                 run_tests / run_ruff
+                          |
+                     observation
+                          |
+                 correct if necessary
+                          |
+                       final
+```
+
+`create_default_tool_registry(...)` remains the six-tool read-only default: it
+can inspect files, search source, and inspect Git, but cannot modify files or run
+checks. `create_editing_tool_registry(...)` must be selected deliberately. It
+contains the read-only tools plus exactly:
+
+- `create_file`, which writes bounded UTF-8 content only when the parent already
+  exists and the target does not;
+- `replace_text`, which replaces exactly one literal occurrence and requires the
+  SHA-256 returned by `read_file`;
+- `run_tests`, a fixed `python -m pytest` invocation over validated test paths;
+- `run_ruff`, a fixed `python -m ruff check` invocation over validated paths.
+
+There is still no arbitrary shell, command argument surface, auto-fix, delete,
+rename, Git mutation, package installation, or network tool. Capabilities and
+limits are supplied by the application, not accepted as LLM tool arguments.
+
+Optimistic concurrency makes an observed file state an edit precondition:
+
+```text
+read file -> receive hash A -> request edit with hash A -> recheck -> mutate
+                                                       |
+                              different current hash --+-> reject and re-read
+```
+
+Hashes cover the current file bytes even when `read_file` returns only a line
+range. `replace_text` preserves the existing UTF-8/UTF-8-BOM or CP1252 encoding
+and exact bytes outside the literal replacement, including LF or CRLF newlines.
+Both mutation tools prepare complete temporary data in the target directory and
+publish it atomically; `create_file` also retains no-overwrite semantics.
+
+Verification uses subprocess argument arrays with `shell=False`, an application
+timeout ceiling, and bounded stdout/stderr. A check that runs and fails returns a
+normal structured result with `passed=false`, so the loop can perform:
+
+```text
+edit -> pytest fails -> failure observation -> corrective edit -> pytest passes
+```
+
+Startup failures remain tool errors, while timeouts are structured failed
+results. The subprocess inherits the parent environment for ordinary local test
+execution, but no tool can set environment variables and environment contents
+are never returned. Failed tests do not roll back a valid edit automatically;
+the agent observes and corrects it explicitly.
+
+`run_editing_agent(...)` reuses the Milestone 11 loop and still permits one tool
+action or one final action per decision. Its prompt treats source, diffs, test
+output, lint output, and observations as untrusted data. Successful mutations
+are bounded separately from total decisions by `EditingAgentConfig`. The caller
+must supply an editing-capable registry; the agent never constructs or escalates
+capabilities itself.
+
+Live inspection sees edits immediately, but existing persisted semantic/BM25
+representations are not automatically re-indexed. Retrieval may therefore be
+stale until the caller performs an explicit re-index.
 
 ## Repository layout
 
@@ -661,14 +744,17 @@ RepoMind/
 │       │   └── tokenization.py
 │       └── tools/
 │           ├── __init__.py
+│           ├── editing.py
 │           ├── filesystem.py
 │           ├── git.py
 │           ├── models.py
 │           ├── registry.py
-│           └── search.py
+│           ├── search.py
+│           └── verification.py
 ├── scripts/
 │   ├── inspect_repository.py
 │   ├── manual_agent_check.py
+│   ├── manual_editing_agent_check.py
 │   ├── manual_embedding_check.py
 │   ├── manual_rag_check.py
 │   ├── manual_semantic_search.py
@@ -685,6 +771,7 @@ RepoMind/
 │   └── unit/
 │       ├── agent/
 │       │   ├── test_agent_models.py
+│       │   ├── test_editing_loop.py
 │       │   ├── test_loop.py
 │       │   └── test_prompts.py
 │       ├── db/
@@ -711,11 +798,14 @@ RepoMind/
 │       │   ├── test_similarity.py
 │       │   └── test_tokenization.py
 │       ├── tools/
+│       │   ├── test_editing_registry.py
+│       │   ├── test_editing_tools.py
 │       │   ├── test_filesystem_tools.py
 │       │   ├── test_git_tools.py
 │       │   ├── test_registry.py
 │       │   ├── test_search_tools.py
-│       │   └── test_tool_models.py
+│       │   ├── test_tool_models.py
+│       │   └── test_verification_tools.py
 │       ├── test_config.py
 │       └── test_llm_client.py
 ├── .env.example
@@ -781,6 +871,16 @@ flowchart LR
     FindSymbol --> Observation
     GitStatus --> Observation
     GitDiff --> Observation
+    EditingMode[Explicit editing opt-in] --> EditingRegistry[Editing Registry]
+    EditingRegistry --> ToolRegistry
+    EditingRegistry --> CreateFile[create_file]
+    EditingRegistry --> ReplaceText[replace_text]
+    EditingRegistry --> RunTests[run_tests]
+    EditingRegistry --> RunRuff[run_ruff]
+    CreateFile --> Observation
+    ReplaceText --> Observation
+    RunTests --> Observation
+    RunRuff --> Observation
     UserTask[User task] --> AgentLoop[Handwritten Agent Loop]
     Client --> AgentLoop
     AgentLoop --> Decision[Structured tool or final decision]
@@ -919,6 +1019,19 @@ The script prints compact tool outcomes and the final run status. It cannot edit
 files, mutate Git, run tests, or execute arbitrary commands. Without an API key it
 exits before constructing the OpenAI client or making a network request.
 
+The editing demo requires an explicit repository root and interactive
+confirmation. Use only a disposable or version-controlled test repository:
+
+```powershell
+uv run python scripts/manual_editing_agent_check.py `
+    "Add a short docstring to foo()" --root path/to/test/repository
+```
+
+It prints the selected root and capability boundary before asking `Continue?
+[y/N]`. Without an API key it exits before confirmation, mutation, or network
+access. The demo can create/replace files and run fixed checks, but still cannot
+run arbitrary shell commands or mutate Git.
+
 ## Optional ingestion check
 
 Inspect a repository without using the LLM:
@@ -997,8 +1110,9 @@ uv run python scripts/inspect_repository.py . --chunks
   matching; BM25 and semantic search remain the indexed relevance mechanisms.
 - **The registry is provider-independent.** It validates and dispatches Python
   handlers without importing OpenAI or parsing model tool calls.
-- **No broad execution capability exists.** Only fixed read-only Git commands
-  are subprocesses; there are no write, shell, test-running, or editing tools.
+- **No broad execution capability exists.** Git inspection and pytest/Ruff
+  verification use fixed argument arrays; no arbitrary executable, arguments,
+  environment overrides, or shell command can be supplied through a tool.
 - **Structured decisions control execution.** Pydantic invariants permit one tool
   call or final answer per iteration, with no free-form action parsing.
 - **Tool failures enable self-correction.** Expected registry failures become
@@ -1009,8 +1123,18 @@ uv run python scripts/inspect_repository.py . --chunks
   existing structured-output interface so validation and dispatch stay visible.
 - **Finite limits are mandatory.** Eight decisions, bounded recent history, and
   repeated-call protection prevent an accidental unbounded inspection loop.
-- **The first agent is read-only.** Mutation and command execution require new
-  permission, timeout, resource, and recovery designs in a later milestone.
+- **Read-only remains the default.** Mutation and local verification require the
+  separate editing registry and editing-agent wrapper chosen by the application.
+- **Replacement is narrower than overwrite.** An exact one-occurrence literal
+  replacement plus an expected SHA-256 reduces ambiguous and stale edits.
+- **Writes are prepared atomically.** A completed same-directory temporary file
+  is published only after all encoding and size validation succeeds.
+- **Failed checks are observations.** They remain available for explicit agent
+  correction and do not silently roll back a successfully applied edit.
+- **Git publication stays human-controlled.** No add, commit, push, reset,
+  checkout, restore, or clean capability is registered.
+- **Indexes can be stale after editing.** Live filesystem tools see changes at
+  once, but persisted retrieval data needs a separate explicit re-index.
 
 ## Roadmap
 
@@ -1027,20 +1151,5 @@ The full project roadmap is described in the RepoMind engineering brief:
 9. LLM-based reranking (complete)
 10. Read-only tool system (complete)
 11. Handwritten read-only agent loop (complete)
-12. Write/edit tools + controlled command/test execution (next)
-13. Planning
-14. Read-only software engineering agent
-15. Test execution and self-correction
-16. Human approval and security
-17. Memory
-18. Multi-agent architecture
-19. MCP
-20. Evaluations
-21. Observability
-22. FastAPI backend
-23. Streaming
-24. Next.js frontend
-25. Redis + background workers
-26. Docker
-27. CI
-28. Optional agent framework comparison
+12. Controlled editing + safe verification (complete)
+13. Agent coding workflow / task completion (next)

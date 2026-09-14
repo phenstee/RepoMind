@@ -9,6 +9,7 @@ from repomind.agent import (
     AgentRun,
     AgentRunStatus,
     AgentStep,
+    EditingAgentConfig,
     ToolObservation,
 )
 
@@ -57,6 +58,12 @@ def test_agent_decision_accepts_exactly_one_tool_or_final_action() -> None:
 def test_agent_config_requires_strict_positive_limits(values: dict[str, object]) -> None:
     with pytest.raises(ValidationError):
         AgentConfig(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("value", [0, -1, True, 1.5])
+def test_editing_agent_config_requires_positive_mutation_limit(value: object) -> None:
+    with pytest.raises(ValidationError):
+        EditingAgentConfig(max_mutations_per_run=value)  # type: ignore[arg-type]
 
 
 def test_tool_observation_enforces_success_and_failure_shapes() -> None:
