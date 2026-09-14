@@ -1,5 +1,6 @@
 """Integration tests requiring real PostgreSQL with the pgvector extension."""
 
+from collections.abc import Sequence
 from pathlib import Path
 from uuid import uuid4
 
@@ -25,11 +26,15 @@ from repomind.db import (
 )
 from repomind.db.models import CodeChunkRecord, RepositoryFileRecord, RepositoryRecord
 from repomind.ingestion import CodeChunk, RepositorySnapshot, SourceFile
-from repomind.rag import build_repository_context
+from repomind.rag import (
+    answer_repository_question_with_retriever,
+    build_repository_context,
+)
 from repomind.retrieval import (
     EmbeddedChunk,
     EmbeddingVector,
     LLMReranker,
+    RankedChunk,
     rank_by_similarity,
 )
 
@@ -109,6 +114,30 @@ class _FakeRerankLLM:
     ) -> BaseModel:
         self.prompts.append(prompt)
         return response_model(ranked_candidate_ids=self.candidate_ids)
+
+
+class _FakeAnswerLLM:
+    def generate_structured(
+        self,
+        prompt: str,
+        response_model: type[BaseModel],
+        *,
+        system_prompt: str | None = None,
+        temperature: float | None = None,
+    ) -> BaseModel:
+        return response_model(
+            answer="The retry implementation is in the LLM client.",
+            source_ids=["S1"],
+            insufficient_evidence=False,
+        )
+
+
+class _StaticRetriever:
+    def __init__(self, results: Sequence[RankedChunk]) -> None:
+        self.results = results
+
+    def __call__(self, query: str, *, top_k: int) -> Sequence[RankedChunk]:
+        return self.results[:top_k]
 
 
 def test_migration_is_at_head_and_vector_extension_exists(
@@ -593,3 +622,10 @@ def test_postgres_hybrid_results_are_reranked_as_domain_chunks(
     assert "src/llm/client.py" in llm.prompts[0]
     context = build_repository_context(reranked)
     assert context.sources[0].chunk.relative_path.as_posix() == "src/llm/client.py"
+    answer = answer_repository_question_with_retriever(
+        "Where is retry behavior for failed OpenAI requests implemented?",
+        _StaticRetriever(reranked),
+        _FakeAnswerLLM(),
+    )
+    assert answer.citations[0].relative_path == Path("src/llm/client.py")
+    assert answer.citations[0].start_line == 1

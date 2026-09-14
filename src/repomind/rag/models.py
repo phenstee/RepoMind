@@ -8,7 +8,7 @@ from repomind.ingestion import CodeChunk, validate_repository_relative_path
 
 
 class RAGConfig(BaseModel):
-    """Limits for semantic retrieval and deterministic context construction."""
+    """Limits for ranked retrieval and deterministic context construction."""
 
     top_k: int = Field(default=5, gt=0, strict=True)
     max_context_chars: int = Field(default=20_000, gt=0, strict=True)

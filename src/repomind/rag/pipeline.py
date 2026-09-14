@@ -13,7 +13,12 @@ from repomind.rag.models import (
     RepositoryAnswer,
     SourceCitation,
 )
-from repomind.retrieval import EmbeddedChunk, EmbeddingProvider, semantic_search
+from repomind.retrieval import (
+    EmbeddedChunk,
+    EmbeddingProvider,
+    RankedChunk,
+    semantic_search,
+)
 
 StructuredModelT = TypeVar("StructuredModelT", bound=BaseModel)
 
@@ -45,6 +50,18 @@ class StructuredLLMProvider(Protocol):
         temperature: float | None = None,
     ) -> StructuredModelT:
         """Generate and validate a structured model response."""
+
+
+class Retriever(Protocol):
+    """Small callable retrieval boundary consumed by repository RAG."""
+
+    def __call__(
+        self,
+        query: str,
+        *,
+        top_k: int,
+    ) -> Sequence[RankedChunk]:
+        """Return domain-ranked chunks for an exact query."""
 
 
 def _build_generation_prompt(question: str, context: BuiltRepositoryContext) -> str:
@@ -94,6 +111,51 @@ def _map_answer(
     )
 
 
+def _answer_from_ranked_chunks(
+    question: str,
+    results: Sequence[RankedChunk],
+    llm_client: StructuredLLMProvider,
+    config: RAGConfig,
+) -> RepositoryAnswer:
+    if not results:
+        return RepositoryAnswer(
+            answer=_NO_EVIDENCE_ANSWER,
+            citations=[],
+            insufficient_evidence=True,
+        )
+
+    context = build_repository_context(
+        results,
+        max_context_chars=config.max_context_chars,
+    )
+    response = llm_client.generate_structured(
+        _build_generation_prompt(question, context),
+        GroundedLLMResponse,
+        system_prompt=RAG_SYSTEM_PROMPT,
+        temperature=0.0,
+    )
+    if not isinstance(response, GroundedLLMResponse):
+        raise RAGError("Structured LLM provider returned an unexpected response model")
+    return _map_answer(response, context)
+
+
+def answer_repository_question_with_retriever(
+    question: str,
+    retriever: Retriever,
+    llm_client: StructuredLLMProvider,
+    *,
+    config: RAGConfig | None = None,
+) -> RepositoryAnswer:
+    """Use an injected retriever, generate once, and map validated citations."""
+
+    if not isinstance(question, str) or not question.strip():
+        raise RAGError("question must not be empty or whitespace-only")
+
+    rag_config = config or RAGConfig()
+    results = retriever(question, top_k=rag_config.top_k)
+    return _answer_from_ranked_chunks(question, results, llm_client, rag_config)
+
+
 def answer_repository_question(
     question: str,
     embedded_chunks: Sequence[EmbeddedChunk],
@@ -102,7 +164,7 @@ def answer_repository_question(
     *,
     config: RAGConfig | None = None,
 ) -> RepositoryAnswer:
-    """Retrieve evidence once, generate once, and map validated citations."""
+    """Preserve the original semantic-only repository RAG baseline."""
 
     if not isinstance(question, str) or not question.strip():
         raise RAGError("question must not be empty or whitespace-only")
@@ -114,23 +176,9 @@ def answer_repository_question(
         embedding_provider,
         top_k=rag_config.top_k,
     )
-    if not results:
-        return RepositoryAnswer(
-            answer=_NO_EVIDENCE_ANSWER,
-            citations=[],
-            insufficient_evidence=True,
-        )
-
-    context = build_repository_context(
+    return _answer_from_ranked_chunks(
+        question,
         results,
-        max_context_chars=rag_config.max_context_chars,
+        llm_client,
+        rag_config,
     )
-    response = llm_client.generate_structured(
-        _build_generation_prompt(question, context),
-        GroundedLLMResponse,
-        system_prompt=RAG_SYSTEM_PROMPT,
-        temperature=0.0,
-    )
-    if not isinstance(response, GroundedLLMResponse):
-        raise RAGError("Structured LLM provider returned an unexpected response model")
-    return _map_answer(response, context)

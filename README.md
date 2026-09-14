@@ -72,6 +72,11 @@ now performs clean-worktree preflight, revision-aware required verification, a
 final Git review, and deterministic completion evaluation around the existing
 editing agent. An LLM final response is only a request to complete.
 
+**Milestone 13.5: RAG retrieval integration hardening** is complete. The public
+repository-question pipeline can now consume an injected semantic, hybrid, or
+hybrid-plus-reranking path through the existing ranked-chunk boundary while the
+original semantic-only API remains the default baseline.
+
 ## Repository ingestion
 
 `repomind.ingestion` traverses a local repository, skips generated or ignored
@@ -202,24 +207,44 @@ or hybrid scoring internally, rerank results, or use a vector database.
 
 ## Basic repository RAG
 
-Retrieval-Augmented Generation keeps three responsibilities visible:
+Retrieval-Augmented Generation keeps retrieval strategy separate from context
+construction and generation:
 
 ```text
 Question
-    ↓
-RETRIEVAL: find relevant repository chunks
-    ↓
-AUGMENTATION: build bounded context from those chunks
-    ↓
-GENERATION: produce a structured answer grounded in that context
-    ↓
-validate source IDs and map them to real file/line citations
+    |
+Configurable Retriever
+    |-- semantic
+    `-- hybrid (semantic + BM25 + RRF)
+              |
+       optional reranker
+              |
+         RankedChunk[]
+              |
+       Context Builder
+              |
+   Structured Generation
+              |
+      Citation Validation
+              |
+      RepositoryAnswer
 ```
 
-`answer_repository_question` reuses semantic search rather than duplicating
-ranking logic. The exact valid question is embedded once, up to `top_k` ranked
-chunks are considered, and their cosine scores are not shown to the LLM because
-similarity is not a calibrated confidence measure.
+`answer_repository_question` preserves the original in-memory semantic path. It
+reuses semantic search rather than duplicating ranking logic: the exact valid
+question is embedded once, up to `top_k` ranked chunks are considered, and their
+cosine scores are not shown to the LLM because similarity is not a calibrated
+confidence measure.
+
+`answer_repository_question_with_retriever` is the configurable high-level
+entry point. Its injected callable `Retriever` receives the exact question and
+`top_k`. It returns any sequence satisfying the existing `RankedChunk` contract.
+A caller can therefore use semantic search, hybrid search, or hybrid search
+followed by the bounded reranker without moving ranking logic into RAG. The
+retriever also provides a clean boundary for persisted PostgreSQL/pgvector
+hybrid results after they have been reconstructed as domain chunks; ORM objects
+never enter context construction or generation. Reranking remains optional and
+no retrieval configuration is selected as universally best before evaluation.
 
 The context builder assigns deterministic IDs `S1`, `S2`, and so on in
 retrieval order. Each block includes the existing relative path, line range,
@@ -242,8 +267,9 @@ numbers. Empty retrieval returns a deterministic insufficient-evidence answer
 without calling the LLM.
 
 The original semantic-only RAG route remains available as a baseline. The
-context builder also accepts hybrid-ranked chunks through its small `chunk` and
-`rank` contract; it does not know about BM25 or RRF internals.
+context builder accepts semantic, hybrid, and reranked chunks through the same
+small `chunk` and `rank` contract; it does not know about cosine scores, BM25,
+RRF, reranker internals, PostgreSQL IDs, or ORM models.
 
 ## PostgreSQL and pgvector persistence
 
@@ -462,6 +488,23 @@ Reranking adds latency, tokens, and cost. Without it, the path is retrieval → 
 generation; with it, the path is retrieval → reranking LLM → RAG generation.
 The extra judgment may improve context ordering, but RepoMind does not claim it
 always improves results—evaluation must establish that later.
+
+### Future retrieval experiments
+
+The following ideas are intentionally deferred until the evaluation harness can
+measure them against the current baseline:
+
+- syntax-aware / AST chunking
+- richer embedding text containing path or symbol metadata
+- parent or neighboring-chunk context expansion
+- overlap-aware context deduplication
+- token-aware context budgeting
+- query rewriting or multi-query retrieval
+- exact-symbol-aware retrieval fusion
+
+These changes may improve some workloads, but they also change cost, latency,
+recall, or context composition. They should be measured rather than assumed to
+improve repository-answer quality.
 
 ## Read-only tool system
 
@@ -1190,7 +1233,8 @@ uv run python scripts/inspect_repository.py . --chunks
 - **In-memory retrieval remains available.** PostgreSQL is an optional durable
   path, while the original in-memory pipeline stays useful as a simple baseline.
 - **Raw semantic ranking stays visible.** The semantic-only baseline has no
-  score threshold, keyword boost, reranker, or framework retrieval abstraction.
+  score threshold, keyword boost, or reranker; a small injected-retriever
+  protocol lets evaluation swap strategies without changing its mathematics.
 - **Citations use deterministic source IDs.** The LLM selects `S1`, `S2`, and
   similar identifiers; RepoMind owns and validates the corresponding paths and
   line ranges.
@@ -1289,4 +1333,5 @@ The full project roadmap is described in the RepoMind engineering brief:
 11. Handwritten read-only agent loop (complete)
 12. Controlled editing + safe verification (complete)
 13. Coding-task workflow + completion gates (complete)
+13.5. RAG retrieval integration hardening (complete)
 14. Evaluation harness + coding-agent benchmarks (next)
