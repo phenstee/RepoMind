@@ -70,6 +70,24 @@ class ToolObservation(BaseModel):
         return self
 
 
+class WorkflowFeedback(BaseModel):
+    """Trusted completion guidance with separately untrusted supporting evidence."""
+
+    model_config = ConfigDict(frozen=True)
+
+    message: str = Field(min_length=1)
+    blockers: tuple[str, ...]
+    evidence: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _validate_text(self) -> "WorkflowFeedback":
+        if not self.message.strip():
+            raise ValueError("workflow feedback message must not be blank")
+        if any(not blocker.strip() for blocker in self.blockers):
+            raise ValueError("workflow feedback blockers must not be blank")
+        return self
+
+
 class AgentStep(BaseModel):
     """One model decision and its optional resulting tool observation."""
 
@@ -78,12 +96,16 @@ class AgentStep(BaseModel):
     iteration: int = Field(ge=1, strict=True)
     decision: AgentDecision
     observation: ToolObservation | None = None
+    workflow_feedback: WorkflowFeedback | None = None
 
     @model_validator(mode="after")
     def _validate_observation(self) -> "AgentStep":
-        if self.decision.action == "tool" and self.observation is None:
-            raise ValueError("tool decision requires an observation")
-        if self.decision.action == "final" and self.observation is not None:
+        if self.decision.action == "tool":
+            if self.observation is None:
+                raise ValueError("tool decision requires an observation")
+            if self.workflow_feedback is not None:
+                raise ValueError("tool decision must not include workflow feedback")
+        elif self.observation is not None:
             raise ValueError("final decision must not include an observation")
         return self
 
@@ -93,6 +115,7 @@ class AgentRunStatus(StrEnum):
 
     COMPLETED = "completed"
     MAX_ITERATIONS = "max_iterations_reached"
+    WORKFLOW_STOPPED = "workflow_stopped"
 
 
 class AgentRun(BaseModel):
@@ -116,5 +139,5 @@ class AgentRun(BaseModel):
             if self.final_answer is None or not self.final_answer.strip():
                 raise ValueError("completed run requires a final answer")
         elif self.final_answer is not None:
-            raise ValueError("max-iteration run must not claim a final answer")
+            raise ValueError("non-completed run must not claim a final answer")
         return self

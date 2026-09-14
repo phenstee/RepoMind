@@ -11,6 +11,7 @@ from repomind.agent import (
     AgentStep,
     EditingAgentConfig,
     ToolObservation,
+    WorkflowFeedback,
 )
 
 
@@ -86,6 +87,28 @@ def test_tool_observation_enforces_success_and_failure_shapes() -> None:
         ToolObservation(tool_name="x", arguments={}, success=True, error="bad")
     with pytest.raises(ValidationError):
         ToolObservation(tool_name="x", arguments={}, success=False)
+
+
+def test_workflow_feedback_is_only_valid_for_final_decisions() -> None:
+    feedback = WorkflowFeedback(message="Completion blocked.", blockers=("tests",))
+    step = AgentStep(
+        iteration=1,
+        decision=AgentDecision(action="final", final_answer="done"),
+        workflow_feedback=feedback,
+    )
+    assert step.workflow_feedback == feedback
+
+    with pytest.raises(ValidationError):
+        AgentStep(
+            iteration=1,
+            decision=AgentDecision(
+                action="tool", tool_name="git_status", tool_arguments={}
+            ),
+            observation=ToolObservation(
+                tool_name="git_status", arguments={}, success=True, output={}
+            ),
+            workflow_feedback=feedback,
+        )
 
 
 def test_agent_step_and_run_are_consistent_and_json_serializable() -> None:

@@ -1,7 +1,8 @@
 """Explicit finite decision/tool/observation loop for repository agents."""
 
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -14,6 +15,7 @@ from repomind.agent.models import (
     AgentStep,
     EditingAgentConfig,
     ToolObservation,
+    WorkflowFeedback,
 )
 from repomind.agent.prompts import (
     EDITING_AGENT_SYSTEM_PROMPT,
@@ -25,6 +27,21 @@ from repomind.tools import ToolError, ToolRegistry
 
 StructuredModelT = TypeVar("StructuredModelT", bound=BaseModel)
 MAX_IDENTICAL_TOOL_EXECUTIONS = 2
+
+
+@dataclass(frozen=True, slots=True)
+class _FinalDecisionControl:
+    """Private completion interception result used by the coding workflow."""
+
+    feedback: WorkflowFeedback | None = None
+    stop: bool = False
+
+
+_ObservationHandler = Callable[[AgentStep], None]
+_FinalDecisionHandler = Callable[
+    [AgentDecision, tuple[AgentStep, ...]],
+    _FinalDecisionControl,
+]
 
 
 class AgentError(RuntimeError):
@@ -90,6 +107,8 @@ def _run_agent(
     system_prompt: str,
     mutation_tool_names: frozenset[str] = frozenset(),
     max_mutations: int | None = None,
+    observation_handler: _ObservationHandler | None = None,
+    final_decision_handler: _FinalDecisionHandler | None = None,
 ) -> AgentRun:
     """Run shared sequential loop mechanics with application-chosen capabilities."""
 
@@ -120,8 +139,28 @@ def _run_agent(
             raise AgentError("LLM returned an unexpected agent decision model")
 
         if decision.action == "final":
-            step = AgentStep(iteration=iteration, decision=decision)
+            control = (
+                final_decision_handler(decision, tuple(steps))
+                if final_decision_handler is not None
+                else _FinalDecisionControl()
+            )
+            step = AgentStep(
+                iteration=iteration,
+                decision=decision,
+                workflow_feedback=control.feedback,
+            )
             steps.append(step)
+            if control.feedback is not None:
+                if control.stop:
+                    return AgentRun(
+                        query=query,
+                        status=AgentRunStatus.WORKFLOW_STOPPED,
+                        steps=tuple(steps),
+                        iterations=iteration,
+                        llm_calls=iteration,
+                        tool_calls=tool_calls,
+                    )
+                continue
             return AgentRun(
                 query=query,
                 status=AgentRunStatus.COMPLETED,
@@ -168,6 +207,8 @@ def _run_agent(
                 observation=observation,
             )
         )
+        if observation_handler is not None:
+            observation_handler(steps[-1])
 
     return AgentRun(
         query=query,
@@ -206,13 +247,33 @@ def run_editing_agent(
 ) -> AgentRun:
     """Run an explicitly provisioned editing registry with a mutation budget."""
 
-    resolved_config = config or EditingAgentConfig()
+    return _run_editing_agent_controlled(
+        query,
+        llm_provider,
+        tool_registry,
+        config=config or EditingAgentConfig(),
+    )
+
+
+def _run_editing_agent_controlled(
+    query: str,
+    llm_provider: StructuredAgentLLM,
+    tool_registry: ToolRegistry,
+    *,
+    config: EditingAgentConfig,
+    observation_handler: _ObservationHandler | None = None,
+    final_decision_handler: _FinalDecisionHandler | None = None,
+) -> AgentRun:
+    """Run editing mechanics with private workflow lifecycle hooks."""
+
     return _run_agent(
         query,
         llm_provider,
         tool_registry,
-        config=resolved_config,
+        config=config,
         system_prompt=EDITING_AGENT_SYSTEM_PROMPT,
         mutation_tool_names=frozenset({"create_file", "replace_text"}),
-        max_mutations=resolved_config.max_mutations_per_run,
+        max_mutations=config.max_mutations_per_run,
+        observation_handler=observation_handler,
+        final_decision_handler=final_decision_handler,
     )

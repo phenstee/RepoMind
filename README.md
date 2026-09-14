@@ -67,6 +67,11 @@ application can now explicitly opt into precise file creation/replacement and
 fixed pytest/Ruff checks while the default registry and read-only agent remain
 strictly read-only.
 
+**Milestone 13: coding-task workflow and completion gates** is complete. RepoMind
+now performs clean-worktree preflight, revision-aware required verification, a
+final Git review, and deterministic completion evaluation around the existing
+editing agent. An LLM final response is only a request to complete.
+
 ## Repository ingestion
 
 `repomind.ingestion` traverses a local repository, skips generated or ignored
@@ -699,6 +704,102 @@ Live inspection sees edits immediately, but existing persisted semantic/BM25
 representations are not automatically re-indexed. Retrieval may therefore be
 stale until the caller performs an explicit re-index.
 
+## Coding-task workflow and completion gates
+
+`repomind.coding` adds a lifecycle above the existing tools and agent loop:
+
+```text
+CodingTask
+    -> preflight Git state
+    -> editing agent
+    -> completion request
+    -> required verification
+    -> final Git review
+    -> deterministic completion gate
+    -> CodingTaskResult
+```
+
+The LLM does not have final authority. Its final action means “I believe this is
+ready”; `run_coding_task(...)` independently checks the configured policy before
+returning `completed`. The lower-level `run_read_only_agent(...)` and
+`run_editing_agent(...)` APIs remain available and unchanged in capability.
+
+A `CodingTask` separates the human objective and ordered acceptance criteria
+from mechanical proof. For example, “retry logic remains nonblocking” is a
+semantic acceptance criterion. A policy requiring
+`tests/unit/test_llm_client.py` and `ruff check .` describes checks RepoMind can
+actually execute. Passing checks provide evidence but do not pretend to prove
+every natural-language requirement.
+
+`VerificationPolicy` is selected by application code before the run. It fixes
+the exact required pytest and Ruff scopes and whether final status/diff evidence
+is required. A narrower agent-initiated test such as `tests/unit/foo` cannot
+prove a policy requiring `tests`; the workflow reruns the exact policy scope.
+The LLM cannot alter policy paths, clean-worktree behavior, completion attempts,
+agent iterations, or mutation limits through tool arguments.
+
+Verification freshness uses a per-workflow logical revision rather than Git
+commits:
+
+```text
+revision 0 -> edit -> revision 1 -> tests pass at revision 1
+                                      |
+                         another edit -> revision 2 -> old result is stale
+```
+
+Only successful structured `create_file` and `replace_text` observations advance
+the revision. Failed mutations, reads, Git inspection, and verification do not.
+Required tests and Ruff must pass at the current revision. Final review is also
+tagged with the current revision. This avoids creating commits merely to track
+ephemeral agent state.
+
+By default, preflight requires a clean working tree. If tracked or untracked
+work already exists, the workflow returns `precondition_failed` before any LLM
+call or mutation. Applications may explicitly allow dirty operation; baseline
+paths are then retained separately from workflow-mutated paths. Final changed
+files always come from `git_status`, and changes belonging to neither the
+baseline nor successful workflow mutations are reported as unexpected and block
+completion. RepoMind never cleans or resets them.
+
+After each completion request, the workflow reuses only exact-scope passing
+evidence from the current revision. Otherwise it invokes the existing fixed
+`run_tests` and `run_ruff` tools, then captures `git_status`, unstaged
+`git_diff`, and a staged diff when staged changes exist. Diff truncation remains
+visible. Test failures, timeouts, and execution errors cannot count as passing.
+When a gate fails, typed workflow feedback is returned to the same editing loop:
+
+```text
+incorrect edit -> completion request -> pytest fails
+    -> trusted completion feedback + untrusted test evidence
+    -> corrective edit -> fresh tests/Ruff -> fresh Git review -> completed
+```
+
+Completion attempts are finite. Exhaustion returns `verification_failed`; agent
+iteration exhaustion returns `agent_limit_reached`. A no-change task can complete
+without a meaningless edit when required checks pass and final Git review shows
+no task changes. Successful completion still leaves reviewable working-tree
+changes for a human—there is no automatic add, commit, or push.
+
+Direct API usage is explicit:
+
+```python
+from repomind.agent import EditingAgentConfig
+from repomind.coding import CodingTask, VerificationPolicy, run_coding_task
+from repomind.tools import ToolContext, create_editing_tool_registry
+
+registry = create_editing_tool_registry(ToolContext(repository_root="path/to/repo"))
+result = run_coding_task(
+    CodingTask(
+        objective="Fix the failing add() test.",
+        acceptance_criteria=("Existing callers remain compatible.",),
+    ),
+    llm_provider,
+    registry,
+    verification_policy=VerificationPolicy(),
+    agent_config=EditingAgentConfig(max_iterations=8),
+)
+```
+
 ## Repository layout
 
 ```text
@@ -710,6 +811,11 @@ RepoMind/
 │       │   ├── loop.py
 │       │   ├── models.py
 │       │   └── prompts.py
+│       ├── coding/
+│       │   ├── __init__.py
+│       │   ├── completion.py
+│       │   ├── models.py
+│       │   └── workflow.py
 │       ├── config.py
 │       ├── db/
 │       │   ├── __init__.py
@@ -754,6 +860,7 @@ RepoMind/
 ├── scripts/
 │   ├── inspect_repository.py
 │   ├── manual_agent_check.py
+│   ├── manual_coding_task_check.py
 │   ├── manual_editing_agent_check.py
 │   ├── manual_embedding_check.py
 │   ├── manual_rag_check.py
@@ -774,6 +881,10 @@ RepoMind/
 │       │   ├── test_editing_loop.py
 │       │   ├── test_loop.py
 │       │   └── test_prompts.py
+│       ├── coding/
+│       │   ├── test_completion.py
+│       │   ├── test_models.py
+│       │   └── test_workflow.py
 │       ├── db/
 │       │   ├── test_db_models.py
 │       │   ├── test_hashing.py
@@ -1032,6 +1143,18 @@ It prints the selected root and capability boundary before asking `Continue?
 access. The demo can create/replace files and run fixed checks, but still cannot
 run arbitrary shell commands or mutate Git.
 
+The higher-level coding-task demo additionally enforces clean preflight, default
+tests/Ruff, and final Git review:
+
+```powershell
+uv run python scripts/manual_coding_task_check.py `
+    --root path/to/sandbox/repository "Fix the failing add() test."
+```
+
+It requires the same explicit confirmation and never commits. Its final output
+includes status, changed paths, verification results, bounded diff evidence, the
+agent answer, and any deterministic completion blockers.
+
 ## Optional ingestion check
 
 Inspect a repository without using the LLM:
@@ -1135,6 +1258,19 @@ uv run python scripts/inspect_repository.py . --chunks
   checkout, restore, or clean capability is registered.
 - **Indexes can be stale after editing.** Live filesystem tools see changes at
   once, but persisted retrieval data needs a separate explicit re-index.
+- **The LLM requests completion; it does not grant it.** Deterministic gates use
+  structured verification and Git evidence instead of parsing confident prose.
+- **Acceptance and verification remain separate.** Human criteria describe the
+  intended behavior; an application policy names only checks RepoMind can run.
+- **Freshness follows logical revisions.** Successful mutations invalidate older
+  verification without requiring temporary commits or Git history changes.
+- **Final review is repository-owned evidence.** Status and bounded diffs expose
+  actual and unexpected changes before a completed result is possible.
+- **Clean preflight protects user work.** Dirty operation requires explicit
+  application opt-in and preserves baseline attribution.
+- **No planner or reviewer model is needed yet.** One editing agent receives
+  deterministic workflow feedback; completion and final review remain Python
+  policy rather than another model's opinion.
 
 ## Roadmap
 
@@ -1152,4 +1288,5 @@ The full project roadmap is described in the RepoMind engineering brief:
 10. Read-only tool system (complete)
 11. Handwritten read-only agent loop (complete)
 12. Controlled editing + safe verification (complete)
-13. Agent coding workflow / task completion (next)
+13. Coding-task workflow + completion gates (complete)
+14. Evaluation harness + coding-agent benchmarks (next)

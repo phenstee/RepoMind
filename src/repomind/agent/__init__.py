@@ -14,6 +14,7 @@ from repomind.agent.models import (
     AgentStep,
     EditingAgentConfig,
     ToolObservation,
+    WorkflowFeedback,
 )
 
 __all__ = [
@@ -26,6 +27,7 @@ __all__ = [
     "EditingAgentConfig",
     "StructuredAgentLLM",
     "ToolObservation",
+    "WorkflowFeedback",
     "run_editing_agent",
     "run_read_only_agent",
 ]
