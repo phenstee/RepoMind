@@ -1,0 +1,76 @@
+"""Repeatable retrieval, RAG, and coding-workflow evaluation."""
+
+from repomind.evaluation.coding import (
+    CodingTaskRunner,
+    evaluate_coding_oracle,
+    evaluate_coding_suite,
+)
+from repomind.evaluation.metrics import (
+    first_relevant_rank,
+    mean_reciprocal_rank,
+    ndcg_at_k,
+    recall_at_k,
+    reciprocal_rank,
+)
+from repomind.evaluation.models import (
+    DEFAULT_BENCHMARK_VERSION,
+    ChunkIdentity,
+    CodingBenchmarkCase,
+    CodingBenchmarkCaseResult,
+    CodingBenchmarkSuite,
+    CodingEvaluationReport,
+    CodingOracleResult,
+    EvaluationMode,
+    FileTextExpectation,
+    OracleCheckResult,
+    RAGBenchmarkCase,
+    RAGBenchmarkSuite,
+    RAGCaseResult,
+    RAGEvaluationReport,
+    RetrievalBenchmarkCase,
+    RetrievalBenchmarkSuite,
+    RetrievalCaseResult,
+    RetrievalEvaluationReport,
+)
+from repomind.evaluation.rag import evaluate_rag
+from repomind.evaluation.reporting import (
+    format_coding_report,
+    format_rag_comparison,
+    format_retrieval_comparison,
+)
+from repomind.evaluation.retrieval import RetrievalStrategy, evaluate_retrieval
+
+__all__ = [
+    "DEFAULT_BENCHMARK_VERSION",
+    "ChunkIdentity",
+    "CodingBenchmarkCase",
+    "CodingBenchmarkCaseResult",
+    "CodingBenchmarkSuite",
+    "CodingEvaluationReport",
+    "CodingOracleResult",
+    "CodingTaskRunner",
+    "EvaluationMode",
+    "FileTextExpectation",
+    "OracleCheckResult",
+    "RAGBenchmarkCase",
+    "RAGBenchmarkSuite",
+    "RAGCaseResult",
+    "RAGEvaluationReport",
+    "RetrievalBenchmarkCase",
+    "RetrievalBenchmarkSuite",
+    "RetrievalCaseResult",
+    "RetrievalEvaluationReport",
+    "RetrievalStrategy",
+    "evaluate_coding_oracle",
+    "evaluate_coding_suite",
+    "evaluate_rag",
+    "evaluate_retrieval",
+    "first_relevant_rank",
+    "format_coding_report",
+    "format_rag_comparison",
+    "format_retrieval_comparison",
+    "mean_reciprocal_rank",
+    "ndcg_at_k",
+    "recall_at_k",
+    "reciprocal_rank",
+]

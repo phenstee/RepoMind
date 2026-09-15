@@ -77,6 +77,11 @@ repository-question pipeline can now consume an injected semantic, hybrid, or
 hybrid-plus-reranking path through the existing ranked-chunk boundary while the
 original semantic-only API remains the default baseline.
 
+**Milestone 14: evaluation harness and benchmarks** is complete. RepoMind now
+measures retrieval ranking, RAG context/answer behavior, and isolated scripted
+coding workflows with versioned cases, deterministic metrics, hidden coding
+oracles, and inspectable per-case reports.
+
 ## Repository ingestion
 
 `repomind.ingestion` traverses a local repository, skips generated or ignored
@@ -504,7 +509,136 @@ measure them against the current baseline:
 
 These changes may improve some workloads, but they also change cost, latency,
 recall, or context composition. They should be measured rather than assumed to
-improve repository-answer quality.
+improve repository-answer quality. Each experiment should be introduced one at
+a time and measured against the Milestone 14 baseline.
+
+## Evaluation harness and benchmarks
+
+Capability and measured performance are different claims. “RepoMind supports
+hybrid retrieval” describes system capability. “Hybrid achieved MRR 1.000 on
+`repo-eval-v1`” describes one measured result on one intentionally small,
+deterministic fixture. The latter does not establish real-model performance.
+
+The evaluation path remains explicit:
+
+```text
+System configuration
+        |
+Versioned benchmark case
+        |
+Actual ranked/answered/edited result
+        |
+Gold labels or hidden read-only oracle
+        |
+Direct deterministic metrics
+        |
+Per-case evidence + aggregate report
+```
+
+`repomind.evaluation` reuses the stable chunk identity `(relative_path,
+chunk_index, start_line, end_line)` across semantic, BM25, hybrid, reranked,
+PostgreSQL-originated, RAG, and gold-label data. It never uses Python object
+identity or database record IDs. Suites require unique case IDs, at least one
+case, and a version. Scores from different benchmark versions must not be
+treated as directly comparable datasets.
+
+### Retrieval metrics
+
+- **Recall@k** measures how much of the relevant set appears in the top `k`.
+  Duplicate retrieved identities never improve it.
+- **Reciprocal rank** is `1 / rank` for the first relevant result, or zero when
+  none is retrieved. **MRR** averages that value across cases.
+- **nDCG@k** measures how early binary-relevant results occur using
+  `sum(relevance / log2(rank + 1))`, normalized by the ideal ordering.
+
+The same evaluator accepts callable semantic, BM25, hybrid, and
+hybrid-plus-reranking strategies. It retains each retrieved ordering and first
+relevant rank instead of exposing only averages or declaring a winner.
+
+### End-to-end RAG metrics
+
+RAG evaluation invokes the public configurable repository-question pipeline and
+records three distinct stages:
+
+```text
+retrieval recall -> context recall -> citation/fact answer oracle
+```
+
+This distinguishes a retriever miss from a context-budget exclusion and from a
+final answer or citation failure. The offline answer oracle checks required fact
+substrings, repository-owned cited chunks, and the expected insufficient-
+evidence flag. It is transparent and deliberately narrower than a general
+answer-quality judge.
+
+### Coding-agent metrics and hidden oracles
+
+Each coding case copies a clean fixture Git repository into a fresh temporary
+workspace, runs the existing coding workflow sequentially, evaluates the final
+workspace with read-only hidden file/change checks, and then discards the copy.
+The agent receives only `CodingTask` and application verification policy—not
+`file_contains`, required/allowed changed paths, or other evaluator answers.
+
+- **Workflow completion** measures how often mechanical gates reached
+  `COMPLETED`.
+- **True task success** requires both workflow completion and a passing hidden
+  oracle.
+- **False-positive completion** means the workflow returned `COMPLETED` while
+  the hidden oracle found the result wrong.
+- **Recovery** requires an observable failed verification event, a later
+  successful mutation, and finally fresh passing verification plus completion.
+
+Reports also preserve final verification, changed paths, oracle failures, and
+the existing LLM-call, tool-call, successful-mutation, agent-iteration, and
+completion-attempt counters. Oracles support fixed file existence, absence,
+substring, and changed-path checks; they execute no Python, shell, or model.
+
+### `repo-eval-v1` offline baseline
+
+Run the bounded deterministic benchmark with:
+
+```powershell
+uv run python -m benchmarks.repo_eval_v1
+```
+
+Its two-query retrieval fixture produced:
+
+```text
+Strategy       Recall@3  MRR    nDCG@3
+semantic       1.000     0.750  0.815
+bm25           1.000     0.667  0.750
+hybrid         1.000     1.000  1.000
+hybrid+rerank  1.000     1.000  1.000
+```
+
+The same two questions at RAG `top_k=1` produced:
+
+```text
+Strategy       Retrieval Recall  Context Recall  Citation Recall  Answer Passed
+semantic       0.500             0.500           0.500            0.500
+hybrid         1.000             1.000           1.000            1.000
+hybrid+rerank  1.000             1.000           1.000            1.000
+```
+
+The four-case scripted coding fixture produced:
+
+```text
+Workflow completion             0.750
+True task success               0.500
+False-positive completion       0.250
+Verification pass               0.750
+Recovery rate                   1.000
+Mean LLM calls                  2.500
+Mean tool calls                 1.000
+Mean successful mutations       1.000
+Mean agent iterations           2.500
+Mean completion attempts        1.500
+```
+
+These are `offline_fixture` and `offline_scripted` infrastructure baselines.
+Embeddings and model decisions are deterministic fakes; the scores do not
+measure an OpenAI embedding, reranking, generation, or coding model. A
+`live_model` report is a separate mode and must never be aggregated with fake-
+provider results. No live benchmark runs automatically.
 
 ## Read-only tool system
 
@@ -867,6 +1001,14 @@ RepoMind/
 │       │   ├── models.py
 │       │   ├── repositories.py
 │       │   └── session.py
+│       ├── evaluation/
+│       │   ├── __init__.py
+│       │   ├── coding.py
+│       │   ├── metrics.py
+│       │   ├── models.py
+│       │   ├── rag.py
+│       │   ├── reporting.py
+│       │   └── retrieval.py
 │       ├── ingestion/
 │       │   ├── __init__.py
 │       │   ├── chunker.py
@@ -909,6 +1051,8 @@ RepoMind/
 │   ├── manual_rag_check.py
 │   ├── manual_semantic_search.py
 │   └── manual_llm_check.py
+├── benchmarks/
+│   └── repo_eval_v1.py
 ├── alembic/
 │   ├── versions/
 │   │   └── 20260910_01_initial_pgvector_schema.py
@@ -933,6 +1077,12 @@ RepoMind/
 │       │   ├── test_hashing.py
 │       │   ├── test_repositories.py
 │       │   └── test_session.py
+│       ├── evaluation/
+│       │   ├── test_coding_evaluation.py
+│       │   ├── test_metrics.py
+│       │   ├── test_rag_evaluation.py
+│       │   ├── test_reporting.py
+│       │   └── test_retrieval_evaluation.py
 │       ├── ingestion/
 │       │   ├── test_chunker.py
 │       │   ├── test_language.py
@@ -941,7 +1091,8 @@ RepoMind/
 │       ├── rag/
 │       │   ├── test_context.py
 │       │   ├── test_rag_models.py
-│       │   └── test_pipeline.py
+│       │   ├── test_pipeline.py
+│       │   └── test_retrieval_integration.py
 │       ├── retrieval/
 │       │   ├── test_bm25.py
 │       │   ├── test_embedding_models.py
@@ -1334,4 +1485,5 @@ The full project roadmap is described in the RepoMind engineering brief:
 12. Controlled editing + safe verification (complete)
 13. Coding-task workflow + completion gates (complete)
 13.5. RAG retrieval integration hardening (complete)
-14. Evaluation harness + coding-agent benchmarks (next)
+14. Evaluation harness + coding-agent benchmarks (complete)
+15. Observability and run tracing (next)
