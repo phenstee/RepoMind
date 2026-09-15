@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 from datetime import datetime
+from uuid import UUID
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     CheckConstraint,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
+    Uuid,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from repomind.db.base import Base
@@ -133,3 +137,44 @@ class CodeChunkRecord(Base):
     embedding_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     embedding_dimensions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     repository_file: Mapped[RepositoryFileRecord] = relationship(back_populates="chunks")
+
+
+class TraceRunRecord(Base):
+    """Run summaries, separate from repository indexing transactions."""
+
+    __tablename__ = "trace_runs"
+    __table_args__ = (
+        Index("ix_trace_runs_started_at", "started_at"),
+        Index("ix_trace_runs_type_status", "run_type", "status"),
+    )
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    run_type: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32))
+    model: Mapped[str | None] = mapped_column(String(256))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[float] = mapped_column(Float)
+    llm_calls: Mapped[int] = mapped_column(Integer)
+    tool_calls: Mapped[int] = mapped_column(Integer)
+    successful_mutations: Mapped[int] = mapped_column(Integer)
+    error_count: Mapped[int] = mapped_column(Integer)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer)
+    total_tokens: Mapped[int | None] = mapped_column(Integer)
+    details_json: Mapped[dict] = mapped_column(JSONB)
+
+
+class TraceEventRecord(Base):
+    """Ordered events; a composite primary key also indexes timeline lookup."""
+
+    __tablename__ = "trace_events"
+    __table_args__ = (CheckConstraint("sequence >= 1", name="ck_trace_events_sequence"),)
+    run_id: Mapped[UUID] = mapped_column(
+        ForeignKey("trace_runs.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    sequence: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_type: Mapped[str] = mapped_column(String(64))
+    timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    duration_ms: Mapped[float | None] = mapped_column(Float)
+    metadata_json: Mapped[dict] = mapped_column(JSONB)

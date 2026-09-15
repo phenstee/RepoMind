@@ -14,6 +14,8 @@ from pydantic import ValidationError
 
 from repomind.config import Settings, get_settings
 from repomind.ingestion.models import CodeChunk
+from repomind.observability import TraceContext
+from repomind.observability.instrumentation import record_model_usage, traced_model
 from repomind.retrieval.models import (
     EmbeddedChunk,
     EmbeddingBatchResult,
@@ -135,6 +137,7 @@ class OpenAIEmbeddingClient:
         config: EmbeddingConfig | None = None,
         client: OpenAI | None = None,
         async_client: AsyncOpenAI | None = None,
+        trace: TraceContext | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.config = config or EmbeddingConfig()
@@ -143,6 +146,7 @@ class OpenAIEmbeddingClient:
         self.max_retries = self.settings.llm_max_retries
         self._client = client
         self._async_client = async_client
+        self.trace = trace
 
     def _client_kwargs(self) -> dict[str, Any]:
         secret = self.settings.openai_api_key
@@ -251,13 +255,19 @@ class OpenAIEmbeddingClient:
             for chunk, embedding in zip(chunks, result.embeddings, strict=True)
         ]
 
-    def _request_batch(self, texts: Sequence[str]) -> EmbeddingBatchResult:
+    @traced_model("embedding")
+    def _request_batch(
+        self, texts: Sequence[str], *, trace: TraceContext | None = None
+    ) -> EmbeddingBatchResult:
         for attempt in range(self.max_retries + 1):
+            if trace is not None:
+                trace.emit("model.attempt", attempts=attempt + 1, retries=attempt)
             try:
                 response = self._get_client().embeddings.create(
                     input=list(texts),
                     model=self.model,
                 )
+                record_model_usage(trace, response, attempt + 1, embedding=True)
                 return _normalize_response(response, len(texts))
             except _RETRYABLE_ERRORS as exc:
                 if attempt >= self.max_retries:
@@ -270,13 +280,19 @@ class OpenAIEmbeddingClient:
 
         raise EmbeddingError("Embedding request failed unexpectedly")
 
-    async def _request_batch_async(self, texts: Sequence[str]) -> EmbeddingBatchResult:
+    @traced_model("embedding")
+    async def _request_batch_async(
+        self, texts: Sequence[str], *, trace: TraceContext | None = None
+    ) -> EmbeddingBatchResult:
         for attempt in range(self.max_retries + 1):
+            if trace is not None:
+                trace.emit("model.attempt", attempts=attempt + 1, retries=attempt)
             try:
                 response = await self._get_async_client().embeddings.create(
                     input=list(texts),
                     model=self.model,
                 )
+                record_model_usage(trace, response, attempt + 1, embedding=True)
                 return _normalize_response(response, len(texts))
             except _RETRYABLE_ERRORS as exc:
                 if attempt >= self.max_retries:

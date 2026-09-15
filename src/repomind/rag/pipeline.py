@@ -5,6 +5,8 @@ from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
+from repomind.observability import TraceContext, TraceRecorder
+from repomind.observability.instrumentation import generate_structured, traced_run
 from repomind.rag.context import RAGError, build_repository_context
 from repomind.rag.models import (
     BuiltRepositoryContext,
@@ -116,8 +118,11 @@ def _answer_from_ranked_chunks(
     results: Sequence[RankedChunk],
     llm_client: StructuredLLMProvider,
     config: RAGConfig,
+    trace: TraceContext,
 ) -> RepositoryAnswer:
     if not results:
+        trace.emit("rag.context", context_chunk_count=0, context_chars=0)
+        trace.emit("rag.answer", citation_count=0, insufficient_evidence=True)
         return RepositoryAnswer(
             answer=_NO_EVIDENCE_ANSWER,
             citations=[],
@@ -128,23 +133,39 @@ def _answer_from_ranked_chunks(
         results,
         max_context_chars=config.max_context_chars,
     )
-    response = llm_client.generate_structured(
+    trace.emit(
+        "rag.context", context_chunk_count=len(context.sources), context_chars=len(context.text)
+    )
+    response = generate_structured(
+        llm_client,
         _build_generation_prompt(question, context),
         GroundedLLMResponse,
         system_prompt=RAG_SYSTEM_PROMPT,
         temperature=0.0,
+        trace=trace,
     )
     if not isinstance(response, GroundedLLMResponse):
         raise RAGError("Structured LLM provider returned an unexpected response model")
-    return _map_answer(response, context)
+    answer = _map_answer(response, context)
+    trace.emit(
+        "rag.answer",
+        citation_count=len(answer.citations),
+        insufficient_evidence=answer.insufficient_evidence,
+        answer_chars=len(answer.answer),
+    )
+    return answer
 
 
+@traced_run("rag")
 def answer_repository_question_with_retriever(
     question: str,
     retriever: Retriever,
     llm_client: StructuredLLMProvider,
     *,
     config: RAGConfig | None = None,
+    strategy: str = "custom",
+    recorder: TraceRecorder | None = None,
+    trace: TraceContext | None = None,
 ) -> RepositoryAnswer:
     """Use an injected retriever, generate once, and map validated citations."""
 
@@ -152,10 +173,16 @@ def answer_repository_question_with_retriever(
         raise RAGError("question must not be empty or whitespace-only")
 
     rag_config = config or RAGConfig()
-    results = retriever(question, top_k=rag_config.top_k)
-    return _answer_from_ranked_chunks(question, results, llm_client, rag_config)
+    trace = trace if trace is not None else TraceContext()
+    with trace.operation(
+        "retrieval", strategy=strategy, reranking_enabled=strategy == "hybrid+rerank"
+    ) as metadata:
+        results = retriever(question, top_k=rag_config.top_k)
+        metadata["candidate_count"] = len(results)
+    return _answer_from_ranked_chunks(question, results, llm_client, rag_config, trace)
 
 
+@traced_run("rag")
 def answer_repository_question(
     question: str,
     embedded_chunks: Sequence[EmbeddedChunk],
@@ -163,6 +190,8 @@ def answer_repository_question(
     llm_client: StructuredLLMProvider,
     *,
     config: RAGConfig | None = None,
+    recorder: TraceRecorder | None = None,
+    trace: TraceContext | None = None,
 ) -> RepositoryAnswer:
     """Preserve the original semantic-only repository RAG baseline."""
 
@@ -170,15 +199,19 @@ def answer_repository_question(
         raise RAGError("question must not be empty or whitespace-only")
 
     rag_config = config or RAGConfig()
-    results = semantic_search(
-        question,
-        embedded_chunks,
-        embedding_provider,
-        top_k=rag_config.top_k,
-    )
+    trace = trace if trace is not None else TraceContext()
+    with trace.operation("retrieval", strategy="semantic", reranking_enabled=False) as metadata:
+        results = semantic_search(
+            question,
+            embedded_chunks,
+            embedding_provider,
+            top_k=rag_config.top_k,
+        )
+        metadata["candidate_count"] = len(results)
     return _answer_from_ranked_chunks(
         question,
         results,
         llm_client,
         rag_config,
+        trace,
     )

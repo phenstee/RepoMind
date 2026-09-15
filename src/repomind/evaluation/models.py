@@ -2,6 +2,7 @@
 
 from enum import StrEnum
 from pathlib import Path
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -72,6 +73,7 @@ class RetrievalCaseResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     case_id: str
+    trace_run_id: UUID | None = None
     strategy: str
     retrieved_chunk_ids: tuple[ChunkIdentity, ...]
     relevant_chunk_ids: tuple[ChunkIdentity, ...]
@@ -148,6 +150,7 @@ class RAGCaseResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     case_id: str
+    trace_run_id: UUID | None = None
     strategy: str
     answer: str
     insufficient_evidence: bool
@@ -296,6 +299,7 @@ class CodingBenchmarkCaseResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     case_id: str
+    trace_run_id: UUID | None = None
     workflow_status: CodingTaskStatus
     oracle: CodingOracleResult
     oracle_passed: bool

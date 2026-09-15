@@ -152,7 +152,7 @@ def test_migration_is_at_head_and_vector_extension_exists(
             text("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
         )
 
-    assert current_revision == expected_head == "20260910_01"
+    assert current_revision == expected_head
     assert extension_version is not None
 
 

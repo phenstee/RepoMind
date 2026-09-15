@@ -7,6 +7,8 @@ from pydantic import BaseModel, ValidationError
 
 from repomind.ingestion import CodeChunk
 from repomind.llm import LLMError
+from repomind.observability import TraceContext
+from repomind.observability.instrumentation import generate_structured
 from repomind.retrieval.bm25 import BM25Index
 from repomind.retrieval.hybrid import (
     DEFAULT_RRF_K,
@@ -173,9 +175,11 @@ class LLMReranker:
         llm_provider: StructuredRerankLLMProvider,
         *,
         config: RerankingConfig | None = None,
+        trace: TraceContext | None = None,
     ) -> None:
         self.llm_provider = llm_provider
         self.config = config or RerankingConfig()
+        self.trace = trace
 
     def rerank(
         self,
@@ -196,11 +200,13 @@ class LLMReranker:
         expected_ids = tuple(f"C{index}" for index in range(1, len(included) + 1))
         prompt = _build_reranking_prompt(query, candidate_context)
         try:
-            response = self.llm_provider.generate_structured(
+            response = generate_structured(
+                self.llm_provider,
                 prompt,
                 RerankLLMResponse,
                 system_prompt=RERANKER_SYSTEM_PROMPT,
                 temperature=0.0,
+                trace=self.trace,
             )
         except (LLMError, ValidationError) as exc:
             raise RerankingError("LLM reranking request failed") from exc

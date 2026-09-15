@@ -82,6 +82,193 @@ measures retrieval ranking, RAG context/answer behavior, and isolated scripted
 coding workflows with versioned cases, deterministic metrics, hidden coding
 oracles, and inspectable per-case reports.
 
+**Milestone 15: structured observability and persistent run tracing** is complete.
+Optional injected recorders capture metadata-only timelines across RAG, agents,
+coding workflows, and evaluation. PostgreSQL storage uses independent transactions.
+
+## Observability and run tracing
+
+```text
+RAG / Agent / Coding / Evaluation
+              ↓
+       injected TraceContext
+              ↓
+        ordered trace events
+              ↓
+    InMemoryTraceRecorder → optional PostgresTraceStore
+```
+
+Observability describes execution; the existing workflows still decide which
+actions are permitted and whether a task is complete. Omit `recorder` and `trace`
+to use the no-op path. No database connection is needed for normal execution.
+
+```python
+from repomind.agent import run_read_only_agent
+from repomind.observability import InMemoryTraceRecorder, format_run_trace
+
+recorder = InMemoryTraceRecorder()
+result = run_read_only_agent(
+    "Where is configuration loaded?", llm_provider, tool_registry,
+    recorder=recorder,
+)
+trace = next(iter(recorder.traces.values()))
+print(format_run_trace(trace))
+trace_json = trace.model_dump(mode="json")
+```
+
+The RAG entry points, editing agent, `run_coding_task`, and all three evaluation
+entry points accept the same optional `recorder` and `trace` keywords. An explicit
+`TraceContext(recorder, run_type)` can join nested operations into one timeline;
+the caller that creates this handle calls `trace.finish()` when the run ends.
+High-level entry points create and finish their own handle when only a recorder
+is supplied. A coding workflow shares its handle with agent decisions, tool
+calls, automatic verification, and final review.
+
+For configurable RAG, pass `strategy="semantic"`, `"hybrid"`, or `"hybrid+rerank"`
+to `answer_repository_question_with_retriever` to label the configured retriever.
+The label is caller-supplied metadata and does not select an algorithm. Candidate
+count means the results returned by that retriever; context and citation counts
+describe the actual downstream RAG stages. If a custom retrieval closure makes
+model calls, explicitly bind the same context to its `OpenAIEmbeddingClient` or
+`LLMReranker` using their `trace=` constructor argument. Opaque custom retrievers
+do not automatically reveal their internal calls.
+
+### Trace contracts and counters
+
+Runs have UUIDs unrelated to user content, one of five run types (`rag`,
+`read_only_agent`, `editing_agent`, `coding_task`, `evaluation`), and a small
+`running` / `completed` / `failed` status. `domain_status` preserves outcomes such
+as `verification_failed`, `precondition_failed`, and `max_iterations_reached`.
+An insufficient-evidence RAG answer is a completed operation. A completed
+evaluation may contain failed benchmark cases; its metrics describe those failures.
+
+Events use contiguous per-run sequence numbers starting at **1**, UTC timestamps,
+and monotonic durations. IDs and clocks are injectable for deterministic tests.
+Use one context for a sequential run and separate contexts for concurrent runs;
+there is no process-global current run. Event families cover:
+
+- Run lifecycle, model requests/attempts/usage, and agent decisions.
+- Tool start/completion/failure, validation vs execution failure, and blocked calls.
+- Successful file mutations, verification, preflight, completion gates, and final review.
+- Retrieval/context/answer summaries and evaluation case start/completion/failure.
+
+`llm_calls` counts logical provider requests, including failed requests; retries
+are separate attempt metadata. Each embedding batch is one request. `tool_calls`
+counts requests reaching the registry, including validation failures and coding
+preflight/automatic verification/review. It can therefore exceed the agent's
+own tool counter. Guard-blocked requests emit `tool.blocked` and do not increment
+that counter. A verifier returning a failing test result is a completed tool
+execution with `passed=false`; failure to execute emits a failure event.
+Mutation counts increment only after successful edits. `errors` counts model,
+tool, and evaluation-case failure events; nested failures can describe the same
+underlying problem at multiple boundaries.
+
+Provider usage is recorded before structured responses discard their envelope.
+`TokenUsage` aggregates reported prompt, completion, and total tokens.
+`usage_reported_calls` indicates coverage: totals are **reported subtotals** if
+some calls lack usage. Missing usage remains unknown (`None` when none is reported),
+including scripted structured providers. Embeddings report input usage where
+available. Cost estimation is deferred; `estimated_cost_usd` is always `None`.
+
+### Privacy and failure behavior
+
+Traces store allowlisted metadata: model/operation/schema names, prompt/output
+lengths, relative paths, hashes, revision numbers, result flags, and bounded
+identifiers. They do **not** store chain-of-thought, API keys, request headers,
+environment dumps, full prompts, final answer text, source contents, replacement
+text, diff contents, test stdout/stderr contents, search lines, or embedding vectors.
+Unknown tool payloads produce minimal metadata. Exception messages are omitted;
+traces record an error type and fixed safe message, while normal exceptions and
+their chaining remain available to the caller. Basic secret-pattern redaction
+adds defense in depth and does not claim perfect general secret detection.
+
+The formatter and persistence store revalidate/sanitize trace data at their output
+boundaries. Metadata-first tracing helps explain what happened without creating
+a second copy of repository source and prompts. Repository-relative paths and
+caller-selected labels can still reveal project metadata; control access to traces.
+
+Recorder failures are best effort: safe warnings/diagnostics surface the failure,
+and the original result or exception is preserved. A failed persistence sink
+retains the completed in-memory trace and appends to `recorder.diagnostics`.
+No file edit or primary repository transaction is rolled back by that sink.
+
+### Coding recovery timeline
+
+This compact excerpt illustrates the tested recovery sequence (other model/tool
+and review events appear between these semantic events):
+
+```text
+file.mutated            workspace_revision=1
+completion.requested   workspace_revision=1
+verification.completed tool=run_tests passed=false workspace_revision=1
+completion.blocked     blocker_codes=[tests_failed]
+file.mutated            workspace_revision=2
+completion.requested   workspace_revision=2
+verification.completed tool=run_tests passed=true workspace_revision=2
+verification.completed tool=run_ruff passed=true workspace_revision=2
+final_review.completed workspace_revision=2
+completion.completed   workspace_revision=2
+run.completed
+```
+
+### Persistent run history
+
+Apply the existing Alembic workflow (`uv run alembic upgrade head`) to add migration
+`20260915_01`, following `20260910_01`. It creates `trace_runs` and `trace_events`
+without altering repository index tables or calling `create_all` at runtime.
+Summaries include counters and nullable token counts; events contain JSONB metadata
+and use `(run_id, sequence)` as their primary key. Run lookup indexes cover time
+and type/status. Deleting a run cascades to its events.
+
+```python
+from repomind.db import create_database_engine, create_session_factory
+from repomind.observability import InMemoryTraceRecorder
+from repomind.observability.persistence import PostgresTraceStore
+
+engine = create_database_engine()
+store = PostgresTraceStore(create_session_factory(engine))
+recorder = InMemoryTraceRecorder(sink=store.persist_run_trace)
+# Pass recorder to a high-level operation, then inspect:
+recent = store.list_run_traces(run_type="coding_task", status="failed", limit=20)
+# store.get_run_trace(run_id) returns a reconstructed RunTrace or None.
+```
+
+Give the store a factory bound to an **Engine**, not an active business Session or
+Connection. Every save opens, commits/rolls back, and closes its own transaction.
+Direct store methods raise database errors; the recorder sink handles them safely.
+Only terminal traces are persisted, atomically with all their events. Duplicate
+run IDs are rejected instead of overwriting history. Listing returns recent
+traces in deterministic time/ID order, with a maximum limit of 100.
+
+Persistence currently happens after completion: process crashes can lose an
+unfinished in-memory run. There is no automatic retention/deletion job; traces
+remain until explicitly managed by the application/database operator. The
+in-memory recorder also retains runs until its caller releases them.
+
+### Evaluation connection and verification
+
+Milestone 14 answers **what failed**; Milestone 15 helps inspect **why a particular
+run failed**. Evaluation case results optionally include `trace_run_id`; case IDs,
+suite version, mode, strategy and compact metrics locate the relevant timeline
+segment without storing gold facts or full reports in each event. Suite cases
+share a run ID and are distinguished by their case boundaries. A coding benchmark
+runner may opt into child tracing by accepting a keyword `trace` and forwarding
+it to `run_coding_task`. Existing three-argument runners remain supported.
+Case exceptions retain their original propagation behavior and emit a failed
+case event before the run terminates.
+
+For example, a failed coding case can lead to a timeline showing an unsuccessful
+file search, a stale edit, failed verification, and iteration exhaustion.
+Tests use fake providers, clocks and IDs, real temporary fixture tools, and opt-in
+PostgreSQL tests marked consistently with existing integration tests. No automated
+test calls OpenAI. Real database tests require `REPOMIND_TEST_DATABASE_URL` and a
+migrated PostgreSQL database; offline SQL generation is not proof of a database
+roundtrip.
+
+FastAPI endpoints, streaming, background workers, external telemetry adapters,
+automatic retention and dollar-cost estimation remain deferred. The existing
+tool permissions and retrieval algorithms remain the execution contracts.
+
 ## Repository ingestion
 
 `repomind.ingestion` traverses a local repository, skips generated or ignored
@@ -1018,6 +1205,14 @@ RepoMind/
 │       ├── llm/
 │       │   ├── client.py
 │       │   └── models.py
+│       ├── observability/
+│       │   ├── __init__.py
+│       │   ├── instrumentation.py
+│       │   ├── models.py
+│       │   ├── persistence.py
+│       │   ├── recorder.py
+│       │   ├── reporting.py
+│       │   └── sanitization.py
 │       ├── rag/
 │       │   ├── __init__.py
 │       │   ├── context.py
@@ -1055,12 +1250,14 @@ RepoMind/
 │   └── repo_eval_v1.py
 ├── alembic/
 │   ├── versions/
-│   │   └── 20260910_01_initial_pgvector_schema.py
+│   │   ├── 20260910_01_initial_pgvector_schema.py
+│   │   └── 20260915_01_run_traces.py
 │   ├── env.py
 │   └── script.py.mako
 ├── tests/
 │   ├── integration/
 │   │   ├── conftest.py
+│   │   ├── test_postgres_observability.py
 │   │   └── test_postgres_persistence.py
 │   └── unit/
 │       ├── agent/
@@ -1088,6 +1285,14 @@ RepoMind/
 │       │   ├── test_language.py
 │       │   ├── test_models.py
 │       │   └── test_repository.py
+│       ├── observability/
+│       │   ├── test_evaluation.py
+│       │   ├── test_instrumentation.py
+│       │   ├── test_models.py
+│       │   ├── test_persistence.py
+│       │   ├── test_recorder.py
+│       │   ├── test_reporting.py
+│       │   └── test_sanitization.py
 │       ├── rag/
 │       │   ├── test_context.py
 │       │   ├── test_rag_models.py
@@ -1486,4 +1691,5 @@ The full project roadmap is described in the RepoMind engineering brief:
 13. Coding-task workflow + completion gates (complete)
 13.5. RAG retrieval integration hardening (complete)
 14. Evaluation harness + coding-agent benchmarks (complete)
-15. Observability and run tracing (next)
+15. Observability and persistent run tracing (complete)
+16. FastAPI backend (next)

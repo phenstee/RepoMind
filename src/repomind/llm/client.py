@@ -17,6 +17,8 @@ from pydantic import BaseModel
 
 from repomind.config import Settings, get_settings
 from repomind.llm.models import LLMResponse, TokenUsage
+from repomind.observability import TraceContext
+from repomind.observability.instrumentation import record_model_usage, traced_model
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +84,7 @@ class OpenAILLMClient:
         *,
         client: OpenAI | None = None,
         async_client: AsyncOpenAI | None = None,
+        trace: TraceContext | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.model = self.settings.openai_model
@@ -90,6 +93,7 @@ class OpenAILLMClient:
 
         self._client = client
         self._async_client = async_client
+        self.trace = trace
 
     def _client_kwargs(self) -> dict[str, Any]:
         secret = self.settings.openai_api_key
@@ -114,6 +118,7 @@ class OpenAILLMClient:
             self._async_client = AsyncOpenAI(**self._client_kwargs())
         return self._async_client
 
+    @traced_model("text")
     def generate(
         self,
         prompt: str,
@@ -121,12 +126,14 @@ class OpenAILLMClient:
         system_prompt: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        trace: TraceContext | None = None,
     ) -> LLMResponse:
         """Generate a plain text completion for ``prompt``."""
 
         messages = _build_messages(prompt, system_prompt=system_prompt)
-        return self._complete(self._get_client(), messages, temperature, max_tokens)
+        return self._complete(self._get_client(), messages, temperature, max_tokens, trace)
 
+    @traced_model("text")
     async def agenerate(
         self,
         prompt: str,
@@ -134,14 +141,16 @@ class OpenAILLMClient:
         system_prompt: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        trace: TraceContext | None = None,
     ) -> LLMResponse:
         """Async equivalent of :meth:`generate`."""
 
         messages = _build_messages(prompt, system_prompt=system_prompt)
         return await self._complete_async(
-            self._get_async_client(), messages, temperature, max_tokens
+            self._get_async_client(), messages, temperature, max_tokens, trace
         )
 
+    @traced_model("structured")
     def generate_structured(
         self,
         prompt: str,
@@ -150,6 +159,7 @@ class OpenAILLMClient:
         system_prompt: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        trace: TraceContext | None = None,
     ) -> StructuredModelT:
         """Generate a response and validate it against ``response_model``."""
 
@@ -161,11 +171,14 @@ class OpenAILLMClient:
             kwargs["max_tokens"] = max_tokens
 
         for attempt in range(self.max_retries + 1):
+            if trace is not None:
+                trace.emit("model.attempt", attempts=attempt + 1, retries=attempt)
             try:
                 completion = self._get_client().beta.chat.completions.parse(
                     response_format=response_model,
                     **kwargs,
                 )
+                record_model_usage(trace, completion, attempt + 1)
                 return self._parsed_response(completion)
             except _RETRYABLE_ERRORS as exc:
                 if attempt >= self.max_retries:
@@ -178,6 +191,7 @@ class OpenAILLMClient:
 
         raise LLMError("Structured LLM request failed unexpectedly")
 
+    @traced_model("structured")
     async def agenerate_structured(
         self,
         prompt: str,
@@ -186,6 +200,7 @@ class OpenAILLMClient:
         system_prompt: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        trace: TraceContext | None = None,
     ) -> StructuredModelT:
         """Async equivalent of :meth:`generate_structured`."""
 
@@ -197,11 +212,14 @@ class OpenAILLMClient:
             kwargs["max_tokens"] = max_tokens
 
         for attempt in range(self.max_retries + 1):
+            if trace is not None:
+                trace.emit("model.attempt", attempts=attempt + 1, retries=attempt)
             try:
                 completion = await self._get_async_client().beta.chat.completions.parse(
                     response_format=response_model,
                     **kwargs,
                 )
+                record_model_usage(trace, completion, attempt + 1)
                 return self._parsed_response(completion)
             except _RETRYABLE_ERRORS as exc:
                 if attempt >= self.max_retries:
@@ -220,6 +238,7 @@ class OpenAILLMClient:
         messages: list[dict[str, str]],
         temperature: float | None,
         max_tokens: int | None,
+        trace: TraceContext | None = None,
     ) -> LLMResponse:
         kwargs: dict[str, Any] = {"messages": messages, "model": self.model}
         if temperature is not None:
@@ -228,8 +247,11 @@ class OpenAILLMClient:
             kwargs["max_tokens"] = max_tokens
 
         for attempt in range(self.max_retries + 1):
+            if trace is not None:
+                trace.emit("model.attempt", attempts=attempt + 1, retries=attempt)
             try:
                 response = client.chat.completions.create(**kwargs)
+                record_model_usage(trace, response, attempt + 1)
                 return self._response_to_llm_response(response)
             except _RETRYABLE_ERRORS as exc:
                 if attempt >= self.max_retries:
@@ -248,6 +270,7 @@ class OpenAILLMClient:
         messages: list[dict[str, str]],
         temperature: float | None,
         max_tokens: int | None,
+        trace: TraceContext | None = None,
     ) -> LLMResponse:
         kwargs: dict[str, Any] = {"messages": messages, "model": self.model}
         if temperature is not None:
@@ -256,8 +279,11 @@ class OpenAILLMClient:
             kwargs["max_tokens"] = max_tokens
 
         for attempt in range(self.max_retries + 1):
+            if trace is not None:
+                trace.emit("model.attempt", attempts=attempt + 1, retries=attempt)
             try:
                 response = await client.chat.completions.create(**kwargs)
+                record_model_usage(trace, response, attempt + 1)
                 return self._response_to_llm_response(response)
             except _RETRYABLE_ERRORS as exc:
                 if attempt >= self.max_retries:

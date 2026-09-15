@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import shutil
 from collections.abc import Sequence
+from inspect import Parameter, signature
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Protocol
@@ -21,6 +22,8 @@ from repomind.evaluation.models import (
     FileTextExpectation,
     OracleCheckResult,
 )
+from repomind.observability import TraceContext, TraceRecorder
+from repomind.observability.instrumentation import traced_run
 from repomind.tools import GitStatusOutput, ToolContext, create_default_tool_registry
 
 _MUTATION_TOOLS = frozenset({"create_file", "replace_text"})
@@ -142,8 +145,7 @@ def evaluate_coding_oracle(
         _check_path_state(workspace, path, should_exist=True) for path in case.file_exists
     )
     checks.extend(
-        _check_path_state(workspace, path, should_exist=False)
-        for path in case.file_not_exists
+        _check_path_state(workspace, path, should_exist=False) for path in case.file_not_exists
     )
     checks.extend(
         _check_text(workspace, expectation, should_contain=True)
@@ -216,21 +218,32 @@ def _recovery_observed(result: CodingTaskResult, expects_recovery: bool) -> bool
 def _evaluate_case(
     case: CodingBenchmarkCase,
     runner: CodingTaskRunner,
+    trace: TraceContext,
 ) -> CodingBenchmarkCaseResult:
     source = case.fixture_repository.resolve(strict=True)
     if not source.is_dir() or not (source / ".git").exists():
-        raise ValueError(
-            f"coding fixture must be a Git repository directory: {source}"
-        )
-    status = create_default_tool_registry(
-        ToolContext(repository_root=source)
-    ).execute("git_status", {})
+        raise ValueError(f"coding fixture must be a Git repository directory: {source}")
+    status = create_default_tool_registry(ToolContext(repository_root=source)).execute(
+        "git_status", {}
+    )
     if not GitStatusOutput.model_validate(status.model_dump()).clean:
         raise ValueError(f"coding fixture Git repository must be clean: {source}")
     with TemporaryDirectory(prefix="repomind-coding-eval-") as temporary:
         workspace = Path(temporary) / "workspace"
         shutil.copytree(source, workspace, symlinks=True)
-        result = runner(case.task, workspace, case.verification_policy)
+        accepts_trace = trace.run_id is not None and trace.project(
+            lambda: {
+                "accepts_trace": any(
+                    p.name == "trace"
+                    and p.kind in {Parameter.KEYWORD_ONLY, Parameter.POSITIONAL_OR_KEYWORD}
+                    for p in signature(runner).parameters.values()
+                )
+            }
+        ).get("accepts_trace", False)
+        if accepts_trace:
+            result = runner(case.task, workspace, case.verification_policy, trace=trace)
+        else:
+            result = runner(case.task, workspace, case.verification_policy)
         oracle = evaluate_coding_oracle(case, workspace, result.changed_files)
 
     completed = result.status is CodingTaskStatus.COMPLETED
@@ -240,6 +253,7 @@ def _evaluate_case(
     failures = tuple(check.message for check in oracle.checks if not check.passed)
     return CodingBenchmarkCaseResult(
         case_id=case.id,
+        trace_run_id=trace.run_id,
         workflow_status=result.status,
         oracle=oracle,
         oracle_passed=oracle.passed,
@@ -262,18 +276,36 @@ def _mean(values: Sequence[int]) -> float:
     return sum(values) / len(values)
 
 
+@traced_run("evaluation")
 def evaluate_coding_suite(
     suite: CodingBenchmarkSuite,
     runner: CodingTaskRunner,
     *,
     mode: EvaluationMode = EvaluationMode.OFFLINE_SCRIPTED,
+    recorder: TraceRecorder | None = None,
+    trace: TraceContext | None = None,
 ) -> CodingEvaluationReport:
     """Run coding cases sequentially in disposable copies and aggregate results."""
 
+    trace = trace if trace is not None else TraceContext()
     resolved_mode = EvaluationMode(mode)
     if resolved_mode is EvaluationMode.OFFLINE_FIXTURE:
         raise ValueError("coding evaluation mode must be offline_scripted or live_model")
-    case_results = tuple(_evaluate_case(case, runner) for case in suite.cases)
+    results: list[CodingBenchmarkCaseResult] = []
+    for case in suite.cases:
+        with trace.operation(
+            "evaluation.case", case_id=case.id, suite_version=suite.version, mode=resolved_mode
+        ) as metadata:
+            result = _evaluate_case(case, runner, trace)
+            results.append(result)
+            metadata.update(
+                case_id=case.id,
+                workflow_status=result.workflow_status,
+                task_success=result.task_success,
+                oracle_passed=result.oracle_passed,
+                false_positive_completion=result.false_positive_completion,
+            )
+    case_results = tuple(results)
     count = len(case_results)
     recovery_results = [
         result.recovery_observed
@@ -286,8 +318,7 @@ def evaluate_coding_suite(
         case_results=case_results,
         case_count=count,
         workflow_completion_rate=sum(
-            result.workflow_status is CodingTaskStatus.COMPLETED
-            for result in case_results
+            result.workflow_status is CodingTaskStatus.COMPLETED for result in case_results
         )
         / count,
         task_success_rate=sum(result.task_success for result in case_results) / count,
@@ -295,22 +326,12 @@ def evaluate_coding_suite(
             result.false_positive_completion for result in case_results
         )
         / count,
-        verification_pass_rate=sum(
-            result.final_verification_passed for result in case_results
-        )
+        verification_pass_rate=sum(result.final_verification_passed for result in case_results)
         / count,
-        recovery_rate=(
-            sum(recovery_results) / len(recovery_results) if recovery_results else None
-        ),
+        recovery_rate=(sum(recovery_results) / len(recovery_results) if recovery_results else None),
         mean_llm_calls=_mean([result.llm_calls for result in case_results]),
         mean_tool_calls=_mean([result.tool_calls for result in case_results]),
-        mean_successful_mutations=_mean(
-            [result.successful_mutations for result in case_results]
-        ),
-        mean_agent_iterations=_mean(
-            [result.agent_iterations for result in case_results]
-        ),
-        mean_completion_attempts=_mean(
-            [result.completion_attempts for result in case_results]
-        ),
+        mean_successful_mutations=_mean([result.successful_mutations for result in case_results]),
+        mean_agent_iterations=_mean([result.agent_iterations for result in case_results]),
+        mean_completion_attempts=_mean([result.completion_attempts for result in case_results]),
     )
