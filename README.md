@@ -101,6 +101,10 @@ indexing, Ask, read-only Investigate, guarded Code, live progress, and run histo
 **Milestone 19: durable jobs and worker execution** is complete. PostgreSQL owns
 durable job state while Redis provides best-effort worker wakeups and live progress.
 
+**Milestone 20: safe cooperative job cancellation** is complete. Cancellation
+intent is durable in PostgreSQL and workers honor it only at explicit safe workflow
+boundaries; no worker thread or in-flight blocking call is forcefully terminated.
+
 ## Local HTTP API
 
 The API is for **trusted local development only**. It has **no authentication or
@@ -135,9 +139,9 @@ uv run alembic current
 uv run uvicorn repomind.api.app:app --host 127.0.0.1 --port 8000
 ```
 
-The current migration head is `20260915_02`. It adds a nullable
-`repositories.workspace_relative_path`; existing IDs, indexes, and trace data are
-preserved. Pre-API repositories remain unbound and return `409` for workspace
+The current migration head is `20260916_02`. It adds durable jobs and cooperative
+cancellation state while preserving existing repository, index, and trace data.
+Pre-API repositories remain unbound and return `409` for workspace
 operations. They are not silently mapped to local files. Register a new unique
 repository name to index a workspace through HTTP. Reusing an API-registered name
 and the same canonical relative location is idempotent; changing its binding is a
@@ -165,6 +169,7 @@ All capability endpoints use `/api/v1`:
 | POST | `/repositories/{id}/jobs/{index,rag,agent,coding}` | Persist a durable job and return `202` quickly |
 | GET | `/jobs` | Bounded durable job summaries; optional status/type/repository filters |
 | GET | `/jobs/{uuid}` | Authoritative durable status, safe terminal result/error, and trace link |
+| POST | `/jobs/{uuid}/cancel` | Durably request safe cooperative cancellation |
 | GET | `/jobs/{uuid}/events` | Ephemeral live semantic job progress as SSE |
 | GET | `/runs` | Compact stored trace summaries; optional `run_type`, `status`, `limit` (1–100) |
 | GET | `/runs/{uuid}` | Stored summary and ordered, sanitized trace events |
@@ -261,12 +266,12 @@ database/file transaction success. The 256-event buffer is well above normal
 bounded RepoMind timelines; if a client is too slow, non-terminal progress may be
 dropped (visible as a sequence gap), but a terminal result/error is retained.
 
-There is no cooperative cancellation, durable job, replay, resume token, or
-`Last-Event-ID` support. If a client disconnects, the server stops forwarding to
-that connection but allows the already-running synchronous operation to finish so
-coding workflow invariants and edits are not interrupted unsafely. Completed traces
-can still be queried through `/api/v1/runs/{uuid}` when trace persistence succeeds.
-Request-bound streams remain available, but the frontend now prefers durable jobs.
+Request-bound streams have no durable job, replay, resume token, cooperative cancel
+endpoint, or `Last-Event-ID` support. If such a client disconnects, the server stops
+forwarding to that connection but allows the already-running synchronous operation
+to finish. Durable worker jobs instead support the explicit job cancellation API
+described below. Completed traces can still be queried through
+`/api/v1/runs/{uuid}` when trace persistence succeeds.
 
 Indexing delegates to existing deterministic ingestion/chunking and embedding
 providers, preserving source newlines. It rejects more than 10,000 discovered
@@ -344,8 +349,7 @@ external editors, other processes, or direct Python callers, and path checks are
 not an OS-level race-proof sandbox. A disconnected HTTP request is not guaranteed
 to cancel a running workflow. No automatic retry of mutation requests is safe.
 
-Readiness probes, durable jobs, workers/Redis, evaluation execution APIs,
-approval/resume, auth, MCP, native tool calling,
+Readiness probes, evaluation execution APIs, approval/resume, auth, MCP, native tool calling,
 planner/reviewer agents, multi-agent execution, arbitrary shell, Git mutation,
 deployment, and retrieval experiments remain deferred. No `BackgroundTasks` are
 implemented here.
@@ -358,10 +362,15 @@ HTTP enqueue -> PostgreSQL job -> Redis wakeup -> worker -> existing RepoMind se
                      `----------- durable status/result -----'
                                     |
                          Redis Pub/Sub -> GET SSE -> browser
+
+POST cancel -> PostgreSQL cancel_requested_at -> worker safe checkpoint
+                                                    |
+                                      cancelled/deferred state -> SSE/browser
 ```
 
 PostgreSQL is the authoritative durable store for job identity, validated request
-payload, status, attempt count, lease, safe result/error, and trace linkage. Redis
+payload, status, cancellation timestamps, coding mutation phase, attempt count,
+lease, safe result/error, and trace linkage. Redis
 is only coordination: a Redis outage never deletes queued job state because workers
 also poll PostgreSQL. Start local infrastructure with `docker compose up -d postgres redis`,
 apply `uv run alembic upgrade head`, run `uv run python -m repomind.worker`, then
@@ -383,6 +392,23 @@ commands, environment dumps, source payloads, test output, or embedding vectors.
 uses Redis Pub/Sub and has no replay guarantee: missed live progress can be recovered
 only as durable status/result and the existing persisted trace timeline. “Stop viewing
 progress” still does not cancel a worker operation.
+
+Queued cancellation is immediate and prevents a later claim. For a running index,
+RAG, or read-only agent job, the worker continues renewing its lease until it reaches
+the next coarse safe checkpoint, then records terminal `cancelled` and emits a
+terminal `cancelled` SSE frame. A blocking model, embedding, tool, or transaction
+already in progress is allowed to finish first, so cancellation latency includes that
+operation. Redis is deliberately not used as cancellation truth (or currently as a
+cancellation wakeup); durable checkpoint reads from PostgreSQL remain correct across
+Redis loss or restart.
+
+Coding cancellation is intentionally conservative. Before the first successful file
+mutation, it can stop at the next checkpoint. At the first successful mutation the
+worker durably records `side_effect_started_at`. Later cancel requests remain visible
+as `deferred`, but do not interrupt the edit/verification/final-review workflow; the
+job reaches its normal terminal result. RepoMind does not yet implement file rollback,
+and will not forcefully terminate a coding operation merely to make cancellation look
+immediate.
 
 ## Frontend workspace
 
@@ -439,12 +465,13 @@ read-only. Code requires an explicit checkbox before it sends a controlled codin
 request; it exposes only the existing relative pytest/Ruff path scopes, never
 shell commands, executables, environment variables, Git controls, or diffs.
 
-All long operations use the existing POST SSE endpoints through `fetch` and a
-buffered incremental SSE parser. The shared timeline renders safe semantic events
-for live progress and persisted run history. “Stop viewing progress” aborts the
-browser transport only; it does **not** cancel the backend operation, which may
-continue to protect coding-workflow integrity. There is intentionally no automatic
-reconnect because streams have no replay or durable-job semantics.
+The frontend submits long operations as durable jobs and observes them through a
+buffered incremental SSE parser. It saves the active job ID in local storage and
+recovers authoritative status after refresh; live Redis progress itself is not
+replayed. The shared timeline renders safe semantic events for live progress and
+persisted run history. "Stop viewing progress" aborts only the browser transport.
+The separate "Cancel job" action persists cancellation intent and continues
+observing until the backend reports a safe terminal or deferred outcome.
 
 Frontend checks are deterministic and do not need FastAPI, PostgreSQL, or OpenAI:
 
@@ -1636,7 +1663,9 @@ RepoMind/
 │   ├── versions/
 │   │   ├── 20260910_01_initial_pgvector_schema.py
 │   │   ├── 20260915_01_run_traces.py
-│   │   └── 20260915_02_repository_workspaces.py
+│   │   ├── 20260915_02_repository_workspaces.py
+│   │   ├── 20260916_01_durable_jobs.py
+│   │   └── 20260916_02_job_cancellation.py
 │   ├── env.py
 │   └── script.py.mako
 ├── tests/
@@ -2087,5 +2116,5 @@ The full project roadmap is described in the RepoMind engineering brief:
 16. FastAPI backend (complete)
 17. Semantic SSE progress streaming (complete)
 18. Next.js + TypeScript frontend (complete)
-19. Redis + durable worker/job architecture (complete/current)
-20. Cooperative cancellation / job control (next)
+19. Redis + durable worker/job architecture (complete)
+20. Cooperative cancellation / job control (complete/current)

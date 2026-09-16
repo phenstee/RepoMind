@@ -18,6 +18,7 @@ from repomind.coding import (
     VerificationPolicy,
     run_coding_task,
 )
+from repomind.jobs import JobCancellationRequested
 from repomind.tools import (
     ToolConfig,
     ToolContext,
@@ -143,6 +144,93 @@ def test_successful_task_runs_automatic_gates_and_returns_git_evidence(
     assert "return 2" in result.final_review.unstaged_diff.content
     assert "The value test passes." in llm.calls[0]["prompt"]
     assert "only a request" in llm.calls[0]["prompt"]
+
+
+def test_cancellation_after_first_mutation_is_deferred_through_verification(
+    tmp_path: Path,
+) -> None:
+    before = b"def value():\n    return 1\n"
+    _project(tmp_path, source=before, expected=2)
+    llm = _ScriptedLLM(
+        [
+            _tool(
+                "replace_text",
+                path="app.py",
+                old_text="return 1",
+                new_text="return 2",
+                expected_sha256=_hash(before),
+            ),
+            _final("Changed app.py safely."),
+        ]
+    )
+
+    class DeferredCancellation:
+        def __init__(self) -> None:
+            self.side_effects = 0
+            self.deferred_checkpoints = 0
+
+        def checkpoint(self) -> None:
+            if self.side_effects:
+                self.deferred_checkpoints += 1
+
+        def side_effect_started(self) -> None:
+            self.side_effects += 1
+
+    cancellation = DeferredCancellation()
+
+    result = run_coding_task(
+        CodingTask(objective="Return two."),
+        llm,
+        _registry(tmp_path),
+        cancellation=cancellation,
+    )
+
+    assert result.status is CodingTaskStatus.COMPLETED
+    assert result.verification.tests_passed is True
+    assert result.verification.ruff_passed is True
+    assert cancellation.side_effects == 1
+    assert cancellation.deferred_checkpoints > 0
+
+
+def test_cancellation_before_first_mutation_leaves_repository_unchanged(
+    tmp_path: Path,
+) -> None:
+    before = b"def value():\n    return 1\n"
+    _project(tmp_path, source=before, expected=1)
+    llm = _ScriptedLLM(
+        [
+            _tool(
+                "replace_text",
+                path="app.py",
+                old_text="return 1",
+                new_text="return 2",
+                expected_sha256=_hash(before),
+            )
+        ]
+    )
+
+    class CancelBeforeAgent:
+        def __init__(self) -> None:
+            self.checkpoints = 0
+
+        def checkpoint(self) -> None:
+            self.checkpoints += 1
+            if self.checkpoints == 4:
+                raise JobCancellationRequested("cancelled")
+
+        def side_effect_started(self) -> None:
+            raise AssertionError("mutation must not start")
+
+    with pytest.raises(JobCancellationRequested):
+        run_coding_task(
+            CodingTask(objective="Change value."),
+            llm,
+            _registry(tmp_path),
+            cancellation=CancelBeforeAgent(),
+        )
+
+    assert (tmp_path / "app.py").read_bytes() == before
+    assert llm.calls == []
 
 
 def test_tests_are_rerun_when_later_edit_makes_agent_evidence_stale(

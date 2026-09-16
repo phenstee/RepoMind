@@ -5,6 +5,7 @@ from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
+from repomind.jobs.control import CooperativeCancellation, NoCancellation
 from repomind.observability import TraceContext, TraceRecorder
 from repomind.observability.instrumentation import generate_structured, traced_run
 from repomind.rag.context import RAGError, build_repository_context
@@ -119,7 +120,9 @@ def _answer_from_ranked_chunks(
     llm_client: StructuredLLMProvider,
     config: RAGConfig,
     trace: TraceContext,
+    cancellation: CooperativeCancellation,
 ) -> RepositoryAnswer:
+    cancellation.checkpoint()
     if not results:
         trace.emit("rag.context", context_chunk_count=0, context_chars=0)
         trace.emit("rag.answer", citation_count=0, insufficient_evidence=True)
@@ -133,6 +136,7 @@ def _answer_from_ranked_chunks(
         results,
         max_context_chars=config.max_context_chars,
     )
+    cancellation.checkpoint()
     trace.emit(
         "rag.context", context_chunk_count=len(context.sources), context_chars=len(context.text)
     )
@@ -144,6 +148,7 @@ def _answer_from_ranked_chunks(
         temperature=0.0,
         trace=trace,
     )
+    cancellation.checkpoint()
     if not isinstance(response, GroundedLLMResponse):
         raise RAGError("Structured LLM provider returned an unexpected response model")
     answer = _map_answer(response, context)
@@ -166,6 +171,7 @@ def answer_repository_question_with_retriever(
     strategy: str = "custom",
     recorder: TraceRecorder | None = None,
     trace: TraceContext | None = None,
+    cancellation: CooperativeCancellation | None = None,
 ) -> RepositoryAnswer:
     """Use an injected retriever, generate once, and map validated citations."""
 
@@ -174,12 +180,17 @@ def answer_repository_question_with_retriever(
 
     rag_config = config or RAGConfig()
     trace = trace if trace is not None else TraceContext()
+    cancellation = cancellation or NoCancellation()
+    cancellation.checkpoint()
     with trace.operation(
         "retrieval", strategy=strategy, reranking_enabled=strategy == "hybrid+rerank"
     ) as metadata:
         results = retriever(question, top_k=rag_config.top_k)
         metadata["candidate_count"] = len(results)
-    return _answer_from_ranked_chunks(question, results, llm_client, rag_config, trace)
+    cancellation.checkpoint()
+    return _answer_from_ranked_chunks(
+        question, results, llm_client, rag_config, trace, cancellation
+    )
 
 
 @traced_run("rag")
@@ -192,6 +203,7 @@ def answer_repository_question(
     config: RAGConfig | None = None,
     recorder: TraceRecorder | None = None,
     trace: TraceContext | None = None,
+    cancellation: CooperativeCancellation | None = None,
 ) -> RepositoryAnswer:
     """Preserve the original semantic-only repository RAG baseline."""
 
@@ -200,6 +212,8 @@ def answer_repository_question(
 
     rag_config = config or RAGConfig()
     trace = trace if trace is not None else TraceContext()
+    cancellation = cancellation or NoCancellation()
+    cancellation.checkpoint()
     with trace.operation("retrieval", strategy="semantic", reranking_enabled=False) as metadata:
         results = semantic_search(
             question,
@@ -208,10 +222,12 @@ def answer_repository_question(
             top_k=rag_config.top_k,
         )
         metadata["candidate_count"] = len(results)
+    cancellation.checkpoint()
     return _answer_from_ranked_chunks(
         question,
         results,
         llm_client,
         rag_config,
         trace,
+        cancellation,
     )

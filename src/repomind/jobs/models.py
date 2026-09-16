@@ -20,6 +20,15 @@ class JobStatus(StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+class CancellationState(StrEnum):
+    AVAILABLE = "available"
+    REQUESTED = "requested"
+    DEFERRED = "deferred"
+    UNAVAILABLE = "unavailable"
+    CANCELLED = "cancelled"
 
 
 class Job(BaseModel):
@@ -42,7 +51,27 @@ class Job(BaseModel):
     lease_owner: str | None = None
     lease_expires_at: datetime | None = None
     trace_run_id: UUID | None = None
+    cancel_requested_at: datetime | None = None
+    cancelled_at: datetime | None = None
+    side_effect_started_at: datetime | None = None
 
     @property
     def terminal(self) -> bool:
-        return self.status in {JobStatus.SUCCEEDED, JobStatus.FAILED}
+        return self.status in {JobStatus.SUCCEEDED, JobStatus.FAILED, JobStatus.CANCELLED}
+
+    @property
+    def cancel_requested(self) -> bool:
+        return self.cancel_requested_at is not None
+
+    @property
+    def cancellation_state(self) -> CancellationState:
+        if self.status == JobStatus.CANCELLED:
+            return CancellationState.CANCELLED
+        unsafe_coding = self.job_type == JobType.CODING and self.side_effect_started_at is not None
+        if unsafe_coding and self.cancel_requested:
+            return CancellationState.DEFERRED
+        if self.terminal or unsafe_coding:
+            return CancellationState.UNAVAILABLE
+        if self.cancel_requested:
+            return CancellationState.REQUESTED
+        return CancellationState.AVAILABLE

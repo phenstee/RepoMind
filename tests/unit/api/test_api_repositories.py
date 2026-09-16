@@ -11,6 +11,7 @@ from repomind.api import create_app
 from repomind.api.errors import APIError
 from repomind.api.services.repositories import WorkspacePolicy
 from repomind.config import Settings
+from repomind.jobs import JobCancellationRequested
 
 
 @pytest.mark.parametrize(
@@ -192,6 +193,31 @@ def test_failed_embedding_preserves_index_and_size_limits_prevent_calls(api, mon
     service = api.app.state.container.get().repositories
     monkeypatch.setattr(service, "MAX_SOURCE_BYTES", 1)
     assert api.client.post("/api/v1/repositories/1/index").status_code == 413
+
+
+def test_cancellation_after_embedding_preserves_previous_atomic_index(api):
+    assert api.client.post("/api/v1/repositories/1/index").status_code == 200
+    old_snapshot = api.store.snapshots[1]
+    old_chunks = api.store.chunks[1]
+
+    class CancelBeforePersistence:
+        def __init__(self) -> None:
+            self.checkpoints = 0
+
+        def checkpoint(self) -> None:
+            self.checkpoints += 1
+            if self.checkpoints == 5:
+                raise JobCancellationRequested("cancel before persistence")
+
+        def side_effect_started(self) -> None:
+            raise AssertionError("indexing has no coding side effect boundary")
+
+    service = api.app.state.container.get().repositories
+    with pytest.raises(JobCancellationRequested):
+        service.index(1, api.embeddings, cancellation=CancelBeforePersistence())
+
+    assert api.store.snapshots[1] is old_snapshot
+    assert api.store.chunks[1] is old_chunks
 
 
 def test_nested_workspace_operations_conflict_and_lock_releases(api):

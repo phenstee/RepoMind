@@ -30,6 +30,7 @@ from repomind.coding.models import (
     VerificationReport,
     WorkspaceBaseline,
 )
+from repomind.jobs.control import CooperativeCancellation, NoCancellation
 from repomind.observability import TraceContext, TraceRecorder
 from repomind.observability.instrumentation import traced_run
 from repomind.tools import (
@@ -218,7 +219,9 @@ def _run_required_verification(
     registry: ToolRegistry,
     state: _WorkflowState,
     policy: VerificationPolicy,
+    cancellation: CooperativeCancellation,
 ) -> None:
+    cancellation.checkpoint()
     if policy.require_tests and not (
         state.tests_result is not None
         and state.tests_result.passed
@@ -240,7 +243,9 @@ def _run_required_verification(
         else:
             state.tests_result = RunTestsOutput.model_validate(output.model_dump())
             state.tests_execution_error = None
+        cancellation.checkpoint()
 
+    cancellation.checkpoint()
     if policy.require_ruff and not (
         state.ruff_result is not None
         and state.ruff_result.passed
@@ -262,6 +267,7 @@ def _run_required_verification(
         else:
             state.ruff_result = RunRuffOutput.model_validate(output.model_dump())
             state.ruff_execution_error = None
+        cancellation.checkpoint()
 
 
 def _has_staged_changes(status: GitStatusOutput) -> bool:
@@ -273,7 +279,9 @@ def _capture_final_review(
     state: _WorkflowState,
     baseline: WorkspaceBaseline,
     policy: VerificationPolicy,
+    cancellation: CooperativeCancellation,
 ) -> tuple[FinalChangeReview | None, tuple[str, ...]]:
+    cancellation.checkpoint()
     trace = registry.trace
     if trace is not None:
         trace.emit("final_review.started", workspace_revision=state.workspace_revision)
@@ -289,6 +297,7 @@ def _capture_final_review(
             )
         return None, (f"Final Git status could not be inspected: {exc}",)
     typed_status = GitStatusOutput.model_validate(status.model_dump())
+    cancellation.checkpoint()
 
     unstaged: GitDiffOutput | None = None
     unstaged_error: str | None = None
@@ -300,12 +309,14 @@ def _capture_final_review(
             unstaged = GitDiffOutput.model_validate(output.model_dump())
         except ToolError as exc:
             unstaged_error = str(exc)
+        cancellation.checkpoint()
         if _has_staged_changes(typed_status):
             try:
                 output = _execute_typed(registry, "git_diff", {"staged": True}, GitDiffOutput)
                 staged = GitDiffOutput.model_validate(output.model_dump())
             except ToolError as exc:
                 staged_error = str(exc)
+            cancellation.checkpoint()
 
     changed = {item.path for item in typed_status.changed_files}
     baseline_paths = set(baseline.changed_files)
@@ -408,10 +419,13 @@ def run_coding_task(
     workflow_config: CodingWorkflowConfig | None = None,
     recorder: TraceRecorder | None = None,
     trace: TraceContext | None = None,
+    cancellation: CooperativeCancellation | None = None,
 ) -> CodingTaskResult:
     """Run an editing agent under deterministic preflight and completion gates."""
 
     trace = trace if trace is not None else TraceContext()
+    cancellation = cancellation or NoCancellation()
+    cancellation.checkpoint()
     trace.workspace_revision = 0
     if trace.run_id is not None:
         tool_registry = tool_registry.with_trace(trace)
@@ -437,6 +451,7 @@ def run_coding_task(
         return _precondition_result(
             task, policy, f"Initial Git status could not be inspected: {exc}"
         )
+    cancellation.checkpoint()
     typed_status = GitStatusOutput.model_validate(status.model_dump())
     initial_paths = _sorted_paths({item.path for item in typed_status.changed_files})
     baseline = WorkspaceBaseline(
@@ -454,6 +469,7 @@ def run_coding_task(
         )
 
     trace.emit("preflight.passed", clean=baseline.clean)
+    cancellation.checkpoint()
     state = _WorkflowState()
 
     def observe(step: AgentStep) -> None:
@@ -471,8 +487,11 @@ def run_coding_task(
             workspace_revision=state.workspace_revision,
         )
         state.last_final_answer = decision.final_answer
-        _run_required_verification(tool_registry, state, policy)
-        review, review_blockers = _capture_final_review(tool_registry, state, baseline, policy)
+        cancellation.checkpoint()
+        _run_required_verification(tool_registry, state, policy, cancellation)
+        review, review_blockers = _capture_final_review(
+            tool_registry, state, baseline, policy, cancellation
+        )
         state.final_review = review
         report = _verification_report(state, policy)
         completion = _evaluate_completion(
@@ -526,9 +545,12 @@ def run_coding_task(
             observation_handler=observe,
             final_decision_handler=handle_final,
             trace=trace,
+            cancellation=cancellation,
         )
     except AgentError as exc:
-        review, _ = _capture_final_review(tool_registry, state, baseline, policy)
+        review, _ = _capture_final_review(
+            tool_registry, state, baseline, policy, cancellation
+        )
         return CodingTaskResult(
             task=task,
             status=CodingTaskStatus.ERROR,
@@ -546,7 +568,9 @@ def run_coding_task(
         )
 
     if state.final_review is None:
-        state.final_review, _ = _capture_final_review(tool_registry, state, baseline, policy)
+        state.final_review, _ = _capture_final_review(
+            tool_registry, state, baseline, policy, cancellation
+        )
     if agent_run.status is AgentRunStatus.COMPLETED:
         result_status = CodingTaskStatus.COMPLETED
         blockers: tuple[str, ...] = ()

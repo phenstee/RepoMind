@@ -1,3 +1,4 @@
+from threading import Event, Thread
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -26,6 +27,20 @@ class FakeStore:
     def renew_lease(self, job_id, worker_id, lease_seconds):
         return True
 
+    def get(self, job_id):
+        assert job_id == self.job.id
+        return self.job
+
+    def request_cancel(self):
+        self.job = self.job.model_copy(update={"cancel_requested_at": self.job.created_at})
+
+    def mark_side_effect_started(self, job_id, worker_id):
+        self.job = self.job.model_copy(update={"side_effect_started_at": self.job.created_at})
+        return self.job
+
+    def mark_cancelled(self, job_id, worker_id):
+        self.job = self.job.model_copy(update={"status": JobStatus.CANCELLED})
+
     def mark_succeeded(self, job_id, worker_id, result):
         self.result = result
 
@@ -46,10 +61,11 @@ class FakeExecution:
         self.trace_store = SimpleNamespace(persist_run_trace=lambda trace: None)
         self.fail = fail
 
-    def rag(self, repository_id, request, *, trace):
+    def rag(self, repository_id, request, *, trace, cancellation):
         trace.emit("retrieval.started", strategy=request.strategy, reranking_enabled=False)
         if self.fail:
             raise RuntimeError("sk-secret postgresql://private:password@host/db")
+        cancellation.checkpoint()
         trace.finish("completed")
         return RAGResponse(
             answer="safe answer",
@@ -92,3 +108,54 @@ def test_worker_failure_never_persists_raw_exception_text():
     assert store.error == "operation_failed"
     assert store.result is None
     assert "secret" not in str(store.error)
+
+
+def test_worker_cooperatively_cancels_at_checkpoint_without_marking_failure():
+    store, broker = FakeStore(_job()), FakeBroker()
+
+    class CancellingExecution(FakeExecution):
+        def rag(self, repository_id, request, *, trace, cancellation):
+            del repository_id, request
+            store.request_cancel()
+            cancellation.checkpoint()
+
+    assert JobWorker(
+        store, broker, CancellingExecution(), worker_id="test", lease_seconds=30
+    ).run_once()
+    assert store.job.status == JobStatus.CANCELLED
+    assert store.result is None
+    assert store.error is None
+    assert [event.event for event in broker.events] == [
+        "run.started",
+        "job.cancel_requested",
+        "job.cancelled",
+    ]
+
+
+def test_running_blocking_operation_finishes_before_cancellation_is_acknowledged():
+    store, broker = FakeStore(_job()), FakeBroker()
+    started = Event()
+    release = Event()
+
+    class BlockingExecution(FakeExecution):
+        def rag(self, repository_id, request, *, trace, cancellation):
+            del repository_id, request
+            started.set()
+            assert release.wait(timeout=5)
+            cancellation.checkpoint()
+
+    worker = JobWorker(
+        store, broker, BlockingExecution(), worker_id="test", lease_seconds=30
+    )
+    thread = Thread(target=worker.run_once)
+    thread.start()
+    assert started.wait(timeout=5)
+
+    store.request_cancel()
+    assert thread.is_alive()
+    assert store.job.status == JobStatus.RUNNING
+
+    release.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert store.job.status == JobStatus.CANCELLED

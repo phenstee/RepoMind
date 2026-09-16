@@ -4,6 +4,7 @@ import type {
   ApiErrorPayload,
   HealthResponse,
   IndexResponse,
+  JobCancelResponse,
   JobDetail,
   JobQueuedResponse,
   ProgressEvent,
@@ -66,6 +67,8 @@ export const api = {
   runs: () => request<RunListResponse>("/runs?limit=30"),
   run: (runId: string) => request<RunDetail>(`/runs/${runId}`),
   job: (jobId: string) => request<JobDetail>(`/jobs/${jobId}`),
+  cancelJob: (jobId: string) =>
+    request<JobCancelResponse>(`/jobs/${jobId}/cancel`, { method: "POST" }),
   createJob: (repositoryId: number, type: "index" | "rag" | "agent" | "coding", body?: unknown) =>
     request<JobQueuedResponse>(`/repositories/${repositoryId}/jobs/${type}`, {
       method: "POST",
@@ -77,6 +80,7 @@ export interface StreamHandlers<T> {
   signal: AbortSignal;
   onProgress: (event: ProgressEvent) => void;
   onResult: (result: T) => void;
+  onCancelled?: () => void;
 }
 
 export async function postSSE<T>(
@@ -144,6 +148,10 @@ export async function getJobEvents<T>(
       const { done, value } = await reader.read();
       for (const frame of parser.feed(decoder.decode(value, { stream: !done }))) {
         if (frame.event === "result" && isRecord(frame.data) && "result" in frame.data) handlers.onResult(frame.data.result as T);
+        else if (frame.event === "cancelled") {
+          handlers.onCancelled?.();
+          return;
+        }
         else if (frame.event === "error") throw errorFromPayload(isRecord(frame.data) && "error" in frame.data ? { error: frame.data.error } : null);
         else if (isProgressEvent(frame.data)) handlers.onProgress(frame.data);
       }

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import pytest
 from pydantic import BaseModel
 
 from repomind.agent import (
@@ -15,6 +16,7 @@ from repomind.agent import (
     run_editing_agent,
 )
 from repomind.agent.prompts import EDITING_AGENT_SYSTEM_PROMPT
+from repomind.jobs import JobCancellationRequested
 from repomind.tools import ToolContext, create_editing_tool_registry
 
 
@@ -222,3 +224,38 @@ def test_successful_mutation_limit_blocks_later_write(tmp_path: Path) -> None:
     assert not run.steps[1].observation.success
     assert "mutation budget exhausted" in run.steps[1].observation.error
     assert run.tool_calls == 1
+
+
+def test_cancellation_checkpoint_stops_before_another_model_or_tool_call(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "app.py").write_text("value = 1\n", encoding="utf-8")
+    llm = _ScriptedLLM(
+        [
+            _tool("read_file", path="app.py"),
+            _tool("create_file", path="must-not-exist.py", content="unsafe\n"),
+        ]
+    )
+
+    class Cancellation:
+        def __init__(self) -> None:
+            self.checkpoints = 0
+
+        def checkpoint(self) -> None:
+            self.checkpoints += 1
+            if self.checkpoints == 5:
+                raise JobCancellationRequested("cancelled")
+
+        def side_effect_started(self) -> None:
+            raise AssertionError("read-only tool must not mark a side effect")
+
+    with pytest.raises(JobCancellationRequested):
+        run_editing_agent(
+            "Inspect and then edit",
+            llm,
+            _registry(tmp_path),
+            cancellation=Cancellation(),
+        )
+
+    assert len(llm.calls) == 1
+    assert not (tmp_path / "must-not-exist.py").exists()

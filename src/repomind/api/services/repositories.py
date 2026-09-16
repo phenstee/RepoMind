@@ -23,6 +23,7 @@ from repomind.ingestion import (
     ingest_repository,
     resolve_repository_path,
 )
+from repomind.jobs.control import CooperativeCancellation, NoCancellation
 from repomind.jobs.locks import NullRepositoryExecutionLock, RepositoryExecutionLock
 from repomind.observability import TraceContext
 from repomind.retrieval import EmbeddedChunk
@@ -157,9 +158,13 @@ class RepositoryService:
         embedder: ChunkEmbedder,
         *,
         trace: TraceContext | None = None,
+        cancellation: CooperativeCancellation | None = None,
     ) -> IndexResponse:
+        cancellation = cancellation or NoCancellation()
+        cancellation.checkpoint()
         binding, root = self.locate(repository_id)
         with self.workspace.operation(root), self.execution_lock.hold(repository_id):
+            cancellation.checkpoint()
             if trace is not None:
                 trace.emit("index.started", repository_id=repository_id)
             sources = find_source_files(root)
@@ -171,6 +176,7 @@ class RepositoryService:
                     413, "repository_too_large", "Repository exceeds synchronous index limits."
                 )
             snapshot = ingest_repository(root).model_copy(update={"name": binding.name})
+            cancellation.checkpoint()
             if (
                 snapshot.file_count > self.MAX_FILES
                 or snapshot.total_size_bytes > self.MAX_SOURCE_BYTES
@@ -186,6 +192,7 @@ class RepositoryService:
                     total_size_bytes=snapshot.total_size_bytes,
                 )
             chunks = chunk_repository(snapshot)
+            cancellation.checkpoint()
             if len(chunks) > self.MAX_CHUNKS:
                 raise APIError(
                     413, "repository_too_large", "Repository exceeds synchronous index limits."
@@ -198,6 +205,7 @@ class RepositoryService:
                     "embedding.started", repository_id=repository_id, chunk_count=len(chunks)
                 )
             embedded = embedder.embed_chunks(chunks) if chunks else []
+            cancellation.checkpoint()
             if trace is not None:
                 trace.emit(
                     "embedding.completed",
@@ -206,6 +214,7 @@ class RepositoryService:
                     embedding_model=embedded[0].embedding.model if embedded else None,
                 )
             self.workspace.resolve(binding.workspace_relative_path)
+            cancellation.checkpoint()
             self.store.replace_index(repository_id, snapshot, embedded)
             if trace is not None:
                 trace.emit(
@@ -214,6 +223,7 @@ class RepositoryService:
                     file_count=snapshot.file_count,
                     chunk_count=len(embedded),
                 )
+            cancellation.checkpoint()
             return IndexResponse(
                 repository_id=repository_id,
                 files_indexed=snapshot.file_count,

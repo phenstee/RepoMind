@@ -17,7 +17,7 @@ from pydantic import (
 from repomind.agent import AgentRunStatus
 from repomind.coding import CodingTaskStatus
 from repomind.ingestion import validate_repository_relative_path
-from repomind.jobs import JobStatus, JobType
+from repomind.jobs import CancellationState, JobStatus, JobType
 from repomind.llm.models import TokenUsage
 from repomind.observability import RunStatus, RunType, TraceEvent
 from repomind.tools import RunRuffInput, RunTestsInput
@@ -230,6 +230,10 @@ class JobSummaryResponse(JobQueuedResponse):
     started_at: datetime | None
     finished_at: datetime | None
     trace_run_id: UUID | None
+    cancel_requested: bool
+    cancel_requested_at: datetime | None
+    cancelled_at: datetime | None
+    cancellation_control: CancellationState
 
 
 class JobDetailResponse(JobSummaryResponse):
@@ -239,3 +243,12 @@ class JobDetailResponse(JobSummaryResponse):
 
 class JobListResponse(BaseModel):
     jobs: list[JobSummaryResponse]
+
+
+class JobCancelResponse(BaseModel):
+    job_id: UUID
+    status: JobStatus
+    cancel_requested: bool
+    cancel_requested_at: datetime | None
+    cancelled_at: datetime | None
+    cancellation_control: CancellationState

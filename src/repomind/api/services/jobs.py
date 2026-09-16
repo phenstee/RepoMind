@@ -36,6 +36,12 @@ class JobService:
     def list(self, **filters) -> tuple[Job, ...]:
         return tuple(self.store.list(**filters))
 
+    def cancel(self, job_id: UUID) -> Job:
+        try:
+            return self.store.request_cancel(job_id)
+        except JobNotFoundError as exc:
+            raise APIError(404, "job_not_found", "Job not found.") from exc
+
     def stream(self, request: Request, job_id: UUID) -> StreamingResponse:
         self.get(job_id)
 
@@ -53,6 +59,18 @@ class JobService:
                         return
                     if job.status == JobStatus.FAILED:
                         yield encode_sse_event("error", {"job_id": str(job.id), "error": {"code": job.error_code or "operation_failed", "message": "The operation failed."}})
+                        return
+                    if job.status == JobStatus.CANCELLED:
+                        yield encode_sse_event(
+                            "cancelled",
+                            {
+                                "job_id": str(job.id),
+                                "status": job.status.value,
+                                "cancelled_at": job.cancelled_at.isoformat()
+                                if job.cancelled_at
+                                else None,
+                            },
+                        )
                         return
                     progress = await anyio.to_thread.run_sync(subscription.next, 1.0)
                     if progress is not None:

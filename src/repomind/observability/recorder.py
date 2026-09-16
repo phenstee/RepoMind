@@ -187,9 +187,17 @@ class TraceContext:
     ) -> None:
         if self._trace is None or self._finished:
             return
-        status = RunStatus.COMPLETED if domain_status == "completed" else RunStatus.FAILED
+        if domain_status == "completed":
+            status = RunStatus.COMPLETED
+            terminal_event: EventType = "run.completed"
+        elif domain_status == "cancelled":
+            status = RunStatus.CANCELLED
+            terminal_event = "job.cancelled"
+        else:
+            status = RunStatus.FAILED
+            terminal_event = "run.failed"
         self.emit(
-            "run.completed" if status == RunStatus.COMPLETED else "run.failed",
+            terminal_event,
             domain_status=domain_status,
             **(sanitize_error(error) if error is not None else {}),
         )

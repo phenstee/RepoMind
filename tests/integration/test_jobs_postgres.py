@@ -117,6 +117,114 @@ def test_two_workers_claim_distinct_queued_jobs(job_database: JobDatabase):
     assert all(job is not None and job.attempt_count == 1 for job in claimed)
 
 
+def test_queued_cancellation_is_terminal_idempotent_and_unclaimable(
+    job_database: JobDatabase,
+):
+    clock, _ = _clock(datetime(2026, 9, 16, tzinfo=UTC))
+    store = PostgresJobStore(job_database.factory, clock=clock)
+    job = store.create(JobType.RAG, job_database.create_repository(), {"question": "cancel"})
+
+    cancelled = store.request_cancel(job.id)
+    repeated = store.request_cancel(job.id)
+
+    assert cancelled == repeated
+    assert cancelled.status == JobStatus.CANCELLED
+    assert cancelled.cancel_requested_at == cancelled.cancelled_at == cancelled.finished_at
+    assert cancelled.result_payload is None
+    assert cancelled.error_code is None
+    assert store.claim_next("worker", lease_seconds=60) is None
+
+
+def test_claim_and_cancel_are_serialized_without_losing_the_request(
+    job_database: JobDatabase,
+):
+    repository_id = job_database.create_repository()
+    store = PostgresJobStore(job_database.factory)
+    job = store.create(JobType.RAG, repository_id, {"question": "race"})
+    barrier = Barrier(2)
+
+    def claim():
+        barrier.wait()
+        return PostgresJobStore(job_database.factory).claim_next("worker", lease_seconds=60)
+
+    def cancel():
+        barrier.wait()
+        return PostgresJobStore(job_database.factory).request_cancel(job.id)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claimed_future = pool.submit(claim)
+        cancelled_future = pool.submit(cancel)
+        claimed = claimed_future.result()
+        cancelled_future.result()
+
+    final = store.get(job.id)
+    assert final.cancel_requested_at is not None
+    if claimed is None:
+        assert final.status == JobStatus.CANCELLED
+    else:
+        assert final.status == JobStatus.RUNNING
+        assert final.lease_owner == "worker"
+
+
+def test_running_cancellation_is_completed_by_lease_owner(job_database: JobDatabase):
+    store = PostgresJobStore(job_database.factory)
+    job = store.create(
+        JobType.AGENT, job_database.create_repository(), {"query": "investigate"}
+    )
+    assert store.claim_next("worker", lease_seconds=60).id == job.id
+
+    requested = store.request_cancel(job.id)
+    assert requested.status == JobStatus.RUNNING
+    assert requested.cancel_requested_at is not None
+    assert store.claim_next("worker-two", lease_seconds=60) is None
+    store.mark_cancelled(job.id, "worker")
+
+    cancelled = store.get(job.id)
+    assert cancelled.status == JobStatus.CANCELLED
+    assert cancelled.cancelled_at is not None
+    assert cancelled.finished_at == cancelled.cancelled_at
+    assert cancelled.lease_owner is None
+    assert cancelled.lease_expires_at is None
+
+
+def test_coding_cancellation_is_deferred_after_first_side_effect(
+    job_database: JobDatabase,
+):
+    store = PostgresJobStore(job_database.factory)
+    job = store.create(
+        JobType.CODING, job_database.create_repository(), {"objective": "edit"}
+    )
+    assert store.claim_next("worker", lease_seconds=60).id == job.id
+    store.mark_side_effect_started(job.id, "worker")
+
+    requested = store.request_cancel(job.id)
+
+    assert requested.cancellation_state.value == "deferred"
+    with pytest.raises(ValueError, match="cannot be cancelled"):
+        store.mark_cancelled(job.id, "worker")
+    store.mark_succeeded(job.id, "worker", {"status": "completed"})
+    assert store.get(job.id).status == JobStatus.SUCCEEDED
+
+
+@pytest.mark.parametrize("terminal", [JobStatus.SUCCEEDED, JobStatus.FAILED])
+def test_cancel_request_does_not_rewrite_completed_job(
+    job_database: JobDatabase, terminal: JobStatus
+):
+    store = PostgresJobStore(job_database.factory)
+    job = store.create(JobType.RAG, job_database.create_repository(), {"question": "done"})
+    store.claim_next("worker", lease_seconds=60)
+    if terminal == JobStatus.SUCCEEDED:
+        store.mark_succeeded(job.id, "worker", {"answer": "safe"})
+    else:
+        store.mark_failed(job.id, "worker", "operation_failed")
+    before = store.get(job.id)
+
+    after = store.request_cancel(job.id)
+
+    assert after == before
+    assert after.cancel_requested_at is None
+
+
 def test_skip_locked_claims_another_queued_job_without_waiting(job_database: JobDatabase):
     repository_id = job_database.create_repository()
     clock, values = _clock(datetime(2026, 9, 16, tzinfo=UTC))
@@ -162,6 +270,23 @@ def test_expired_non_coding_job_is_requeued_with_lease_cleared(job_database: Job
     assert store.claim_next("worker-two", lease_seconds=30).attempt_count == 2
 
 
+def test_expired_cancel_requested_job_becomes_cancelled(job_database: JobDatabase):
+    clock, values = _clock(datetime(2026, 9, 16, tzinfo=UTC))
+    store = PostgresJobStore(job_database.factory, clock=clock)
+    job = store.create(JobType.RAG, job_database.create_repository(), {"question": "stop"})
+    assert store.claim_next("worker-one", lease_seconds=30).id == job.id
+    store.request_cancel(job.id)
+
+    values[0] += timedelta(seconds=31)
+    assert store.recover_expired() == (job.id,)
+
+    recovered = store.get(job.id)
+    assert recovered.status == JobStatus.CANCELLED
+    assert recovered.cancelled_at == values[0]
+    assert recovered.lease_owner is None
+    assert store.claim_next("worker-two", lease_seconds=30) is None
+
+
 def test_expired_coding_job_fails_without_replay(job_database: JobDatabase):
     clock, values = _clock(datetime(2026, 9, 16, tzinfo=UTC))
     store = PostgresJobStore(job_database.factory, clock=clock)
@@ -177,6 +302,26 @@ def test_expired_coding_job_fails_without_replay(job_database: JobDatabase):
     assert interrupted.lease_owner is None
     assert interrupted.lease_expires_at is None
     assert store.claim_next("worker-two", lease_seconds=30) is None
+
+
+def test_expired_cancel_requested_coding_job_still_fails_without_replay(
+    job_database: JobDatabase,
+):
+    clock, values = _clock(datetime(2026, 9, 16, tzinfo=UTC))
+    store = PostgresJobStore(job_database.factory, clock=clock)
+    job = store.create(
+        JobType.CODING, job_database.create_repository(), {"objective": "change one line"}
+    )
+    assert store.claim_next("worker-one", lease_seconds=30).id == job.id
+    store.request_cancel(job.id)
+
+    values[0] += timedelta(seconds=31)
+    store.recover_expired()
+
+    interrupted = store.get(job.id)
+    assert interrupted.status == JobStatus.FAILED
+    assert interrupted.error_code == "job_interrupted"
+    assert interrupted.cancel_requested_at is not None
 
 
 def test_index_and_coding_share_a_real_repository_advisory_lock(job_database: JobDatabase):
@@ -210,8 +355,9 @@ class _Execution:
     def __init__(self, trace_store: PostgresTraceStore) -> None:
         self.trace_store = trace_store
 
-    def rag(self, repository_id: int, request, *, trace):
+    def rag(self, repository_id: int, request, *, trace, cancellation):
         del repository_id, request
+        cancellation.checkpoint()
         trace.emit("retrieval.started", strategy="semantic", reranking_enabled=False)
         trace.finish()
         return RAGResponse(
@@ -240,4 +386,38 @@ def test_worker_persists_trace_and_links_it_to_durable_job(job_database: JobData
         "run.started",
         "retrieval.started",
         "run.completed",
+    ]
+
+
+def test_worker_persists_normal_cancellation_as_cancelled_not_failed(
+    job_database: JobDatabase,
+):
+    repository_id = job_database.create_repository()
+    store = PostgresJobStore(job_database.factory)
+    job = store.create(JobType.RAG, repository_id, {"question": "cancel safely"})
+    trace_store = PostgresTraceStore(job_database.factory)
+
+    class CancellingExecution:
+        def __init__(self) -> None:
+            self.trace_store = trace_store
+
+        def rag(self, repository_id, request, *, trace, cancellation):
+            del repository_id, request
+            store.request_cancel(job.id)
+            cancellation.checkpoint()
+
+    assert JobWorker(
+        store, _Broker(), CancellingExecution(), worker_id="integration-cancel"
+    ).run_once()
+
+    cancelled = store.get(job.id)
+    assert cancelled.status == JobStatus.CANCELLED
+    assert cancelled.error_code is None
+    persisted = trace_store.get_run_trace(cancelled.trace_run_id)
+    assert persisted is not None
+    assert persisted.status.value == "cancelled"
+    assert [event.event_type for event in persisted.events] == [
+        "run.started",
+        "job.cancel_requested",
+        "job.cancelled",
     ]

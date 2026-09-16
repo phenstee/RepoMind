@@ -93,6 +93,24 @@ def test_sse_encoding_is_framed_json_and_newline_safe():
         encode_sse_event("event\ninjected", {})
 
 
+def test_cancelled_durable_job_stream_has_safe_terminal_frame(api):
+    queued = api.client.post(
+        "/api/v1/repositories/1/jobs/rag", json={"question": "private question"}
+    ).json()
+    api.client.post(f"/api/v1/jobs/{queued['job_id']}/cancel")
+
+    events = _events(api.client.get(f"/api/v1/jobs/{queued['job_id']}/events"))
+
+    assert len(events) == 1
+    assert events[0]["event"] == "cancelled"
+    assert events[0]["data"]["status"] == "cancelled"
+    assert "result" not in events[0]["data"]
+    assert "error" not in events[0]["data"]
+    assert "private question" not in api.client.get(
+        f"/api/v1/jobs/{queued['job_id']}/events"
+    ).text
+
+
 def test_progress_projection_is_allowlisted_and_relative_path_only():
     event = TraceEvent(
         event_type="tool.completed",

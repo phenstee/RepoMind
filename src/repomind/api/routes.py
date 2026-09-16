@@ -15,6 +15,7 @@ from repomind.api.models import (
     ErrorResponse,
     HealthResponse,
     IndexResponse,
+    JobCancelResponse,
     JobDetailResponse,
     JobListResponse,
     JobQueuedResponse,
@@ -82,6 +83,10 @@ def _job_response(job, *, detail: bool = False):
         "started_at": job.started_at,
         "finished_at": job.finished_at,
         "trace_run_id": job.trace_run_id,
+        "cancel_requested": job.cancel_requested,
+        "cancel_requested_at": job.cancel_requested_at,
+        "cancelled_at": job.cancelled_at,
+        "cancellation_control": job.cancellation_state,
     }
     if not detail:
         return base
@@ -132,6 +137,19 @@ def list_jobs(
 @router.get("/jobs/{job_id}", response_model=JobDetailResponse)
 def get_job(job_id: UUID, services: ServiceDep):
     return _job_response(services.jobs.get(job_id), detail=True)
+
+
+@router.post("/jobs/{job_id}/cancel", response_model=JobCancelResponse)
+def cancel_job(job_id: UUID, services: ServiceDep):
+    job = services.jobs.cancel(job_id)
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "cancel_requested": job.cancel_requested,
+        "cancel_requested_at": job.cancel_requested_at,
+        "cancelled_at": job.cancelled_at,
+        "cancellation_control": job.cancellation_state,
+    }
 
 
 @router.get("/jobs/{job_id}/events", response_class=StreamingResponse, responses=SSE_RESPONSE)

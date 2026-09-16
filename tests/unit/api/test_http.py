@@ -21,7 +21,8 @@ def test_health_and_openapi_do_not_build_services():
     with TestClient(app) as client:
         assert client.get("/api/v1/health").json() == {"status": "ok", "service": "repomind"}
         schema = client.get("/openapi.json").json()
-        assert len(schema["paths"]) == 21
+        assert len(schema["paths"]) == 22
+        assert "/api/v1/jobs/{job_id}/cancel" in schema["paths"]
         assert schema["paths"]["/api/v1/repositories"]["get"]["responses"]["200"]["content"][
             "application/json"
         ]["schema"]["$ref"].endswith("RepositoryListResponse")
@@ -165,3 +166,23 @@ def test_durable_job_submission_is_queued_without_running_a_model(api):
     assert detail.json()["status"] == "queued"
     assert detail.json()["result"] is None
     assert not api.llm.calls and not api.embeddings.calls
+
+
+def test_queued_job_cancellation_is_idempotent_and_does_not_expose_request(api):
+    queued = api.client.post(
+        "/api/v1/repositories/1/jobs/rag",
+        json={"question": "private repository question"},
+    ).json()
+
+    first = api.client.post(f"/api/v1/jobs/{queued['job_id']}/cancel")
+    second = api.client.post(f"/api/v1/jobs/{queued['job_id']}/cancel")
+
+    assert first.status_code == second.status_code == 200
+    assert first.json() == second.json()
+    assert first.json()["status"] == "cancelled"
+    assert first.json()["cancel_requested"] is True
+    assert first.json()["cancellation_control"] == "cancelled"
+    assert "private repository question" not in first.text
+    detail = api.client.get(f"/api/v1/jobs/{queued['job_id']}").json()
+    assert detail["status"] == "cancelled"
+    assert detail["cancelled_at"] is not None

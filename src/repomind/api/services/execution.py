@@ -22,6 +22,11 @@ from repomind.api.privacy import public_text
 from repomind.api.services.repositories import ChunkEmbedder, RepositoryService
 from repomind.api.services.runs import TraceStore
 from repomind.coding import CodingTask, CodingTaskStatus, VerificationPolicy, run_coding_task
+from repomind.jobs.control import (
+    CooperativeCancellation,
+    JobCancellationRequested,
+    NoCancellation,
+)
 from repomind.observability import InMemoryTraceRecorder, RunType, TraceContext
 from repomind.rag import RAGConfig, StructuredLLMProvider, answer_repository_question_with_retriever
 from repomind.retrieval import EmbeddingVector, LLMReranker, RankedChunk
@@ -64,6 +69,9 @@ class ExecutionService:
             trace = TraceContext(recorder, kind)
         try:
             yield trace
+        except JobCancellationRequested:
+            trace.finish("cancelled")
+            raise
         except Exception as exc:
             trace.finish("error", error=exc)
             error = public_error(exc)
@@ -72,14 +80,26 @@ class ExecutionService:
         else:
             trace.finish()
 
-    def index(self, repository_id: int, *, trace: TraceContext | None = None) -> IndexResponse:
+    def index(
+        self,
+        repository_id: int,
+        *,
+        trace: TraceContext | None = None,
+        cancellation: CooperativeCancellation | None = None,
+    ) -> IndexResponse:
+        cancellation = cancellation or NoCancellation()
         if trace is None:
-            return self.repositories.index(repository_id, self.embedding_factory(TraceContext()))
+            return self.repositories.index(
+                repository_id,
+                self.embedding_factory(TraceContext()),
+                cancellation=cancellation,
+            )
         with self.tracing(True, RunType.INDEX, trace=trace):
             return self.repositories.index(
                 repository_id,
                 self.embedding_factory(trace),
                 trace=trace,
+                cancellation=cancellation,
             )
 
     def rag(
@@ -88,8 +108,11 @@ class ExecutionService:
         request: RAGRequest,
         *,
         trace: TraceContext | None = None,
+        cancellation: CooperativeCancellation | None = None,
     ) -> RAGResponse:
+        cancellation = cancellation or NoCancellation()
         with self.tracing(request.trace, RunType.RAG, trace=trace) as run_trace:
+            cancellation.checkpoint()
             _, root = self.repositories.locate(repository_id)
             with self.repositories.workspace.operation(root):
                 llm = self.llm_factory(run_trace)
@@ -119,6 +142,7 @@ class ExecutionService:
                     strategy="hybrid+rerank"
                     if request.strategy == "hybrid_rerank"
                     else request.strategy,
+                    cancellation=cancellation,
                 )
                 return RAGResponse(
                     answer=public_text(answer.answer),
@@ -140,8 +164,11 @@ class ExecutionService:
         request: AgentRequest,
         *,
         trace: TraceContext | None = None,
+        cancellation: CooperativeCancellation | None = None,
     ) -> AgentResponse:
+        cancellation = cancellation or NoCancellation()
         with self.tracing(request.trace, RunType.READ_ONLY_AGENT, trace=trace) as run_trace:
+            cancellation.checkpoint()
             _, root = self.repositories.locate(repository_id)
             with self.repositories.workspace.operation(root):
                 registry = create_default_tool_registry(ToolContext(repository_root=root))
@@ -151,6 +178,7 @@ class ExecutionService:
                     registry,
                     config=AgentConfig(max_iterations=request.max_iterations),
                     trace=run_trace,
+                    cancellation=cancellation,
                 )
                 run_trace.finish(result.status.value)
                 return AgentResponse(
@@ -168,8 +196,11 @@ class ExecutionService:
         request: CodingRequest,
         *,
         trace: TraceContext | None = None,
+        cancellation: CooperativeCancellation | None = None,
     ) -> CodingResponse:
+        cancellation = cancellation or NoCancellation()
         with self.tracing(request.trace, RunType.CODING_TASK, trace=trace) as run_trace:
+            cancellation.checkpoint()
             _, root = self.repositories.locate(repository_id)
             with self.repositories.workspace.operation(root), self.repositories.execution_lock.hold(
                 repository_id
@@ -188,6 +219,7 @@ class ExecutionService:
                     ),
                     agent_config=EditingAgentConfig(max_iterations=request.max_iterations),
                     trace=run_trace,
+                    cancellation=cancellation,
                 )
                 run_trace.finish(result.status.value)
                 if result.status == CodingTaskStatus.PRECONDITION_FAILED:

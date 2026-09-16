@@ -74,6 +74,8 @@ _LABELS = frozenset(
         "strategy",
         "action",
         "domain_status",
+        "job_type",
+        "control",
     }
 )
 _HASHES = frozenset({"sha256", "before_sha256", "after_sha256"})
@@ -83,6 +85,11 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
     "run.started": frozenset(),
     "run.completed": _COMMON,
     "run.failed": _COMMON,
+    "job.cancel_requested": frozenset({"job_type", "control"}),
+    "job.cancelled": _COMMON,
+    "job.cancellation_deferred": frozenset(
+        {"job_type", "control", "workspace_revision"}
+    ),
     "index.started": frozenset({"repository_id"}),
     "ingestion.completed": frozenset({"repository_id", "file_count", "total_size_bytes"}),
     "chunking.completed": frozenset({"repository_id", "chunk_count"}),

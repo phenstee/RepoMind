@@ -129,7 +129,13 @@ export interface RunListResponse {
 }
 
 export type JobType = "index" | "rag" | "agent" | "coding";
-export type JobStatus = "queued" | "running" | "succeeded" | "failed";
+export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
+export type CancellationState =
+  | "available"
+  | "requested"
+  | "deferred"
+  | "unavailable"
+  | "cancelled";
 
 export interface JobQueuedResponse {
   job_id: string;
@@ -144,6 +150,19 @@ export interface JobDetail extends JobQueuedResponse {
   started_at: string | null;
   finished_at: string | null;
   trace_run_id: string | null;
+  cancel_requested: boolean;
+  cancel_requested_at: string | null;
+  cancelled_at: string | null;
+  cancellation_control: CancellationState;
   result: IndexResponse | RAGResponse | AgentResponse | CodingResponse | null;
   error: { code: string; message: string } | null;
+}
+
+export interface JobCancelResponse {
+  job_id: string;
+  status: JobStatus;
+  cancel_requested: boolean;
+  cancel_requested_at: string | null;
+  cancelled_at: string | null;
+  cancellation_control: CancellationState;
 }

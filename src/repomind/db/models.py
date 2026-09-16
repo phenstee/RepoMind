@@ -187,7 +187,10 @@ class JobRecord(Base):
     __tablename__ = "jobs"
     __table_args__ = (
         CheckConstraint("job_type IN ('index', 'rag', 'agent', 'coding')", name="ck_jobs_type"),
-        CheckConstraint("status IN ('queued', 'running', 'succeeded', 'failed')", name="ck_jobs_status"),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')",
+            name="ck_jobs_status",
+        ),
         CheckConstraint("payload_version = 1", name="ck_jobs_payload_version"),
         CheckConstraint("attempt_count >= 0", name="ck_jobs_attempt_count"),
         Index("ix_jobs_claim", "status", "created_at"),
@@ -212,3 +215,10 @@ class JobRecord(Base):
     lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     trace_run_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    side_effect_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

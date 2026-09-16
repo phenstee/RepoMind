@@ -61,6 +61,18 @@ def test_absent_usage_stays_unknown() -> None:
     assert result.usage_reported_calls == 0
 
 
+def test_cancelled_trace_has_distinct_non_failure_terminal_state() -> None:
+    recorder = InMemoryTraceRecorder()
+    trace = TraceContext(recorder, "rag")
+
+    trace.finish("cancelled")
+
+    result = recorder.traces[trace.run_id]
+    assert result.status.value == "cancelled"
+    assert result.domain_status == "cancelled"
+    assert result.events[-1].event_type == "job.cancelled"
+
+
 def test_noop_keeps_no_events() -> None:
     trace = TraceContext(NoOpTraceRecorder(), "rag")
     trace.emit("tool.started", tool="read_file")

@@ -22,6 +22,7 @@ from repomind.agent.prompts import (
     READ_ONLY_AGENT_SYSTEM_PROMPT,
     build_agent_prompt,
 )
+from repomind.jobs.control import CooperativeCancellation, NoCancellation
 from repomind.llm import LLMError
 from repomind.observability import TraceContext, TraceRecorder
 from repomind.observability.instrumentation import generate_structured, traced_run
@@ -113,18 +114,21 @@ def _run_agent(
     observation_handler: _ObservationHandler | None = None,
     final_decision_handler: _FinalDecisionHandler | None = None,
     trace: TraceContext | None = None,
+    cancellation: CooperativeCancellation | None = None,
 ) -> AgentRun:
     """Run shared sequential loop mechanics with application-chosen capabilities."""
 
     if not isinstance(query, str) or not query.strip():
         raise AgentError("query must not be empty or whitespace-only")
     trace = trace if trace is not None else TraceContext()
+    cancellation = cancellation or NoCancellation()
     steps: list[AgentStep] = []
     tool_call_counts: dict[str, int] = {}
     tool_calls = 0
     successful_mutations = 0
 
     for iteration in range(1, config.max_iterations + 1):
+        cancellation.checkpoint()
         prompt = build_agent_prompt(
             query,
             tool_registry,
@@ -144,6 +148,7 @@ def _run_agent(
             raise AgentError("Structured agent decision failed") from exc
         if not isinstance(decision, AgentDecision):
             raise AgentError("LLM returned an unexpected agent decision model")
+        cancellation.checkpoint()
 
         trace.emit(
             "agent.decision",
@@ -209,9 +214,12 @@ def _run_agent(
         else:
             tool_call_counts[identity] = prior_executions + 1
             tool_calls += 1
+            cancellation.checkpoint()
             observation = _execute_tool(tool_registry, decision, trace)
             if is_mutation and observation.success:
+                cancellation.side_effect_started()
                 successful_mutations += 1
+            cancellation.checkpoint()
         steps.append(
             AgentStep(
                 iteration=iteration,
@@ -247,6 +255,7 @@ def run_read_only_agent(
     config: AgentConfig | None = None,
     recorder: TraceRecorder | None = None,
     trace: TraceContext | None = None,
+    cancellation: CooperativeCancellation | None = None,
 ) -> AgentRun:
     """Run with caller-supplied capabilities under the read-only agent contract."""
 
@@ -257,6 +266,7 @@ def run_read_only_agent(
         config=config or AgentConfig(),
         system_prompt=READ_ONLY_AGENT_SYSTEM_PROMPT,
         trace=trace,
+        cancellation=cancellation,
     )
 
 
@@ -269,6 +279,7 @@ def run_editing_agent(
     config: EditingAgentConfig | None = None,
     recorder: TraceRecorder | None = None,
     trace: TraceContext | None = None,
+    cancellation: CooperativeCancellation | None = None,
 ) -> AgentRun:
     """Run an explicitly provisioned editing registry with a mutation budget."""
 
@@ -278,6 +289,7 @@ def run_editing_agent(
         tool_registry,
         config=config or EditingAgentConfig(),
         trace=trace,
+        cancellation=cancellation,
     )
 
 
@@ -290,6 +302,7 @@ def _run_editing_agent_controlled(
     observation_handler: _ObservationHandler | None = None,
     final_decision_handler: _FinalDecisionHandler | None = None,
     trace: TraceContext | None = None,
+    cancellation: CooperativeCancellation | None = None,
 ) -> AgentRun:
     """Run editing mechanics with private workflow lifecycle hooks."""
 
@@ -304,4 +317,5 @@ def _run_editing_agent_controlled(
         observation_handler=observation_handler,
         final_decision_handler=final_decision_handler,
         trace=trace,
+        cancellation=cancellation,
     )

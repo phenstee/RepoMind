@@ -31,12 +31,16 @@ class RunStatus(StrEnum):
     RUNNING = "running"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 EventType = Literal[
     "run.started",
     "run.completed",
     "run.failed",
+    "job.cancel_requested",
+    "job.cancelled",
+    "job.cancellation_deferred",
     "index.started",
     "ingestion.completed",
     "chunking.completed",

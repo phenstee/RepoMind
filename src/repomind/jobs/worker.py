@@ -9,6 +9,7 @@ from repomind.api.models import AgentRequest, CodingRequest, RAGRequest
 from repomind.api.services.execution import ExecutionService
 from repomind.api.streaming import safe_progress_event
 from repomind.jobs.broker import JobBroker
+from repomind.jobs.control import DurableCancellationToken, JobCancellationRequested
 from repomind.jobs.models import Job, JobType
 from repomind.jobs.store import PostgresJobStore
 from repomind.observability import InMemoryTraceRecorder, RunType, TraceContext
@@ -57,9 +58,21 @@ class JobWorker:
         done = Event()
         heartbeat = Thread(target=self._heartbeat, args=(job.id, done), daemon=True)
         heartbeat.start()
+        cancellation = DurableCancellationToken(
+            self.store,
+            job.id,
+            self.worker_id,
+            job.job_type,
+            trace,
+        )
         try:
-            result = self._dispatch(job, trace)
+            cancellation.checkpoint()
+            result = self._dispatch(job, trace, cancellation)
+            cancellation.checkpoint()
             self.store.mark_succeeded(job.id, self.worker_id, result.model_dump(mode="json"))
+        except JobCancellationRequested:
+            trace.finish("cancelled")
+            self.store.mark_cancelled(job.id, self.worker_id)
         except APIError as exc:
             self.store.mark_failed(job.id, self.worker_id, exc.code)
         except Exception:
@@ -74,13 +87,32 @@ class JobWorker:
             if not self.store.renew_lease(job_id, self.worker_id, self.lease_seconds):
                 return
 
-    def _dispatch(self, job: Job, trace: TraceContext):
+    def _dispatch(
+        self, job: Job, trace: TraceContext, cancellation: DurableCancellationToken
+    ):
         if job.job_type == JobType.INDEX:
-            return self.execution.index(job.repository_id, trace=trace)
+            return self.execution.index(
+                job.repository_id, trace=trace, cancellation=cancellation
+            )
         if job.job_type == JobType.RAG:
-            return self.execution.rag(job.repository_id, RAGRequest.model_validate(job.request_payload), trace=trace)
+            return self.execution.rag(
+                job.repository_id,
+                RAGRequest.model_validate(job.request_payload),
+                trace=trace,
+                cancellation=cancellation,
+            )
         if job.job_type == JobType.AGENT:
-            return self.execution.agent(job.repository_id, AgentRequest.model_validate(job.request_payload), trace=trace)
+            return self.execution.agent(
+                job.repository_id,
+                AgentRequest.model_validate(job.request_payload),
+                trace=trace,
+                cancellation=cancellation,
+            )
         if job.job_type == JobType.CODING:
-            return self.execution.coding(job.repository_id, CodingRequest.model_validate(job.request_payload), trace=trace)
+            return self.execution.coding(
+                job.repository_id,
+                CodingRequest.model_validate(job.request_payload),
+                trace=trace,
+                cancellation=cancellation,
+            )
         raise ValueError("Unsupported durable job type")

@@ -37,6 +37,9 @@ def _job(record: JobRecord) -> Job:
         lease_owner=record.lease_owner,
         lease_expires_at=record.lease_expires_at,
         trace_run_id=record.trace_run_id,
+        cancel_requested_at=record.cancel_requested_at,
+        cancelled_at=record.cancelled_at,
+        side_effect_started_at=record.side_effect_started_at,
     )
 
 
@@ -124,6 +127,66 @@ class PostgresJobStore:
                 raise JobNotFoundError("Job lease is no longer active")
             record.trace_run_id = trace_run_id
 
+    def request_cancel(self, job_id: UUID) -> Job:
+        now = self.clock()
+        with session_scope(self.factory) as session:
+            record = session.scalar(
+                select(JobRecord).where(JobRecord.id == job_id).with_for_update()
+            )
+            if record is None:
+                raise JobNotFoundError("Job not found")
+            if record.status in {
+                JobStatus.SUCCEEDED.value,
+                JobStatus.FAILED.value,
+                JobStatus.CANCELLED.value,
+            }:
+                return _job(record)
+            if record.cancel_requested_at is None:
+                record.cancel_requested_at = now
+            if record.status == JobStatus.QUEUED.value:
+                record.status = JobStatus.CANCELLED.value
+                record.cancelled_at = now
+                record.finished_at = now
+            session.flush()
+            return _job(record)
+
+    def mark_side_effect_started(self, job_id: UUID, worker_id: str) -> Job:
+        with session_scope(self.factory) as session:
+            record = session.get(JobRecord, job_id)
+            if (
+                record is None
+                or record.status != JobStatus.RUNNING.value
+                or record.lease_owner != worker_id
+            ):
+                raise JobNotFoundError("Job lease is no longer active")
+            if record.side_effect_started_at is None:
+                record.side_effect_started_at = self.clock()
+            session.flush()
+            return _job(record)
+
+    def mark_cancelled(self, job_id: UUID, worker_id: str) -> None:
+        now = self.clock()
+        with session_scope(self.factory) as session:
+            record = session.get(JobRecord, job_id)
+            if (
+                record is None
+                or record.status != JobStatus.RUNNING.value
+                or record.lease_owner != worker_id
+                or record.cancel_requested_at is None
+                or (
+                    record.job_type == JobType.CODING.value
+                    and record.side_effect_started_at is not None
+                )
+            ):
+                raise JobNotFoundError("Job cannot be cancelled by this worker")
+            record.status = JobStatus.CANCELLED.value
+            record.cancelled_at = now
+            record.finished_at = now
+            record.result_json = None
+            record.error_code = None
+            record.lease_owner = None
+            record.lease_expires_at = None
+
     def mark_succeeded(self, job_id: UUID, worker_id: str, result: dict) -> None:
         self._terminal(job_id, worker_id, JobStatus.SUCCEEDED, result=result)
 
@@ -169,6 +232,10 @@ class PostgresJobStore:
                     record.status = JobStatus.FAILED.value
                     record.error_code = "job_interrupted"
                     record.finished_at = now
+                elif record.cancel_requested_at is not None:
+                    record.status = JobStatus.CANCELLED.value
+                    record.cancelled_at = now
+                    record.finished_at = now
                 else:
                     record.status = JobStatus.QUEUED.value
                     record.started_at = None
@@ -196,3 +263,51 @@ class InMemoryJobStore:
     def list(self, **filters) -> Sequence[Job]:
         jobs = tuple(self.jobs.values())
         return jobs[: filters.get("limit", 20)]
+
+    def request_cancel(self, job_id: UUID) -> Job:
+        job = self.get(job_id)
+        if job.terminal:
+            return job
+        now = utc_now()
+        update = {"cancel_requested_at": job.cancel_requested_at or now}
+        if job.status == JobStatus.QUEUED:
+            update |= {
+                "status": JobStatus.CANCELLED,
+                "cancelled_at": now,
+                "finished_at": now,
+            }
+        job = job.model_copy(update=update)
+        self.jobs[job_id] = job
+        return job
+
+    def mark_side_effect_started(self, job_id: UUID, worker_id: str) -> Job:
+        job = self.get(job_id)
+        if job.status != JobStatus.RUNNING or job.lease_owner != worker_id:
+            raise JobNotFoundError("Job lease is no longer active")
+        job = job.model_copy(
+            update={"side_effect_started_at": job.side_effect_started_at or utc_now()}
+        )
+        self.jobs[job_id] = job
+        return job
+
+    def mark_cancelled(self, job_id: UUID, worker_id: str) -> None:
+        job = self.get(job_id)
+        if (
+            job.status != JobStatus.RUNNING
+            or job.lease_owner != worker_id
+            or not job.cancel_requested
+            or (job.job_type == JobType.CODING and job.side_effect_started_at is not None)
+        ):
+            raise JobNotFoundError("Job cannot be cancelled by this worker")
+        now = utc_now()
+        self.jobs[job_id] = job.model_copy(
+            update={
+                "status": JobStatus.CANCELLED,
+                "cancelled_at": now,
+                "finished_at": now,
+                "result_payload": None,
+                "error_code": None,
+                "lease_owner": None,
+                "lease_expires_at": None,
+            }
+        )

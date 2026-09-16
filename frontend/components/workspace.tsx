@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api, ApiError, getJobEvents } from "../lib/api";
+import { canCancelJob, cancellationMessage, isTerminalJob, requestJobCancellation } from "../lib/jobs";
 import type {
   AgentResponse,
   CodingResponse,
@@ -22,7 +23,7 @@ import { RepositoryPanel } from "./repository-panel";
 import { RunHistory } from "./run-history";
 
 type Mode = "ask" | "investigate" | "code";
-type OperationState = "running" | "completed" | "failed" | "disconnected";
+type OperationState = "running" | "completed" | "failed" | "cancelled" | "disconnected";
 
 interface Operation {
   id: number;
@@ -74,7 +75,7 @@ export function Workspace() {
           if (!current) return;
           setActiveJobId(job.job_id);
           setRecoveredJob(job);
-          if (job.status === "succeeded" || job.status === "failed") {
+          if (isTerminalJob(job.status)) {
             localStorage.removeItem("repomind.activeJob");
             setActiveJobId(null);
             return;
@@ -92,12 +93,13 @@ export function Workspace() {
                 if (current && activeOperation.current === id) setEvents((items) => [...items, event]);
               },
               onResult: () => undefined,
+              onCancelled: () => undefined,
             });
             const completed = await api.job(job.job_id);
             if (!current || activeOperation.current !== id) return;
             setRecoveredJob(completed);
-            setOperation({ id, kind: job.job_type, state: completed.status === "succeeded" ? "completed" : "failed" });
-            if (completed.status === "succeeded" || completed.status === "failed") {
+            setOperation({ id, kind: job.job_type, state: completed.status === "succeeded" ? "completed" : completed.status === "cancelled" ? "cancelled" : "failed" });
+            if (isTerminalJob(completed.status)) {
               localStorage.removeItem("repomind.activeJob");
               setActiveJobId(null);
               setHistoryKey((value) => value + 1);
@@ -108,8 +110,8 @@ export function Workspace() {
             if (!current || activeOperation.current !== id) return;
             if (latest !== null) {
               setRecoveredJob(latest);
-              setOperation({ id, kind: job.job_type, state: latest.status === "failed" ? "failed" : "disconnected" });
-              if (latest.status === "succeeded" || latest.status === "failed") {
+              setOperation({ id, kind: job.job_type, state: latest.status === "failed" ? "failed" : latest.status === "cancelled" ? "cancelled" : "disconnected" });
+              if (isTerminalJob(latest.status)) {
                 localStorage.removeItem("repomind.activeJob");
                 setActiveJobId(null);
               }
@@ -160,19 +162,27 @@ export function Workspace() {
       const job = await api.createJob(selectedId, jobType, jobType === "index" ? undefined : body);
       localStorage.setItem("repomind.activeJob", job.job_id);
       setActiveJobId(job.job_id);
+      setRecoveredJob(await api.job(job.job_id));
+      let cancelled = false;
       await getJobEvents<T>(job.job_id, {
         signal: nextController.signal,
         onProgress: (event) => {
           if (activeOperation.current === id) setEvents((items) => [...items, event]);
         },
         onResult: (value) => { result = value; },
+        onCancelled: () => { cancelled = true; },
       });
       if (activeOperation.current === id) {
-        setOperation({ id, kind: path, state: "completed" });
+        const completed = await api.job(job.job_id);
+        setRecoveredJob(completed);
+        setOperation({
+          id,
+          kind: path,
+          state: cancelled || completed.status === "cancelled" ? "cancelled" : completed.status === "succeeded" ? "completed" : "failed",
+        });
         setHistoryKey((value) => value + 1);
         localStorage.removeItem("repomind.activeJob");
         setActiveJobId(null);
-        setRecoveredJob(await api.job(job.job_id));
       }
       return result;
     } catch (caught) {
@@ -220,6 +230,15 @@ export function Workspace() {
     }
   }
 
+  async function cancelActiveJob() {
+    if (activeJobId === null) return;
+    try {
+      setRecoveredJob(await requestJobCancellation(api, activeJobId));
+    } catch (caught) {
+      setError(safeError(caught));
+    }
+  }
+
   const selectedRepository = repositories.find((repository) => repository.id === selectedId) ?? null;
   const running = operation?.state === "running";
 
@@ -252,9 +271,11 @@ export function Workspace() {
               {selectedRepository?.workspace_relative_path ? <p className="muted">{selectedRepository.workspace_relative_path}</p> : null}
             </div>
             {running ? <button type="button" className="secondary" onClick={() => controller.current?.abort()}>Stop viewing progress</button> : null}
+            {running && canCancelJob(recoveredJob) ? <button type="button" className="secondary" onClick={() => void cancelActiveJob()}>Cancel job</button> : null}
           </div>
           {operation?.state === "disconnected" ? <p className="warning">Progress viewing stopped. The backend operation may still be running.</p> : null}
           {activeJobId ? <p className="muted">Durable job: {activeJobId}</p> : null}
+          {cancellationMessage(recoveredJob) ? <p className="warning">{cancellationMessage(recoveredJob)}</p> : null}
           {recoveredJob ? <p className="muted">Recovered job {recoveredJob.status}{recoveredJob.trace_run_id ? ` · trace ${recoveredJob.trace_run_id}` : ""}</p> : null}
           <nav className="modeTabs" aria-label="Workspace mode">
             {(["ask", "investigate", "code"] as Mode[]).map((item) => (
