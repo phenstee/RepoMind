@@ -8,6 +8,7 @@ from fastapi import Request
 from repomind.api.services.execution import EmbeddingFactory, ExecutionService, LLMFactory
 from repomind.api.services.repositories import RepositoryService, WorkspacePolicy
 from repomind.api.services.runs import RunService, TraceStore
+from repomind.api.services.streaming import StreamingService
 from repomind.api.store import PostgresRepositoryStore, RepositoryStore
 from repomind.config import Settings, get_settings
 from repomind.db import create_database_engine, create_session_factory
@@ -21,6 +22,7 @@ class Services:
     repositories: RepositoryService
     execution: ExecutionService
     runs: RunService
+    streaming: StreamingService
 
 
 class ServiceContainer:
@@ -70,7 +72,12 @@ class ServiceContainer:
                     self.embedding_factory
                     or (lambda trace: OpenAIEmbeddingClient(settings, trace=trace)),
                 )
-                self.services = Services(repositories, execution, RunService(traces))
+                self.services = Services(
+                    repositories,
+                    execution,
+                    RunService(traces),
+                    StreamingService(execution),
+                )
             return self.services
 
     def close(self) -> None:

@@ -3,7 +3,8 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Path, Query
+from fastapi import APIRouter, Depends, Path, Query, Request
+from starlette.responses import StreamingResponse
 
 from repomind.api.dependencies import Services, get_services
 from repomind.api.models import (
@@ -30,6 +31,12 @@ router = APIRouter(
 )
 ServiceDep = Annotated[Services, Depends(get_services)]
 RepositoryID = Annotated[int, Path(ge=1)]
+SSE_RESPONSE = {
+    200: {
+        "description": "Semantic progress frames followed by one terminal result or error frame.",
+        "content": {"text/event-stream": {"schema": {"type": "string"}}},
+    }
+}
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -52,6 +59,15 @@ def index_repository(repository_id: RepositoryID, services: ServiceDep):
     return services.execution.index(repository_id)
 
 
+@router.post(
+    "/repositories/{repository_id}/index/stream",
+    response_class=StreamingResponse,
+    responses=SSE_RESPONSE,
+)
+def stream_index(request: Request, repository_id: RepositoryID, services: ServiceDep):
+    return services.streaming.index(request, repository_id)
+
+
 @router.get("/repositories/{repository_id}/files", response_model=RepositoryFilesResponse)
 def list_files(
     repository_id: RepositoryID,
@@ -67,14 +83,47 @@ def rag(repository_id: RepositoryID, body: RAGRequest, services: ServiceDep):
     return services.execution.rag(repository_id, body)
 
 
+@router.post(
+    "/repositories/{repository_id}/rag/stream",
+    response_class=StreamingResponse,
+    responses=SSE_RESPONSE,
+)
+def stream_rag(
+    request: Request, repository_id: RepositoryID, body: RAGRequest, services: ServiceDep
+):
+    return services.streaming.rag(request, repository_id, body)
+
+
 @router.post("/repositories/{repository_id}/agent/runs", response_model=AgentResponse)
 def agent(repository_id: RepositoryID, body: AgentRequest, services: ServiceDep):
     return services.execution.agent(repository_id, body)
 
 
+@router.post(
+    "/repositories/{repository_id}/agent/runs/stream",
+    response_class=StreamingResponse,
+    responses=SSE_RESPONSE,
+)
+def stream_agent(
+    request: Request, repository_id: RepositoryID, body: AgentRequest, services: ServiceDep
+):
+    return services.streaming.agent(request, repository_id, body)
+
+
 @router.post("/repositories/{repository_id}/coding/runs", response_model=CodingResponse)
 def coding(repository_id: RepositoryID, body: CodingRequest, services: ServiceDep):
     return services.execution.coding(repository_id, body)
+
+
+@router.post(
+    "/repositories/{repository_id}/coding/runs/stream",
+    response_class=StreamingResponse,
+    responses=SSE_RESPONSE,
+)
+def stream_coding(
+    request: Request, repository_id: RepositoryID, body: CodingRequest, services: ServiceDep
+):
+    return services.streaming.coding(request, repository_id, body)
 
 
 @router.get("/runs", response_model=RunListResponse)

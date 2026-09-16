@@ -21,6 +21,7 @@ from repomind.ingestion import (
     ingest_repository,
     resolve_repository_path,
 )
+from repomind.observability import TraceContext
 from repomind.retrieval import EmbeddedChunk
 
 
@@ -128,9 +129,17 @@ class RepositoryService:
             offset=offset,
         )
 
-    def index(self, repository_id: int, embedder: ChunkEmbedder) -> IndexResponse:
+    def index(
+        self,
+        repository_id: int,
+        embedder: ChunkEmbedder,
+        *,
+        trace: TraceContext | None = None,
+    ) -> IndexResponse:
         binding, root = self.locate(repository_id)
         with self.workspace.operation(root):
+            if trace is not None:
+                trace.emit("index.started", repository_id=repository_id)
             sources = find_source_files(root)
             if (
                 len(sources) > self.MAX_FILES
@@ -147,14 +156,42 @@ class RepositoryService:
                 raise APIError(
                     413, "repository_too_large", "Repository exceeds synchronous index limits."
                 )
+            if trace is not None:
+                trace.emit(
+                    "ingestion.completed",
+                    repository_id=repository_id,
+                    file_count=snapshot.file_count,
+                    total_size_bytes=snapshot.total_size_bytes,
+                )
             chunks = chunk_repository(snapshot)
             if len(chunks) > self.MAX_CHUNKS:
                 raise APIError(
                     413, "repository_too_large", "Repository exceeds synchronous index limits."
                 )
+            if trace is not None:
+                trace.emit(
+                    "chunking.completed", repository_id=repository_id, chunk_count=len(chunks)
+                )
+                trace.emit(
+                    "embedding.started", repository_id=repository_id, chunk_count=len(chunks)
+                )
             embedded = embedder.embed_chunks(chunks) if chunks else []
+            if trace is not None:
+                trace.emit(
+                    "embedding.completed",
+                    repository_id=repository_id,
+                    chunk_count=len(embedded),
+                    embedding_model=embedded[0].embedding.model if embedded else None,
+                )
             self.workspace.resolve(binding.workspace_relative_path)
             self.store.replace_index(repository_id, snapshot, embedded)
+            if trace is not None:
+                trace.emit(
+                    "persistence.completed",
+                    repository_id=repository_id,
+                    file_count=snapshot.file_count,
+                    chunk_count=len(embedded),
+                )
             return IndexResponse(
                 repository_id=repository_id,
                 files_indexed=snapshot.file_count,

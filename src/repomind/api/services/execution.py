@@ -50,11 +50,18 @@ class ExecutionService:
         self.embedding_factory = embedding_factory
 
     @contextmanager
-    def tracing(self, enabled: bool, kind: RunType) -> Iterator[TraceContext]:
-        recorder = (
-            InMemoryTraceRecorder(sink=self.trace_store.persist_run_trace) if enabled else None
-        )
-        trace = TraceContext(recorder, kind)
+    def tracing(
+        self,
+        enabled: bool,
+        kind: RunType,
+        *,
+        trace: TraceContext | None = None,
+    ) -> Iterator[TraceContext]:
+        if trace is None:
+            recorder = (
+                InMemoryTraceRecorder(sink=self.trace_store.persist_run_trace) if enabled else None
+            )
+            trace = TraceContext(recorder, kind)
         try:
             yield trace
         except Exception as exc:
@@ -65,15 +72,28 @@ class ExecutionService:
         else:
             trace.finish()
 
-    def index(self, repository_id: int) -> IndexResponse:
-        return self.repositories.index(repository_id, self.embedding_factory(TraceContext()))
+    def index(self, repository_id: int, *, trace: TraceContext | None = None) -> IndexResponse:
+        if trace is None:
+            return self.repositories.index(repository_id, self.embedding_factory(TraceContext()))
+        with self.tracing(True, RunType.INDEX, trace=trace):
+            return self.repositories.index(
+                repository_id,
+                self.embedding_factory(trace),
+                trace=trace,
+            )
 
-    def rag(self, repository_id: int, request: RAGRequest) -> RAGResponse:
-        with self.tracing(request.trace, RunType.RAG) as trace:
+    def rag(
+        self,
+        repository_id: int,
+        request: RAGRequest,
+        *,
+        trace: TraceContext | None = None,
+    ) -> RAGResponse:
+        with self.tracing(request.trace, RunType.RAG, trace=trace) as run_trace:
             _, root = self.repositories.locate(repository_id)
             with self.repositories.workspace.operation(root):
-                llm = self.llm_factory(trace)
-                embedder = self.embedding_factory(trace)
+                llm = self.llm_factory(run_trace)
+                embedder = self.embedding_factory(run_trace)
 
                 def retrieve(query: str, *, top_k: int) -> list[RankedChunk]:
                     rerank = request.strategy == "hybrid_rerank"
@@ -85,7 +105,9 @@ class ExecutionService:
                         top_k=max(20, top_k) if rerank else top_k,
                     )
                     if rerank:
-                        return LLMReranker(llm, trace=trace).rerank(query, candidates, top_k=top_k)
+                        return LLMReranker(llm, trace=run_trace).rerank(
+                            query, candidates, top_k=top_k
+                        )
                     return list(candidates)
 
                 answer = answer_repository_question_with_retriever(
@@ -93,7 +115,7 @@ class ExecutionService:
                     retrieve,
                     llm,
                     config=RAGConfig(top_k=request.top_k),
-                    trace=trace,
+                    trace=run_trace,
                     strategy="hybrid+rerank"
                     if request.strategy == "hybrid_rerank"
                     else request.strategy,
@@ -109,33 +131,45 @@ class ExecutionService:
                         )
                         for c in answer.citations
                     ],
-                    trace_run_id=trace.run_id,
+                    trace_run_id=run_trace.run_id,
                 )
 
-    def agent(self, repository_id: int, request: AgentRequest) -> AgentResponse:
-        with self.tracing(request.trace, RunType.READ_ONLY_AGENT) as trace:
+    def agent(
+        self,
+        repository_id: int,
+        request: AgentRequest,
+        *,
+        trace: TraceContext | None = None,
+    ) -> AgentResponse:
+        with self.tracing(request.trace, RunType.READ_ONLY_AGENT, trace=trace) as run_trace:
             _, root = self.repositories.locate(repository_id)
             with self.repositories.workspace.operation(root):
                 registry = create_default_tool_registry(ToolContext(repository_root=root))
                 result = run_read_only_agent(
                     request.query,
-                    self.llm_factory(trace),
+                    self.llm_factory(run_trace),
                     registry,
                     config=AgentConfig(max_iterations=request.max_iterations),
-                    trace=trace,
+                    trace=run_trace,
                 )
-                trace.finish(result.status.value)
+                run_trace.finish(result.status.value)
                 return AgentResponse(
                     status=result.status.value,
                     final_answer=public_text(result.final_answer),
                     iterations=result.iterations,
                     llm_calls=result.llm_calls,
                     tool_execution_attempts=result.tool_calls,
-                    trace_run_id=trace.run_id,
+                    trace_run_id=run_trace.run_id,
                 )
 
-    def coding(self, repository_id: int, request: CodingRequest) -> CodingResponse:
-        with self.tracing(request.trace, RunType.CODING_TASK) as trace:
+    def coding(
+        self,
+        repository_id: int,
+        request: CodingRequest,
+        *,
+        trace: TraceContext | None = None,
+    ) -> CodingResponse:
+        with self.tracing(request.trace, RunType.CODING_TASK, trace=trace) as run_trace:
             _, root = self.repositories.locate(repository_id)
             with self.repositories.workspace.operation(root):
                 registry = create_editing_tool_registry(ToolContext(repository_root=root))
@@ -144,16 +178,16 @@ class ExecutionService:
                         objective=request.objective,
                         acceptance_criteria=tuple(request.acceptance_criteria),
                     ),
-                    self.llm_factory(trace),
+                    self.llm_factory(run_trace),
                     registry,
                     verification_policy=VerificationPolicy(
                         test_paths=tuple(Path(p) for p in request.verification.test_paths),
                         ruff_paths=tuple(Path(p) for p in request.verification.ruff_paths),
                     ),
                     agent_config=EditingAgentConfig(max_iterations=request.max_iterations),
-                    trace=trace,
+                    trace=run_trace,
                 )
-                trace.finish(result.status.value)
+                run_trace.finish(result.status.value)
                 if result.status == CodingTaskStatus.PRECONDITION_FAILED:
                     raise APIError(
                         409, "coding_precondition_failed", "Coding preflight requirements failed."
@@ -181,5 +215,5 @@ class ExecutionService:
                     changed_files=[p.as_posix() for p in result.changed_files],
                     completion_attempts=result.completion_attempts,
                     workspace_revision=result.workspace_revision,
-                    trace_run_id=trace.run_id,
+                    trace_run_id=run_trace.run_id,
                 )

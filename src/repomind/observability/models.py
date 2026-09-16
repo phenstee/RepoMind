@@ -19,6 +19,7 @@ from repomind.observability.sanitization import redact, sanitize_metadata
 
 
 class RunType(StrEnum):
+    INDEX = "index"
     RAG = "rag"
     READ_ONLY_AGENT = "read_only_agent"
     EDITING_AGENT = "editing_agent"
@@ -36,6 +37,12 @@ EventType = Literal[
     "run.started",
     "run.completed",
     "run.failed",
+    "index.started",
+    "ingestion.completed",
+    "chunking.completed",
+    "embedding.started",
+    "embedding.completed",
+    "persistence.completed",
     "model.started",
     "model.attempt",
     "model.completed",

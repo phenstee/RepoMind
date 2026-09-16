@@ -113,6 +113,11 @@ _KEYS = frozenset(
         "trace_run_id",
         "evaluation_summary",
         "mutation_type",
+        "repository_id",
+        "file_count",
+        "total_size_bytes",
+        "chunk_count",
+        "embedding_model",
     ]
 )
 _SECRET = re.compile(

@@ -21,6 +21,9 @@ class TraceRecorder(Protocol):
     def finish_run(self, trace: RunTrace) -> None: ...
 
 
+TraceEventListener = Callable[[UUID, TraceEvent], None]
+
+
 class NoOpTraceRecorder:
     def start_run(self, run_type: RunType) -> None:
         return None
@@ -46,11 +49,13 @@ class InMemoryTraceRecorder:
         utc_clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         monotonic_clock: Callable[[], float] = time.monotonic,
         sink: Callable[[RunTrace], None] | None = None,
+        listener: TraceEventListener | None = None,
     ) -> None:
         self.id_provider = id_provider
         self.utc_clock = utc_clock
         self.monotonic_clock = monotonic_clock
         self.sink = sink
+        self.listener = listener
         self.traces: dict[UUID, RunTrace] = {}
         self.diagnostics: list[dict[str, Any]] = []
 
@@ -64,6 +69,12 @@ class InMemoryTraceRecorder:
     def record_event(self, run_id: UUID, event: TraceEvent) -> None:
         trace = self.traces[run_id]
         self.traces[run_id] = trace.model_copy(update={"events": (*trace.events, event)})
+        if self.listener is not None:
+            try:
+                self.listener(run_id, event.model_copy(deep=True))
+            except Exception as exc:  # noqa: BLE001 - telemetry forwarding is best effort
+                self.diagnostics.append(sanitize_error(exc))
+                logger.warning("Trace event listener failed; trace retention continues")
 
     def finish_run(self, trace: RunTrace) -> None:
         self.traces[trace.run_id] = trace.model_copy(deep=True)

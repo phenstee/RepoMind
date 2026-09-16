@@ -105,3 +105,39 @@ def test_api_index_transaction_rolls_back_on_persistence_failure(client, db_sess
     assert response.status_code == 500
     assert "private" not in response.text
     assert load_chunks(db_session, repository_id) == before
+
+
+def _sse_events(response):
+    import json
+
+    return [
+        {
+            key: json.loads(value) if key == "data" else value
+            for key, value in (line.split(": ", 1) for line in block.splitlines())
+        }
+        for block in response.text.split("\n\n")
+        if block
+    ]
+
+
+def test_streamed_api_retains_postgres_trace_history(client, db_session):
+    name = "api-stream-" + uuid4().hex
+    repository_id = client.post(
+        "/api/v1/repositories", json={"name": name, "path": "sample"}
+    ).json()["id"]
+    indexed = client.post(f"/api/v1/repositories/{repository_id}/index/stream")
+    assert indexed.headers["content-type"].startswith("text/event-stream")
+    assert _sse_events(indexed)[-1]["event"] == "result"
+    response = client.post(
+        f"/api/v1/repositories/{repository_id}/rag/stream",
+        json={"question": "What does value do?", "strategy": "hybrid", "top_k": 1},
+    )
+    events = _sse_events(response)
+    assert events[-1]["event"] == "result"
+    run_id = events[-1]["data"]["run_id"]
+    trace = client.get(f"/api/v1/runs/{run_id}")
+    assert trace.status_code == 200, trace.text
+    assert trace.json()["run_type"] == "rag"
+    assert [event["event_type"] for event in trace.json()["events"]] == [
+        event["event"] for event in events[:-1]
+    ]

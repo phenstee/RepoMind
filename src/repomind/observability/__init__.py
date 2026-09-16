@@ -7,6 +7,7 @@ from repomind.observability.recorder import (
     InMemoryTraceRecorder,
     NoOpTraceRecorder,
     TraceContext,
+    TraceEventListener,
     TraceRecorder,
 )
 from repomind.observability.reporting import format_run_trace
@@ -23,6 +24,7 @@ __all__ = [
     "RunType",
     "TraceContext",
     "TraceEvent",
+    "TraceEventListener",
     "TraceRecorder",
     "format_run_trace",
 ]

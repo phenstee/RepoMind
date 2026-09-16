@@ -90,6 +90,10 @@ coding workflows, and evaluation. PostgreSQL storage uses independent transactio
 compose the existing domain capabilities through application services. No retrieval,
 agent-loop, editing, or completion-gate algorithms were replaced.
 
+**Milestone 17: semantic SSE progress streaming** is complete. It projects the
+existing structured trace timeline into a safe, request-bound Server-Sent Events
+transport without changing the RAG, agent, indexing, or coding workflows.
+
 ## Local HTTP API
 
 The API is for **trusted local development only**. It has **no authentication or
@@ -100,9 +104,15 @@ are not an OS sandbox: repository tests, plugins, and configuration must be trus
 No permissive CORS policy is installed.
 
 ```text
-HTTP -> FastAPI route -> application service -> existing domain -> typed response
-                               |
-                 repository / trace persistence -> PostgreSQL + pgvector
+Client
+  |-- normal HTTP request ------------------------------------------|
+  `-- POST SSE stream -> FastAPI transport -> application services -|
+                                                   |
+                                    Index / RAG / Agent / Coding operation
+                                                   |
+                                              TraceContext
+                                             /            \
+                           retained/persisted trace   sanitized progress -> SSE
 ```
 
 Install dependencies with `uv sync`. Set `REPOMIND_WORKSPACE_ROOT` in `.env` to
@@ -135,10 +145,14 @@ All capability endpoints use `/api/v1`:
 | POST | `/repositories` | Register `{ "name": "sample", "path": "sample" }`; returns stable ID, name, creation time |
 | GET | `/repositories/{id}` | Registered repository metadata |
 | POST | `/repositories/{id}/index` | Synchronous ingestion, chunking, embedding, atomic persistence |
+| POST | `/repositories/{id}/index/stream` | Indexing progress as SSE, then terminal index result |
 | GET | `/repositories/{id}/files` | Indexed file metadata; `limit` (1–100), `offset` (0–1,000,000) |
 | POST | `/repositories/{id}/rag` | Grounded repository question answering |
+| POST | `/repositories/{id}/rag/stream` | RAG semantic progress as SSE, then terminal RAG result |
 | POST | `/repositories/{id}/agent/runs` | Read-only agent; no editing or verification tools |
+| POST | `/repositories/{id}/agent/runs/stream` | Read-only agent progress as SSE, then terminal agent result |
 | POST | `/repositories/{id}/coding/runs` | Explicit opt-in controlled editing and required verification |
+| POST | `/repositories/{id}/coding/runs/stream` | Controlled coding progress as SSE, then terminal coding result |
 | GET | `/runs` | Compact stored trace summaries; optional `run_type`, `status`, `limit` (1–100) |
 | GET | `/runs/{uuid}` | Stored summary and ordered, sanitized trace events |
 
@@ -168,6 +182,78 @@ curl -X POST http://127.0.0.1:8000/api/v1/repositories/1/agent/runs \
   -d '{"query":"Explain the entry point without changing files.","max_iterations":8,"trace":true}'
 curl 'http://127.0.0.1:8000/api/v1/runs?run_type=rag&limit=10'
 ```
+
+## Semantic progress streams
+
+SSE fits RepoMind's current one-way progress need: the server reports semantic
+stages while a request runs. WebSockets are intentionally not used because there
+is no current requirement for persistent bidirectional interaction. Existing
+non-streaming endpoints remain unchanged for scripts and simple clients.
+
+Streaming variants are `POST` endpoints because they need structured JSON bodies.
+Browser `EventSource` only supports `GET`, so use `fetch` streaming, another HTTP
+streaming client, or `curl -N` instead. For example:
+
+```bash
+curl -N -X POST http://127.0.0.1:8000/api/v1/repositories/1/rag/stream \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Where is authentication handled?","strategy":"hybrid","top_k":5}'
+```
+
+In PowerShell, use `curl.exe -N` (rather than the `curl` alias) or Swagger UI with
+a streaming-capable client. The response has `Content-Type: text/event-stream`,
+`Cache-Control: no-cache`, and standard frames. Progress frames retain the trace
+sequence as the SSE `id`; transport-only terminal frames intentionally have no
+separate trace sequence:
+
+```text
+id: 4
+event: tool.completed
+data: {"run_id":"...","sequence":4,"event":"tool.completed","timestamp":"...","data":{"tool":"read_file","path":"src/app.py"}}
+
+event: result
+data: {"run_id":"...","result":{"status":"completed", "...":"same normal response contract"}}
+```
+
+The public progress model is a deliberately narrow projection of retained
+`TraceEvent` objects, not a trace dump. Representative events include
+`index.started`, `ingestion.completed`, `chunking.completed`,
+`embedding.completed`, `retrieval.started`, `retrieval.completed`,
+`agent.decision`, `tool.started`, `tool.completed`, `file.mutated`,
+`verification.completed`, `completion.blocked`, `final_review.completed`, and
+`run.completed`. Event names follow observability semantics; a future UI should
+render their structured fields rather than parse prose. Internal event families
+are not automatically public API promises.
+
+Only an explicit per-event allowlist reaches an SSE `data` object. It can include
+safe labels, bounded counts, relative paths, hashes, verifier pass/fail/exit/timeout
+metadata, workspace revision, and deterministic blocker codes. Streams never
+include prompts, model output payloads, source contents, replacements, diffs,
+test stdout/stderr, credentials, environment values, embedding vectors, or absolute
+paths. Streaming does not weaken workspace confinement, the read-only-versus-coding
+capability boundary, the trusted-local-only warning, or the absence of auth.
+
+Before a stream starts, known validation/repository/workspace errors remain normal
+JSON HTTP errors such as `400`, `404`, `409`, `422`, or `503`. Once SSE headers have
+been sent, an unexpected runtime failure produces exactly one terminal `error`
+event with `{ "code": "operation_failed", "message": "The operation failed." }`
+and no `result` event. A successful stream always emits exactly one `result` event
+containing the same safe business response shape as its normal endpoint.
+
+The domain workflows remain synchronous. A per-request bridge runs the established
+operation in one local thread and uses a bounded, isolated channel to forward the
+existing trace listener's public projection to the async SSE response. It does not
+block the event loop, does not use a global queue, and does not participate in
+database/file transaction success. The 256-event buffer is well above normal
+bounded RepoMind timelines; if a client is too slow, non-terminal progress may be
+dropped (visible as a sequence gap), but a terminal result/error is retained.
+
+There is no cooperative cancellation, durable job, replay, resume token, or
+`Last-Event-ID` support. If a client disconnects, the server stops forwarding to
+that connection but allows the already-running synchronous operation to finish so
+coding workflow invariants and edits are not interrupted unsafely. Completed traces
+can still be queried through `/api/v1/runs/{uuid}` when trace persistence succeeds.
+There are no workers, Redis, WebSockets, token streaming, or `BackgroundTasks`.
 
 Indexing delegates to existing deterministic ingestion/chunking and embedding
 providers, preserving source newlines. It rejects more than 10,000 discovered
@@ -245,11 +331,10 @@ external editors, other processes, or direct Python callers, and path checks are
 not an OS-level race-proof sandbox. A disconnected HTTP request is not guaranteed
 to cancel a running workflow. No automatic retry of mutation requests is safe.
 
-Readiness probes, streaming/SSE/WebSockets, durable jobs, workers/Redis, evaluation
-execution APIs, approval/resume, auth, frontend, MCP, native tool calling,
+Readiness probes, durable jobs, workers/Redis, evaluation execution APIs,
+approval/resume, auth, frontend, MCP, native tool calling,
 planner/reviewer agents, multi-agent execution, arbitrary shell, Git mutation,
-deployment, and retrieval experiments remain deferred. Milestone 17 will introduce
-semantic progress streaming deliberately; no streaming or `BackgroundTasks` are
+deployment, and retrieval experiments remain deferred. No `BackgroundTasks` are
 implemented here.
 
 ## Observability and run tracing
@@ -1880,5 +1965,6 @@ The full project roadmap is described in the RepoMind engineering brief:
 13.5. RAG retrieval integration hardening (complete)
 14. Evaluation harness + coding-agent benchmarks (complete)
 15. Observability and persistent run tracing (complete)
-16. FastAPI backend (complete/current)
-17. Streaming/progress events (next)
+16. FastAPI backend (complete)
+17. Semantic SSE progress streaming (complete/current)
+18. Next.js frontend (next)

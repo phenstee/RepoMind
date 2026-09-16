@@ -67,8 +67,10 @@ def test_noop_keeps_no_events() -> None:
     trace.finish()
     assert trace.run_id is None
     assert trace.events == []
+
     def invalid_projection():
         raise AssertionError("no-op must not extract payload metadata")
+
     assert trace.project(invalid_projection) == {}
 
 
@@ -84,6 +86,33 @@ def test_sink_failure_retains_trace_and_safe_diagnostic(caplog) -> None:
     assert len(recorder.diagnostics) == 1
     assert "password" not in str(recorder.diagnostics) + caplog.text
     assert "persistence failed" in caplog.text
+
+
+def test_listener_observes_retained_events_without_changing_trace() -> None:
+    forwarded = []
+    recorder = InMemoryTraceRecorder(
+        listener=lambda run_id, event: forwarded.append((run_id, event))
+    )
+    trace = TraceContext(recorder, "rag")
+    trace.emit("retrieval.completed", strategy="semantic", candidate_count=1)
+    trace.finish()
+    retained = recorder.traces[trace.run_id]
+    assert [(run_id, event.sequence) for run_id, event in forwarded] == [
+        (trace.run_id, event.sequence) for event in retained.events
+    ]
+    assert retained.events[1].event_type == "retrieval.completed"
+
+
+def test_listener_failure_does_not_interrupt_trace_retention(caplog) -> None:
+    def fail(*args):
+        raise RuntimeError("sk-do-not-forward")
+
+    recorder = InMemoryTraceRecorder(listener=fail)
+    trace = TraceContext(recorder, "rag")
+    trace.emit("retrieval.completed", strategy="semantic", candidate_count=1)
+    trace.finish()
+    assert len(recorder.traces[trace.run_id].events) == 3
+    assert "sk-do-not-forward" not in str(recorder.diagnostics) + caplog.text
 
 
 @pytest.mark.parametrize("method", ["start_run", "record_event", "finish_run"])

@@ -21,13 +21,16 @@ def test_health_and_openapi_do_not_build_services():
     with TestClient(app) as client:
         assert client.get("/api/v1/health").json() == {"status": "ok", "service": "repomind"}
         schema = client.get("/openapi.json").json()
-        assert len(schema["paths"]) == 10
+        assert len(schema["paths"]) == 14
         assert schema["paths"]["/api/v1/repositories/{repository_id}/rag"]["post"]["responses"][
             "200"
         ]["content"]["application/json"]["schema"]["$ref"].endswith("RAGResponse")
         assert schema["paths"]["/api/v1/repositories"]["post"]["responses"]["422"]["content"][
             "application/json"
         ]["schema"]["$ref"].endswith("ErrorResponse")
+        assert schema["paths"]["/api/v1/repositories/{repository_id}/rag/stream"]["post"][
+            "responses"
+        ]["200"]["content"] == {"text/event-stream": {"schema": {"type": "string"}}}
         assert client.get("/docs").status_code == 200
     assert app.state.container.services is None
     assert app.state.container.engine is None
