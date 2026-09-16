@@ -86,6 +86,172 @@ oracles, and inspectable per-case reports.
 Optional injected recorders capture metadata-only timelines across RAG, agents,
 coding workflows, and evaluation. PostgreSQL storage uses independent transactions.
 
+**Milestone 16: FastAPI backend** is complete. Versioned, typed HTTP endpoints
+compose the existing domain capabilities through application services. No retrieval,
+agent-loop, editing, or completion-gate algorithms were replaced.
+
+## Local HTTP API
+
+The API is for **trusted local development only**. It has **no authentication or
+authorization**. **Do not expose it directly to the public Internet or untrusted
+networks.** It can inspect repository source and, through the separate coding
+endpoint, mutate files and execute repository tests. Fixed pytest/Ruff commands
+are not an OS sandbox: repository tests, plugins, and configuration must be trusted.
+No permissive CORS policy is installed.
+
+```text
+HTTP -> FastAPI route -> application service -> existing domain -> typed response
+                               |
+                 repository / trace persistence -> PostgreSQL + pgvector
+```
+
+Install dependencies with `uv sync`. Set `REPOMIND_WORKSPACE_ROOT` in `.env` to
+an existing **absolute directory containing only repositories you trust**. Use a
+dedicated workspace, not a home directory, drive root, or unrelated data directory.
+Set `DATABASE_URL` for PostgreSQL; embedding/model operations also require
+`OPENAI_API_KEY`. Never put secrets in requests or URLs. Then run:
+
+```bash
+uv run alembic upgrade head
+uv run alembic current
+uv run uvicorn repomind.api.app:app --host 127.0.0.1 --port 8000
+```
+
+The current migration head is `20260915_02`. It adds a nullable
+`repositories.workspace_relative_path`; existing IDs, indexes, and trace data are
+preserved. Pre-API repositories remain unbound and return `409` for workspace
+operations. They are not silently mapped to local files. Register a new unique
+repository name to index a workspace through HTTP. Reusing an API-registered name
+and the same canonical relative location is idempotent; changing its binding is a
+conflict. Bindings are interpreted under the operator's configured workspace root.
+
+Open [Swagger UI](http://127.0.0.1:8000/docs) or
+[the OpenAPI schema](http://127.0.0.1:8000/openapi.json).
+All capability endpoints use `/api/v1`:
+
+| Method | Path after `/api/v1` | Purpose |
+| --- | --- | --- |
+| GET | `/health` | Process liveness; no workspace, database, or model dependency |
+| POST | `/repositories` | Register `{ "name": "sample", "path": "sample" }`; returns stable ID, name, creation time |
+| GET | `/repositories/{id}` | Registered repository metadata |
+| POST | `/repositories/{id}/index` | Synchronous ingestion, chunking, embedding, atomic persistence |
+| GET | `/repositories/{id}/files` | Indexed file metadata; `limit` (1–100), `offset` (0–1,000,000) |
+| POST | `/repositories/{id}/rag` | Grounded repository question answering |
+| POST | `/repositories/{id}/agent/runs` | Read-only agent; no editing or verification tools |
+| POST | `/repositories/{id}/coding/runs` | Explicit opt-in controlled editing and required verification |
+| GET | `/runs` | Compact stored trace summaries; optional `run_type`, `status`, `limit` (1–100) |
+| GET | `/runs/{uuid}` | Stored summary and ordered, sanitized trace events |
+
+Paths in registration must be **workspace-relative subdirectories**. The existing
+domain resolver enforces canonical confinement and rejects absolute paths,
+traversal, symlinks, and junction components, even links pointing inside the root.
+The API also rejects Windows stream/alias spellings. Bindings are rechecked before
+local operations. Responses omit absolute workspace roots and validate relative
+file/citation paths. Unexpected errors and invalid request bodies are never echoed.
+Recognizable secrets and host paths in model-authored answer text are redacted as
+defense in depth, not as a general secret-detection guarantee.
+
+For a directory named `sample` under that root (examples use POSIX-shell quoting;
+in PowerShell use `curl.exe` with appropriate JSON quoting or the Swagger UI):
+
+```bash
+curl http://127.0.0.1:8000/api/v1/health
+curl -X POST http://127.0.0.1:8000/api/v1/repositories \
+  -H 'Content-Type: application/json' -d '{"name":"sample","path":"sample"}'
+# Substitute the returned repository ID; indexing below may incur embedding charges.
+curl -X POST http://127.0.0.1:8000/api/v1/repositories/1/index
+curl -X POST http://127.0.0.1:8000/api/v1/repositories/1/rag \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Where is authentication handled?","strategy":"hybrid","top_k":5,"trace":true}'
+curl -X POST http://127.0.0.1:8000/api/v1/repositories/1/agent/runs \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"Explain the entry point without changing files.","max_iterations":8,"trace":true}'
+curl 'http://127.0.0.1:8000/api/v1/runs?run_type=rag&limit=10'
+```
+
+Indexing delegates to existing deterministic ingestion/chunking and embedding
+providers, preserving source newlines. It rejects more than 10,000 discovered
+source files, 50 MiB total discovered source bytes, or 10,000 chunks before model
+calls. Existing ingestion's per-file limits still apply. Embeddings are generated
+before opening the replacement transaction; a failure leaves the previous index
+intact. Discovery and execution remain synchronous, not background jobs. Empty
+repositories can be indexed without a model call. Index responses contain counts
+and the embedding model, never source contents or vectors.
+
+RAG accepts `semantic` (default), `hybrid`, or `hybrid_rerank`, with `top_k` 1–20.
+The reranking option feeds up to 20 retrieved candidates into the existing bounded
+LLM reranker before the existing citation-validating RAG pipeline. Responses contain
+`answer`, `insufficient_evidence`, relative path/line citations, and optional
+`trace_run_id`. Empty evidence skips answer generation. The read-only endpoint
+returns status, final answer, iteration/model/tool-attempt counts, and optional trace
+ID; raw history and tool observations are omitted.
+
+Coding uses a separate request contract:
+
+```json
+{
+  "objective": "Fix the failing parser case with a focused change.",
+  "acceptance_criteria": ["Existing tests still pass."],
+  "verification": {"test_paths": ["tests"], "ruff_paths": ["."]},
+  "max_iterations": 8,
+  "trace": true
+}
+```
+
+Posting this to `/repositories/{id}/coding/runs` explicitly permits the existing
+controlled mutation workflow. Clean-worktree preflight, optimistic-concurrency
+edits, fresh required pytest/Ruff evidence, final Git review, and deterministic
+completion gates remain mandatory. Callers may choose bounded verification paths,
+but cannot disable gates or supply executables, shell commands, or environment
+overrides. Objective/query/question strings are nonblank and at most 10,000
+characters; coding allows up to 50 criteria of at most 2,000 characters each.
+Iteration limits are 1–20. Verification scopes allow 1–32 paths each.
+Responses include workflow status, summary, compact verification evidence,
+changed relative paths, completion attempts, workspace revision, and optional trace
+ID, not diffs, replacements, or test output. A `200` can describe an incomplete or
+verification-failed workflow; inspect `status`. Applied edits are not automatically
+rolled back. Re-index explicitly after editing when fresh retrieval data is needed.
+There is no approve/reject/resume API or Git publication capability.
+
+Tracing is opt-in per RAG/agent/coding request. Existing Milestone 15 recorders
+persist completed/failed runs independently and best-effort. A failed trace sink
+does not fail the operation; its returned ID may then be unavailable in history.
+History revalidates stored metadata through the existing allowlist and additional
+host-path redaction. Prompts, source payloads, replacements, diffs, verifier output,
+credentials, and vectors are excluded. Unknown usage remains unknown and dollar
+cost is not invented. Trace records are history, not resumable job state.
+
+Errors have the form `{"error":{"code":"...","message":"..."}}`, with optional
+`trace_run_id`. Invalid paths map to `400`, missing repositories/runs to `404`,
+binding/busy/preflight conflicts to `409`, index bounds to `413`, request validation
+to `422`, unexpected failures to generic `500`, and unavailable storage/workspace
+configuration to `503`. No raw exception messages or validation input payloads are
+returned.
+
+`from repomind.api import create_app` creates an isolated, lazy app. Tests may
+inject `services`, `repository_store` (including its retrieval boundary),
+`trace_store`, `llm_factory`, and `embedding_factory`, or override `get_services`
+using FastAPI dependency overrides. Database sessions are short-lived and closed;
+the app disposes its owned lazy engine during shutdown. Health and OpenAPI remain
+available without constructing services. API tests use fake model providers and
+real domain composition; PostgreSQL HTTP tests are opt-in alongside the existing
+integration suite.
+
+**Milestone 16 executes long-running operations synchronously.** Sync routes run
+in the framework's thread pool; they do not call blocking workflows on the async
+event loop. Run one server process: overlapping index/agent/coding/RAG operations
+on the same or nested workspace return `409`. This guard does not coordinate
+external editors, other processes, or direct Python callers, and path checks are
+not an OS-level race-proof sandbox. A disconnected HTTP request is not guaranteed
+to cancel a running workflow. No automatic retry of mutation requests is safe.
+
+Readiness probes, streaming/SSE/WebSockets, durable jobs, workers/Redis, evaluation
+execution APIs, approval/resume, auth, frontend, MCP, native tool calling,
+planner/reviewer agents, multi-agent execution, arbitrary shell, Git mutation,
+deployment, and retrieval experiments remain deferred. Milestone 17 will introduce
+semantic progress streaming deliberately; no streaming or `BackgroundTasks` are
+implemented here.
+
 ## Observability and run tracing
 
 ```text
@@ -265,7 +431,7 @@ test calls OpenAI. Real database tests require `REPOMIND_TEST_DATABASE_URL` and 
 migrated PostgreSQL database; offline SQL generation is not proof of a database
 roundtrip.
 
-FastAPI endpoints, streaming, background workers, external telemetry adapters,
+Streaming, background workers, external telemetry adapters,
 automatic retention and dollar-cost estimation remain deferred. The existing
 tool permissions and retrieval algorithms remain the execution contracts.
 
@@ -1170,6 +1336,20 @@ result = run_coding_task(
 RepoMind/
 ├── src/
 │   └── repomind/
+│       ├── api/
+│       │   ├── __init__.py
+│       │   ├── app.py
+│       │   ├── dependencies.py
+│       │   ├── errors.py
+│       │   ├── models.py
+│       │   ├── privacy.py
+│       │   ├── routes.py
+│       │   ├── store.py
+│       │   └── services/
+│       │       ├── __init__.py
+│       │       ├── execution.py
+│       │       ├── repositories.py
+│       │       └── runs.py
 │       ├── agent/
 │       │   ├── __init__.py
 │       │   ├── loop.py
@@ -1251,15 +1431,23 @@ RepoMind/
 ├── alembic/
 │   ├── versions/
 │   │   ├── 20260910_01_initial_pgvector_schema.py
-│   │   └── 20260915_01_run_traces.py
+│   │   ├── 20260915_01_run_traces.py
+│   │   └── 20260915_02_repository_workspaces.py
 │   ├── env.py
 │   └── script.py.mako
 ├── tests/
 │   ├── integration/
 │   │   ├── conftest.py
+│   │   ├── test_api_postgres.py
 │   │   ├── test_postgres_observability.py
 │   │   └── test_postgres_persistence.py
 │   └── unit/
+│       ├── api/
+│       │   ├── conftest.py
+│       │   ├── test_api_repositories.py
+│       │   ├── test_execution.py
+│       │   ├── test_http.py
+│       │   └── test_runs.py
 │       ├── agent/
 │       │   ├── test_agent_models.py
 │       │   ├── test_editing_loop.py
@@ -1692,4 +1880,5 @@ The full project roadmap is described in the RepoMind engineering brief:
 13.5. RAG retrieval integration hardening (complete)
 14. Evaluation harness + coding-agent benchmarks (complete)
 15. Observability and persistent run tracing (complete)
-16. FastAPI backend (next)
+16. FastAPI backend (complete/current)
+17. Streaming/progress events (next)
