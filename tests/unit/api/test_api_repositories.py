@@ -59,6 +59,26 @@ def test_register_lookup_idempotence_and_conflict(api):
     )
 
 
+def test_repository_list_is_compact_and_uses_relative_binding(api):
+    (api.root / "other").mkdir()
+    second = api.client.post(
+        "/api/v1/repositories", json={"name": "other", "path": "other"}
+    )
+    assert second.status_code == 201
+    response = api.client.get("/api/v1/repositories?limit=1")
+    assert response.status_code == 200
+    assert response.json() == {
+        "repositories": [
+            {
+                "id": second.json()["id"],
+                "name": "other",
+                "workspace_relative_path": "other",
+                "created_at": "2026-09-15T00:00:00Z",
+            }
+        ]
+    }
+
+
 def test_missing_workspace_is_safe_and_health_still_works(api):
     with TestClient(
         create_app(

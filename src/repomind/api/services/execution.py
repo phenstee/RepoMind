@@ -171,7 +171,9 @@ class ExecutionService:
     ) -> CodingResponse:
         with self.tracing(request.trace, RunType.CODING_TASK, trace=trace) as run_trace:
             _, root = self.repositories.locate(repository_id)
-            with self.repositories.workspace.operation(root):
+            with self.repositories.workspace.operation(root), self.repositories.execution_lock.hold(
+                repository_id
+            ):
                 registry = create_editing_tool_registry(ToolContext(repository_root=root))
                 result = run_coding_task(
                     CodingTask(

@@ -94,6 +94,13 @@ agent-loop, editing, or completion-gate algorithms were replaced.
 existing structured trace timeline into a safe, request-bound Server-Sent Events
 transport without changing the RAG, agent, indexing, or coding workflows.
 
+**Milestone 18: Next.js + TypeScript frontend** is complete. A local developer
+workspace consumes the typed HTTP and POST-SSE API for repository registration,
+indexing, Ask, read-only Investigate, guarded Code, live progress, and run history.
+
+**Milestone 19: durable jobs and worker execution** is complete. PostgreSQL owns
+durable job state while Redis provides best-effort worker wakeups and live progress.
+
 ## Local HTTP API
 
 The API is for **trusted local development only**. It has **no authentication or
@@ -101,7 +108,8 @@ authorization**. **Do not expose it directly to the public Internet or untrusted
 networks.** It can inspect repository source and, through the separate coding
 endpoint, mutate files and execute repository tests. Fixed pytest/Ruff commands
 are not an OS sandbox: repository tests, plugins, and configuration must be trusted.
-No permissive CORS policy is installed.
+The API permits only configured trusted local frontend origins; it never uses a
+wildcard CORS policy or credentialed cross-origin requests.
 
 ```text
 Client
@@ -143,6 +151,7 @@ All capability endpoints use `/api/v1`:
 | --- | --- | --- |
 | GET | `/health` | Process liveness; no workspace, database, or model dependency |
 | POST | `/repositories` | Register `{ "name": "sample", "path": "sample" }`; returns stable ID, name, creation time |
+| GET | `/repositories` | Compact registered repository metadata and safe workspace-relative bindings |
 | GET | `/repositories/{id}` | Registered repository metadata |
 | POST | `/repositories/{id}/index` | Synchronous ingestion, chunking, embedding, atomic persistence |
 | POST | `/repositories/{id}/index/stream` | Indexing progress as SSE, then terminal index result |
@@ -153,6 +162,10 @@ All capability endpoints use `/api/v1`:
 | POST | `/repositories/{id}/agent/runs/stream` | Read-only agent progress as SSE, then terminal agent result |
 | POST | `/repositories/{id}/coding/runs` | Explicit opt-in controlled editing and required verification |
 | POST | `/repositories/{id}/coding/runs/stream` | Controlled coding progress as SSE, then terminal coding result |
+| POST | `/repositories/{id}/jobs/{index,rag,agent,coding}` | Persist a durable job and return `202` quickly |
+| GET | `/jobs` | Bounded durable job summaries; optional status/type/repository filters |
+| GET | `/jobs/{uuid}` | Authoritative durable status, safe terminal result/error, and trace link |
+| GET | `/jobs/{uuid}/events` | Ephemeral live semantic job progress as SSE |
 | GET | `/runs` | Compact stored trace summaries; optional `run_type`, `status`, `limit` (1–100) |
 | GET | `/runs/{uuid}` | Stored summary and ordered, sanitized trace events |
 
@@ -253,7 +266,7 @@ There is no cooperative cancellation, durable job, replay, resume token, or
 that connection but allows the already-running synchronous operation to finish so
 coding workflow invariants and edits are not interrupted unsafely. Completed traces
 can still be queried through `/api/v1/runs/{uuid}` when trace persistence succeeds.
-There are no workers, Redis, WebSockets, token streaming, or `BackgroundTasks`.
+Request-bound streams remain available, but the frontend now prefers durable jobs.
 
 Indexing delegates to existing deterministic ingestion/chunking and embedding
 providers, preserving source newlines. It rejects more than 10,000 discovered
@@ -332,10 +345,116 @@ not an OS-level race-proof sandbox. A disconnected HTTP request is not guarantee
 to cancel a running workflow. No automatic retry of mutation requests is safe.
 
 Readiness probes, durable jobs, workers/Redis, evaluation execution APIs,
-approval/resume, auth, frontend, MCP, native tool calling,
+approval/resume, auth, MCP, native tool calling,
 planner/reviewer agents, multi-agent execution, arbitrary shell, Git mutation,
 deployment, and retrieval experiments remain deferred. No `BackgroundTasks` are
 implemented here.
+
+## Durable jobs and worker
+
+```text
+HTTP enqueue -> PostgreSQL job -> Redis wakeup -> worker -> existing RepoMind service
+                     ^                                      |
+                     `----------- durable status/result -----'
+                                    |
+                         Redis Pub/Sub -> GET SSE -> browser
+```
+
+PostgreSQL is the authoritative durable store for job identity, validated request
+payload, status, attempt count, lease, safe result/error, and trace linkage. Redis
+is only coordination: a Redis outage never deletes queued job state because workers
+also poll PostgreSQL. Start local infrastructure with `docker compose up -d postgres redis`,
+apply `uv run alembic upgrade head`, run `uv run python -m repomind.worker`, then
+start the API and frontend normally.
+
+Workers atomically claim queued rows with PostgreSQL `FOR UPDATE SKIP LOCKED` and
+renew a bounded lease while executing the established index/RAG/agent/coding services.
+This is at-most-one active lease, **not** exactly-once side-effect execution. Expired
+RAG/agent/index jobs are requeued; an expired coding job is marked `job_interrupted`
+and is never replayed automatically because it may already have changed files.
+
+Index and coding use a PostgreSQL advisory lock per repository across API and worker
+processes, so a coding job cannot overlap an index or another coding job for that
+repository. Read-only work has no distributed mutation lock. Job payloads are bounded
+validated application input, not trace metadata; they never contain credentials, shell
+commands, environment dumps, source payloads, test output, or embedding vectors.
+
+`GET /jobs/{id}` is authoritative after a browser refresh. `GET /jobs/{id}/events`
+uses Redis Pub/Sub and has no replay guarantee: missed live progress can be recovered
+only as durable status/result and the existing persisted trace timeline. “Stop viewing
+progress” still does not cancel a worker operation.
+
+## Frontend workspace
+
+`frontend/` is a strict TypeScript Next.js App Router application managed with
+**npm**. It is a local developer console, not a browser-side AI implementation:
+
+```text
+Next.js + TypeScript UI
+          |
+   typed HTTP / POST-SSE client
+          |
+        FastAPI
+          |
+ RepoMind application services and domain
+```
+
+Install Node.js 20.9+ (the current local setup uses Node 25), then use two
+terminals. Start PostgreSQL and apply migrations first when real persistence is
+required:
+
+```powershell
+# Terminal 1: local PostgreSQL and Redis
+docker compose up -d postgres redis
+
+# Terminal 2: backend configuration/secrets stay in the repository root .env
+uv run alembic upgrade head
+uv run python -m repomind.worker
+
+# Terminal 3: FastAPI
+uv run uvicorn repomind.api.app:app --host 127.0.0.1 --port 8000
+
+# Terminal 4: browser-visible configuration only
+cd frontend
+Copy-Item .env.local.example .env.local
+npm ci
+npm run dev
+```
+
+Open `http://localhost:3000`. `frontend/.env.local` contains only
+`NEXT_PUBLIC_REPOMIND_API_URL`, normally `http://127.0.0.1:8000/api/v1`.
+Anything prefixed `NEXT_PUBLIC_` is visible to the browser: **never copy
+`OPENAI_API_KEY`, `DATABASE_URL`, or any backend secret into it.** Root `.env`
+is exclusively for backend configuration and secrets.
+
+The FastAPI CORS allowlist defaults to `http://localhost:3000` and
+`http://127.0.0.1:3000`; set `REPOMIND_TRUSTED_FRONTEND_ORIGINS` to a JSON list
+only when another trusted local origin is necessary. It is deliberately not
+`"*"`, and CORS credentials are disabled.
+
+The workspace flow is: register a safe workspace-relative repository binding,
+select it, index it, then use **Ask**, **Investigate**, or **Code**. Ask keeps
+Q&A history only in browser state, so it clears on refresh. Investigate is visibly
+read-only. Code requires an explicit checkbox before it sends a controlled coding
+request; it exposes only the existing relative pytest/Ruff path scopes, never
+shell commands, executables, environment variables, Git controls, or diffs.
+
+All long operations use the existing POST SSE endpoints through `fetch` and a
+buffered incremental SSE parser. The shared timeline renders safe semantic events
+for live progress and persisted run history. “Stop viewing progress” aborts the
+browser transport only; it does **not** cancel the backend operation, which may
+continue to protect coding-workflow integrity. There is intentionally no automatic
+reconnect because streams have no replay or durable-job semantics.
+
+Frontend checks are deterministic and do not need FastAPI, PostgreSQL, or OpenAI:
+
+```powershell
+cd frontend
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
 
 ## Observability and run tracing
 
@@ -1966,5 +2085,7 @@ The full project roadmap is described in the RepoMind engineering brief:
 14. Evaluation harness + coding-agent benchmarks (complete)
 15. Observability and persistent run tracing (complete)
 16. FastAPI backend (complete)
-17. Semantic SSE progress streaming (complete/current)
-18. Next.js frontend (next)
+17. Semantic SSE progress streaming (complete)
+18. Next.js + TypeScript frontend (complete)
+19. Redis + durable worker/job architecture (complete/current)
+20. Cooperative cancellation / job control (next)

@@ -21,7 +21,10 @@ def test_health_and_openapi_do_not_build_services():
     with TestClient(app) as client:
         assert client.get("/api/v1/health").json() == {"status": "ok", "service": "repomind"}
         schema = client.get("/openapi.json").json()
-        assert len(schema["paths"]) == 14
+        assert len(schema["paths"]) == 21
+        assert schema["paths"]["/api/v1/repositories"]["get"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]["$ref"].endswith("RepositoryListResponse")
         assert schema["paths"]["/api/v1/repositories/{repository_id}/rag"]["post"]["responses"][
             "200"
         ]["content"]["application/json"]["schema"]["$ref"].endswith("RAGResponse")
@@ -135,10 +138,30 @@ def test_services_can_be_replaced_at_dependency_boundary(api):
     assert api.client.get("/api/v1/repositories/1").json()["id"] == 88
 
 
-def test_no_permissive_cors_or_cross_app_state(api):
+def test_explicit_local_cors_and_cross_app_state(api):
+    response = api.client.options(
+        "/api/v1/repositories",
+        headers={"origin": "http://localhost:3000", "access-control-request-method": "POST"},
+    )
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
     response = api.client.options(
         "/api/v1/repositories",
         headers={"origin": "https://untrusted.example", "access-control-request-method": "POST"},
     )
     assert "access-control-allow-origin" not in response.headers
     assert create_app().state.container is not api.app.state.container
+
+
+def test_durable_job_submission_is_queued_without_running_a_model(api):
+    response = api.client.post(
+        "/api/v1/repositories/1/jobs/rag", json={"question": "Where is the entry point?"}
+    )
+    assert response.status_code == 202
+    body = response.json()
+    assert body["status"] == "queued"
+    assert body["job_type"] == "rag"
+    detail = api.client.get(f"/api/v1/jobs/{body['job_id']}")
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "queued"
+    assert detail.json()["result"] is None
+    assert not api.llm.calls and not api.embeddings.calls

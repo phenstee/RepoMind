@@ -6,12 +6,16 @@ from threading import Lock
 from fastapi import Request
 
 from repomind.api.services.execution import EmbeddingFactory, ExecutionService, LLMFactory
+from repomind.api.services.jobs import JobService
 from repomind.api.services.repositories import RepositoryService, WorkspacePolicy
 from repomind.api.services.runs import RunService, TraceStore
 from repomind.api.services.streaming import StreamingService
 from repomind.api.store import PostgresRepositoryStore, RepositoryStore
 from repomind.config import Settings, get_settings
 from repomind.db import create_database_engine, create_session_factory
+from repomind.jobs.broker import NullSubscription, RedisJobBroker
+from repomind.jobs.locks import NullRepositoryExecutionLock, PostgresRepositoryExecutionLock
+from repomind.jobs.store import InMemoryJobStore, PostgresJobStore
 from repomind.llm import OpenAILLMClient
 from repomind.observability import PostgresTraceStore
 from repomind.retrieval import OpenAIEmbeddingClient
@@ -23,6 +27,7 @@ class Services:
     execution: ExecutionService
     runs: RunService
     streaming: StreamingService
+    jobs: JobService
 
 
 class ServiceContainer:
@@ -63,7 +68,11 @@ class ServiceContainer:
                     else PostgresTraceStore(factory)
                 )
                 repositories = RepositoryService(
-                    store, WorkspacePolicy(settings.repomind_workspace_root)
+                    store,
+                    WorkspacePolicy(settings.repomind_workspace_root),
+                    PostgresRepositoryExecutionLock(factory)
+                    if self.engine is not None
+                    else NullRepositoryExecutionLock(),
                 )
                 execution = ExecutionService(
                     repositories,
@@ -72,11 +81,21 @@ class ServiceContainer:
                     self.embedding_factory
                     or (lambda trace: OpenAIEmbeddingClient(settings, trace=trace)),
                 )
+                if self.engine is None:
+                    class OfflineBroker:
+                        notify_job = lambda self, job_id: None
+                        publish_progress = lambda self, job_id, event: None
+                        subscribe = lambda self, job_id: NullSubscription()
+                        wait_for_work = lambda self, timeout: None
+                    jobs = JobService(InMemoryJobStore(), OfflineBroker(), repositories)
+                else:
+                    jobs = JobService(PostgresJobStore(factory), RedisJobBroker(settings.redis_url), repositories)
                 self.services = Services(
                     repositories,
                     execution,
                     RunService(traces),
                     StreamingService(execution),
+                    jobs,
                 )
             return self.services
 

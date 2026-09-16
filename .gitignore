@@ -2,12 +2,18 @@
 .env
 .env.*
 !.env.example
+!frontend/.env.local.example
 
 # Python
 __pycache__/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
+.pytest-cache/
+.pytest-tmp/
+.pytest-temp/
+.pytest-cache-*/
+.pytest-tmp-*/
 .ruff_cache/
 .coverage
 htmlcov/
@@ -16,6 +22,7 @@ venv/
 
 # uv
 .uv-cache/
+.npm-cache/
 
 # Builds and frontend
 build/

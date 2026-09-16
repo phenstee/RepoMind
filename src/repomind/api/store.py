@@ -36,6 +36,7 @@ class RepositoryBinding:
 class RepositoryStore(Protocol):
     def register(self, name: str, path: str) -> RepositoryBinding: ...
     def get(self, repository_id: int) -> RepositoryBinding: ...
+    def list_repositories(self, limit: int) -> Sequence[RepositoryBinding]: ...
     def files(
         self, repository_id: int, limit: int, offset: int
     ) -> list[RepositoryFileResponse]: ...
@@ -80,6 +81,13 @@ class PostgresRepositoryStore:
             if record is None:
                 raise RepositoryNotFoundError("Repository not found")
             return _binding(record)
+
+    def list_repositories(self, limit: int) -> list[RepositoryBinding]:
+        with self.factory() as session:
+            records = session.scalars(
+                select(RepositoryRecord).order_by(RepositoryRecord.created_at.desc()).limit(limit)
+            )
+            return [_binding(record) for record in records]
 
     def files(self, repository_id: int, limit: int, offset: int) -> list[RepositoryFileResponse]:
         with self.factory() as session:

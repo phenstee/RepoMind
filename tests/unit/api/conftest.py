@@ -41,6 +41,9 @@ class MemoryRepositoryStore:
             raise RepositoryNotFoundError("private database path/password")
         return self.bindings[repository_id]
 
+    def list_repositories(self, limit):
+        return list(reversed(list(self.bindings.values())))[:limit]
+
     def files(self, repository_id, limit, offset):
         snapshot = self.snapshots.get(repository_id)
         return [

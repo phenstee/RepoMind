@@ -17,6 +17,7 @@ from pydantic import (
 from repomind.agent import AgentRunStatus
 from repomind.coding import CodingTaskStatus
 from repomind.ingestion import validate_repository_relative_path
+from repomind.jobs import JobStatus, JobType
 from repomind.llm.models import TokenUsage
 from repomind.observability import RunStatus, RunType, TraceEvent
 from repomind.tools import RunRuffInput, RunTestsInput
@@ -50,6 +51,16 @@ class RepositoryResponse(BaseModel):
     id: int
     name: str
     created_at: datetime
+
+
+class RepositoryListItemResponse(RepositoryResponse):
+    """Compact, safe binding metadata for the repository selector."""
+
+    workspace_relative_path: PublicRelativePath | None
+
+
+class RepositoryListResponse(BaseModel):
+    repositories: list[RepositoryListItemResponse]
 
 
 class RepositoryFileResponse(BaseModel):
@@ -204,3 +215,27 @@ class ErrorDetail(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorDetail
+
+
+class JobQueuedResponse(BaseModel):
+    job_id: UUID
+    job_type: JobType
+    status: JobStatus
+
+
+class JobSummaryResponse(JobQueuedResponse):
+    repository_id: int
+    attempt_count: int
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+    trace_run_id: UUID | None
+
+
+class JobDetailResponse(JobSummaryResponse):
+    result: IndexResponse | RAGResponse | AgentResponse | CodingResponse | None = None
+    error: ErrorDetail | None = None
+
+
+class JobListResponse(BaseModel):
+    jobs: list[JobSummaryResponse]

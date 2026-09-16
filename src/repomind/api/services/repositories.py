@@ -11,6 +11,8 @@ from repomind.api.models import (
     IndexResponse,
     RegisterRepositoryRequest,
     RepositoryFilesResponse,
+    RepositoryListItemResponse,
+    RepositoryListResponse,
     RepositoryResponse,
 )
 from repomind.api.store import RepositoryBinding, RepositoryStore
@@ -21,6 +23,7 @@ from repomind.ingestion import (
     ingest_repository,
     resolve_repository_path,
 )
+from repomind.jobs.locks import NullRepositoryExecutionLock, RepositoryExecutionLock
 from repomind.observability import TraceContext
 from repomind.retrieval import EmbeddedChunk
 
@@ -96,9 +99,15 @@ class RepositoryService:
     MAX_SOURCE_BYTES = 50 * 1024 * 1024
     MAX_CHUNKS = 10_000
 
-    def __init__(self, store: RepositoryStore, workspace: WorkspacePolicy):
+    def __init__(
+        self,
+        store: RepositoryStore,
+        workspace: WorkspacePolicy,
+        execution_lock: RepositoryExecutionLock | None = None,
+    ):
         self.store = store
         self.workspace = workspace
+        self.execution_lock = execution_lock or NullRepositoryExecutionLock()
 
     @staticmethod
     def response(binding: RepositoryBinding) -> RepositoryResponse:
@@ -120,6 +129,19 @@ class RepositoryService:
         binding, _ = self.locate(repository_id)
         return self.response(binding)
 
+    def list(self, limit: int) -> RepositoryListResponse:
+        return RepositoryListResponse(
+            repositories=[
+                RepositoryListItemResponse(
+                    id=binding.id,
+                    name=binding.name,
+                    created_at=binding.created_at,
+                    workspace_relative_path=binding.workspace_relative_path,
+                )
+                for binding in self.store.list_repositories(limit)
+            ]
+        )
+
     def files(self, repository_id: int, limit: int, offset: int) -> RepositoryFilesResponse:
         self.locate(repository_id)
         return RepositoryFilesResponse(
@@ -137,7 +159,7 @@ class RepositoryService:
         trace: TraceContext | None = None,
     ) -> IndexResponse:
         binding, root = self.locate(repository_id)
-        with self.workspace.operation(root):
+        with self.workspace.operation(root), self.execution_lock.hold(repository_id):
             if trace is not None:
                 trace.emit("index.started", repository_id=repository_id)
             sources = find_source_files(root)

@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.cors import CORSMiddleware
 
 from repomind.api.dependencies import ServiceContainer, Services
 from repomind.api.errors import install_error_handlers
@@ -11,7 +12,7 @@ from repomind.api.routes import router
 from repomind.api.services.execution import EmbeddingFactory, LLMFactory
 from repomind.api.services.runs import TraceStore
 from repomind.api.store import RepositoryStore
-from repomind.config import Settings
+from repomind.config import Settings, get_settings
 
 
 def create_app(
@@ -47,6 +48,14 @@ def create_app(
         "Do not expose directly to the public Internet.",
     )
     application.state.container = container
+    active_settings = settings if settings is not None else get_settings()
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(active_settings.repomind_trusted_frontend_origins),
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type"],
+    )
     install_error_handlers(application)
     application.include_router(router)
     return application

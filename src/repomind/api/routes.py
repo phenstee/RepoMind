@@ -15,14 +15,19 @@ from repomind.api.models import (
     ErrorResponse,
     HealthResponse,
     IndexResponse,
+    JobDetailResponse,
+    JobListResponse,
+    JobQueuedResponse,
     RAGRequest,
     RAGResponse,
     RegisterRepositoryRequest,
     RepositoryFilesResponse,
+    RepositoryListResponse,
     RepositoryResponse,
     RunDetailResponse,
     RunListResponse,
 )
+from repomind.jobs import JobStatus, JobType
 from repomind.observability import RunStatus, RunType
 
 router = APIRouter(
@@ -49,6 +54,13 @@ def register_repository(body: RegisterRepositoryRequest, services: ServiceDep):
     return services.repositories.register(body)
 
 
+@router.get("/repositories", response_model=RepositoryListResponse)
+def list_repositories(
+    services: ServiceDep, limit: Annotated[int, Query(ge=1, le=100)] = 50
+):
+    return services.repositories.list(limit)
+
+
 @router.get("/repositories/{repository_id}", response_model=RepositoryResponse)
 def get_repository(repository_id: RepositoryID, services: ServiceDep):
     return services.repositories.get(repository_id)
@@ -57,6 +69,74 @@ def get_repository(repository_id: RepositoryID, services: ServiceDep):
 @router.post("/repositories/{repository_id}/index", response_model=IndexResponse)
 def index_repository(repository_id: RepositoryID, services: ServiceDep):
     return services.execution.index(repository_id)
+
+
+def _job_response(job, *, detail: bool = False):
+    base = {
+        "job_id": job.id,
+        "job_type": job.job_type,
+        "status": job.status,
+        "repository_id": job.repository_id,
+        "attempt_count": job.attempt_count,
+        "created_at": job.created_at,
+        "started_at": job.started_at,
+        "finished_at": job.finished_at,
+        "trace_run_id": job.trace_run_id,
+    }
+    if not detail:
+        return base
+    result = None
+    if job.result_payload is not None:
+        models = {JobType.INDEX: IndexResponse, JobType.RAG: RAGResponse, JobType.AGENT: AgentResponse, JobType.CODING: CodingResponse}
+        result = models[job.job_type].model_validate(job.result_payload)
+    base["result"] = result
+    base["error"] = None if job.error_code is None else {"code": job.error_code, "message": "The operation failed."}
+    return base
+
+
+@router.post("/repositories/{repository_id}/jobs/index", response_model=JobQueuedResponse, status_code=202)
+def queue_index(repository_id: RepositoryID, services: ServiceDep):
+    job = services.jobs.enqueue(JobType.INDEX, repository_id)
+    return {"job_id": job.id, "job_type": job.job_type, "status": job.status}
+
+
+@router.post("/repositories/{repository_id}/jobs/rag", response_model=JobQueuedResponse, status_code=202)
+def queue_rag(repository_id: RepositoryID, body: RAGRequest, services: ServiceDep):
+    job = services.jobs.enqueue(JobType.RAG, repository_id, body)
+    return {"job_id": job.id, "job_type": job.job_type, "status": job.status}
+
+
+@router.post("/repositories/{repository_id}/jobs/agent", response_model=JobQueuedResponse, status_code=202)
+def queue_agent(repository_id: RepositoryID, body: AgentRequest, services: ServiceDep):
+    job = services.jobs.enqueue(JobType.AGENT, repository_id, body)
+    return {"job_id": job.id, "job_type": job.job_type, "status": job.status}
+
+
+@router.post("/repositories/{repository_id}/jobs/coding", response_model=JobQueuedResponse, status_code=202)
+def queue_coding(repository_id: RepositoryID, body: CodingRequest, services: ServiceDep):
+    job = services.jobs.enqueue(JobType.CODING, repository_id, body)
+    return {"job_id": job.id, "job_type": job.job_type, "status": job.status}
+
+
+@router.get("/jobs", response_model=JobListResponse)
+def list_jobs(
+    services: ServiceDep,
+    status: JobStatus | None = None,
+    job_type: JobType | None = None,
+    repository_id: Annotated[int | None, Query(ge=1)] = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+):
+    return {"jobs": [_job_response(job) for job in services.jobs.list(status=status, job_type=job_type, repository_id=repository_id, limit=limit)]}
+
+
+@router.get("/jobs/{job_id}", response_model=JobDetailResponse)
+def get_job(job_id: UUID, services: ServiceDep):
+    return _job_response(services.jobs.get(job_id), detail=True)
+
+
+@router.get("/jobs/{job_id}/events", response_class=StreamingResponse, responses=SSE_RESPONSE)
+def stream_job(request: Request, job_id: UUID, services: ServiceDep):
+    return services.jobs.stream(request, job_id)
 
 
 @router.post(

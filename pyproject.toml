@@ -17,6 +17,7 @@ dependencies = [
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
     "python-dotenv>=1.2.3",
+    "redis>=7.2.0",
     "sqlalchemy>=2.0.52",
     "uvicorn>=0.53.0",
 ]
@@ -26,6 +27,7 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 markers = [
     "postgres: requires a real PostgreSQL database with the pgvector extension",
+    "redis: requires a real Redis server configured through REDIS_TEST_URL",
 ]
 
 [tool.ruff]

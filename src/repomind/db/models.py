@@ -179,3 +179,36 @@ class TraceEventRecord(Base):
     timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     duration_ms: Mapped[float | None] = mapped_column(Float)
     metadata_json: Mapped[dict] = mapped_column(JSONB)
+
+
+class JobRecord(Base):
+    """Durable worker request state; payload/result are bounded application contracts."""
+
+    __tablename__ = "jobs"
+    __table_args__ = (
+        CheckConstraint("job_type IN ('index', 'rag', 'agent', 'coding')", name="ck_jobs_type"),
+        CheckConstraint("status IN ('queued', 'running', 'succeeded', 'failed')", name="ck_jobs_status"),
+        CheckConstraint("payload_version = 1", name="ck_jobs_payload_version"),
+        CheckConstraint("attempt_count >= 0", name="ck_jobs_attempt_count"),
+        Index("ix_jobs_claim", "status", "created_at"),
+        Index("ix_jobs_repository", "repository_id", "created_at"),
+        Index("ix_jobs_lease", "status", "lease_expires_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    job_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    repository_id: Mapped[int] = mapped_column(
+        ForeignKey("repositories.id", ondelete="RESTRICT"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    payload_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    result_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    trace_run_id: Mapped[UUID | None] = mapped_column(Uuid, nullable=True)
