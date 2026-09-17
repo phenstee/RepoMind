@@ -25,6 +25,7 @@ class MemoryRepositoryStore:
         self.chunks = {}
         self.search_calls = []
         self.candidates = []
+        self.neighbor_corpus = []
 
     def register(self, name, path):
         for binding in self.bindings.values():
@@ -65,6 +66,14 @@ class MemoryRepositoryStore:
     def search(self, repository_id, query, embedding, *, hybrid, top_k):
         self.search_calls.append((repository_id, query, hybrid, top_k))
         return self.candidates[:top_k]
+
+    def load_neighbors(self, repository_id, keys):
+        wanted = set(keys)
+        return [
+            chunk
+            for chunk in self.neighbor_corpus
+            if (chunk.relative_path.as_posix(), chunk.chunk_index) in wanted
+        ]
 
 
 class MemoryTraces:

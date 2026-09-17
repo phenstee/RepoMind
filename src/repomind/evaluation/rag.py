@@ -12,11 +12,12 @@ from repomind.evaluation.models import (
 from repomind.observability import TraceContext, TraceRecorder
 from repomind.observability.instrumentation import traced_run
 from repomind.rag import (
+    NeighborLoader,
     RAGConfig,
     Retriever,
     StructuredLLMProvider,
     answer_repository_question_with_retriever,
-    build_repository_context,
+    build_rag_context,
 )
 from repomind.rag.models import BuiltRepositoryContext, RepositoryAnswer
 from repomind.retrieval import ChunkIdentity, RankedChunk, chunk_identity
@@ -71,6 +72,7 @@ def evaluate_rag(
     mode: EvaluationMode = EvaluationMode.OFFLINE_FIXTURE,
     recorder: TraceRecorder | None = None,
     trace: TraceContext | None = None,
+    neighbor_loader: NeighborLoader | None = None,
 ) -> RAGEvaluationReport:
     """Evaluate retrieval, final context, and answer oracles as separate stages."""
 
@@ -98,10 +100,12 @@ def evaluate_rag(
                 config=rag_config,
                 trace=trace,
                 strategy=strategy,
+                neighbor_loader=neighbor_loader,
             )
-            context = build_repository_context(
+            context = build_rag_context(
                 recording_retriever.results,
-                max_context_chars=rag_config.max_context_chars,
+                rag_config,
+                neighbor_loader=neighbor_loader,
             )
             retrieved = tuple(
                 chunk_identity(result.chunk) for result in recording_retriever.results

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from repomind.api.errors import APIError
 from repomind.api.models import RepositoryFileResponse
 from repomind.db import (
+    load_neighbor_chunks,
     persist_embedded_chunks,
     persist_repository_snapshot,
     pgvector_semantic_search,
@@ -19,7 +20,7 @@ from repomind.db import (
 )
 from repomind.db.models import RepositoryFileRecord, RepositoryRecord
 from repomind.db.repositories import RepositoryNotFoundError
-from repomind.ingestion import RepositorySnapshot
+from repomind.ingestion import CodeChunk, RepositorySnapshot
 from repomind.retrieval import (
     EmbeddedChunk,
     EmbeddingVector,
@@ -58,6 +59,9 @@ class RepositoryStore(Protocol):
         top_k: int,
         semantic_mode: SemanticSearchMode = SemanticSearchMode.EXACT,
     ) -> Sequence[RankedChunk]: ...
+    def load_neighbors(
+        self, repository_id: int, keys: Sequence[tuple[str, int]]
+    ) -> Sequence[CodeChunk]: ...
 
 
 def _binding(record: RepositoryRecord) -> RepositoryBinding:
@@ -158,3 +162,9 @@ class PostgresRepositoryStore:
                 top_k=top_k,
                 mode=semantic_mode,
             )
+
+    def load_neighbors(
+        self, repository_id: int, keys: Sequence[tuple[str, int]]
+    ) -> Sequence[CodeChunk]:
+        with self.factory() as session:
+            return load_neighbor_chunks(session, repository_id, keys)

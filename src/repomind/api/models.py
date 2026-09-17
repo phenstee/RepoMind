@@ -25,6 +25,7 @@ from repomind.tools import RunRuffInput, RunTestsInput
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=10_000)]
 RelativePath = Annotated[str, StringConstraints(min_length=1, max_length=1024)]
 Strategy = Literal["semantic", "hybrid", "hybrid_rerank"]
+ContextStrategyLiteral = Literal["seeds_only", "expanded"]
 PublicRelativePath = Annotated[
     str, AfterValidator(lambda value: validate_repository_relative_path(Path(value)).as_posix())
 ]
@@ -88,6 +89,7 @@ class RAGRequest(RequestModel):
     question: NonBlank
     strategy: Strategy = "semantic"
     top_k: int = Field(default=5, ge=1, le=20, strict=True)
+    context_strategy: ContextStrategyLiteral = "seeds_only"
     trace: bool = False
 
 

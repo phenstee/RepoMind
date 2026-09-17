@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from repomind.coding import CodingTask, CodingTaskStatus, VerificationPolicy
 from repomind.ingestion import validate_repository_relative_path
+from repomind.rag import ContextStrategy
 from repomind.retrieval import ChunkIdentity
 
 DEFAULT_BENCHMARK_VERSION = "repo-eval-v1"
@@ -187,6 +188,86 @@ class RAGEvaluationReport(BaseModel):
             raise ValueError("RAG case count must match case results")
         if any(result.strategy != self.strategy for result in self.case_results):
             raise ValueError("RAG case strategies must match the report strategy")
+        return self
+
+
+class ContextAssemblyBenchmarkCase(_NamedCase):
+    """One query and the gold chunk identities expected in packed context."""
+
+    query: str = Field(min_length=1, max_length=10_000)
+    relevant_chunks: tuple[ChunkIdentity, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_case(self) -> "ContextAssemblyBenchmarkCase":
+        if not self.query.strip():
+            raise ValueError("context assembly benchmark query must not be blank")
+        if len(self.relevant_chunks) != len(set(self.relevant_chunks)):
+            raise ValueError("relevant chunk identities must be unique")
+        return self
+
+
+class ContextAssemblyBenchmarkSuite(BaseModel):
+    """A small versioned dataset for comparing context-assembly strategies."""
+
+    model_config = ConfigDict(frozen=True)
+
+    version: str = Field(default=DEFAULT_BENCHMARK_VERSION, min_length=1, max_length=200)
+    cases: tuple[ContextAssemblyBenchmarkCase, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_suite(self) -> "ContextAssemblyBenchmarkSuite":
+        if not self.version.strip():
+            raise ValueError("benchmark version must not be blank")
+        ids = [case.id for case in self.cases]
+        if len(ids) != len(set(ids)):
+            raise ValueError("context assembly benchmark case IDs must be unique")
+        return self
+
+
+class ContextAssemblyCaseResult(BaseModel):
+    """Per-query context-assembly evidence, kept separate from retrieval ranking."""
+
+    model_config = ConfigDict(frozen=True)
+
+    case_id: str
+    mode: EvaluationMode
+    strategy: ContextStrategy
+    packed_chunk_ids: tuple[ChunkIdentity, ...]
+    relevant_chunk_ids: tuple[ChunkIdentity, ...]
+    seed_count: int = Field(ge=0)
+    expanded_candidate_count: int = Field(ge=0)
+    deduplicated_count: int = Field(ge=0)
+    dropped_for_budget_count: int = Field(ge=0)
+    packed_count: int = Field(ge=0)
+    estimated_tokens: int = Field(ge=0)
+    budget_tokens: int = Field(gt=0)
+    gold_evidence_coverage: float = Field(ge=0, le=1)
+    context_precision: float = Field(ge=0, le=1)
+    budget_utilization: float = Field(ge=0)
+
+
+class ContextAssemblyEvaluationReport(BaseModel):
+    """Aggregate context-assembly metrics, separate from retrieval-ranking metrics."""
+
+    model_config = ConfigDict(frozen=True)
+
+    benchmark_version: str
+    mode: EvaluationMode
+    strategy: ContextStrategy
+    case_results: tuple[ContextAssemblyCaseResult, ...] = Field(min_length=1)
+    case_count: int = Field(gt=0)
+    mean_gold_evidence_coverage: float = Field(ge=0, le=1)
+    mean_context_precision: float = Field(ge=0, le=1)
+    mean_budget_utilization: float = Field(ge=0)
+    mean_packed_count: float = Field(ge=0)
+    mean_deduplicated_count: float = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_report(self) -> "ContextAssemblyEvaluationReport":
+        if self.case_count != len(self.case_results):
+            raise ValueError("context assembly case count must match case results")
+        if any(result.strategy != self.strategy for result in self.case_results):
+            raise ValueError("context assembly case strategies must match the report strategy")
         return self
 
 

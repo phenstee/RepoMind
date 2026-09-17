@@ -141,6 +141,13 @@ _KEYS = frozenset(
         "total_size_bytes",
         "chunk_count",
         "embedding_model",
+        "seed_count",
+        "expanded_count",
+        "deduplicated_count",
+        "dropped_count",
+        "packed_count",
+        "estimated_tokens",
+        "budget_tokens",
     ]
 )
 _SECRET = re.compile(

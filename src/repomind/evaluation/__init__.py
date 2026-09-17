@@ -1,10 +1,11 @@
-"""Repeatable retrieval, RAG, and coding-workflow evaluation."""
+"""Repeatable retrieval, RAG, context-assembly, and coding-workflow evaluation."""
 
 from repomind.evaluation.coding import (
     CodingTaskRunner,
     evaluate_coding_oracle,
     evaluate_coding_suite,
 )
+from repomind.evaluation.context import ContextRetrievalStrategy, evaluate_context_assembly
 from repomind.evaluation.metrics import (
     first_relevant_rank,
     mean_reciprocal_rank,
@@ -20,6 +21,10 @@ from repomind.evaluation.models import (
     CodingBenchmarkSuite,
     CodingEvaluationReport,
     CodingOracleResult,
+    ContextAssemblyBenchmarkCase,
+    ContextAssemblyBenchmarkSuite,
+    ContextAssemblyCaseResult,
+    ContextAssemblyEvaluationReport,
     EvaluationMode,
     FileTextExpectation,
     OracleCheckResult,
@@ -35,6 +40,7 @@ from repomind.evaluation.models import (
 from repomind.evaluation.rag import evaluate_rag
 from repomind.evaluation.reporting import (
     format_coding_report,
+    format_context_assembly_comparison,
     format_rag_comparison,
     format_retrieval_comparison,
 )
@@ -49,6 +55,11 @@ __all__ = [
     "CodingEvaluationReport",
     "CodingOracleResult",
     "CodingTaskRunner",
+    "ContextAssemblyBenchmarkCase",
+    "ContextAssemblyBenchmarkSuite",
+    "ContextAssemblyCaseResult",
+    "ContextAssemblyEvaluationReport",
+    "ContextRetrievalStrategy",
     "EvaluationMode",
     "FileTextExpectation",
     "OracleCheckResult",
@@ -63,10 +74,12 @@ __all__ = [
     "RetrievalStrategy",
     "evaluate_coding_oracle",
     "evaluate_coding_suite",
+    "evaluate_context_assembly",
     "evaluate_rag",
     "evaluate_retrieval",
     "first_relevant_rank",
     "format_coding_report",
+    "format_context_assembly_comparison",
     "format_rag_comparison",
     "format_retrieval_comparison",
     "mean_reciprocal_rank",

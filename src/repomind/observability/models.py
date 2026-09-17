@@ -82,6 +82,7 @@ EventType = Literal[
     "retrieval.failed",
     "rag.context",
     "rag.answer",
+    "context.assembled",
     "evaluation.case.started",
     "evaluation.case.completed",
     "evaluation.case.failed",

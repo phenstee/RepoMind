@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import cast, distinct, select, text
+from sqlalchemy import cast, distinct, select, text, tuple_
 from sqlalchemy.orm import Session
 
 from repomind.db.models import (
@@ -313,6 +313,84 @@ def load_chunks(
             CodeChunkRecord.start_line,
             CodeChunkRecord.chunk_index,
             CodeChunkRecord.id,
+        )
+    ).all()
+    return [
+        CodeChunk(
+            relative_path=relative_path,
+            language=language,
+            start_line=start_line,
+            end_line=end_line,
+            content=content,
+            chunk_index=chunk_index,
+            chunking_strategy=chunking_strategy,
+            chunk_kind=chunk_kind,
+            symbol_name=symbol_name,
+            qualified_symbol_name=qualified_symbol_name,
+            parent_symbol=parent_symbol,
+            fragment_index=fragment_index,
+            fragment_count=fragment_count,
+        )
+        for (
+            relative_path,
+            language,
+            chunk_index,
+            start_line,
+            end_line,
+            content,
+            chunking_strategy,
+            chunk_kind,
+            symbol_name,
+            qualified_symbol_name,
+            parent_symbol,
+            fragment_index,
+            fragment_count,
+        ) in rows
+    ]
+
+
+def load_neighbor_chunks(
+    session: Session,
+    repository_id: int,
+    keys: Sequence[tuple[str, int]],
+) -> list[CodeChunk]:
+    """Batch-load specific (relative_path, chunk_index) chunks for one repository.
+
+    Uses a single row-value ``IN`` query regardless of how many keys are
+    requested, avoiding one query per neighbor.
+    """
+
+    _repository_or_raise(session, repository_id)
+    unique_keys = sorted(set(keys))
+    if not unique_keys:
+        return []
+
+    rows = session.execute(
+        select(
+            RepositoryFileRecord.relative_path,
+            RepositoryFileRecord.language,
+            CodeChunkRecord.chunk_index,
+            CodeChunkRecord.start_line,
+            CodeChunkRecord.end_line,
+            CodeChunkRecord.content,
+            CodeChunkRecord.chunking_strategy,
+            CodeChunkRecord.chunk_kind,
+            CodeChunkRecord.symbol_name,
+            CodeChunkRecord.qualified_symbol_name,
+            CodeChunkRecord.parent_symbol,
+            CodeChunkRecord.fragment_index,
+            CodeChunkRecord.fragment_count,
+        )
+        .join(RepositoryFileRecord)
+        .where(
+            RepositoryFileRecord.repository_id == repository_id,
+            tuple_(RepositoryFileRecord.relative_path, CodeChunkRecord.chunk_index).in_(
+                unique_keys
+            ),
+        )
+        .order_by(
+            RepositoryFileRecord.relative_path,
+            CodeChunkRecord.chunk_index,
         )
     ).all()
     return [

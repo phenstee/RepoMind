@@ -137,6 +137,40 @@ def test_progress_projection_is_allowlisted_and_relative_path_only():
         assert private not in body
 
 
+def test_context_assembled_progress_exposes_counts_without_source_or_paths():
+    event = TraceEvent(
+        event_type="context.assembled",
+        sequence=5,
+        timestamp=datetime(2026, 9, 16, tzinfo=UTC),
+        metadata={
+            "strategy": "expanded",
+            "seed_count": 2,
+            "expanded_count": 3,
+            "deduplicated_count": 1,
+            "dropped_count": 0,
+            "packed_count": 4,
+            "estimated_tokens": 512,
+            "budget_tokens": 4000,
+            "path": r"C:\\Users\\private\\secret.py",
+            "content": "SECRET_SOURCE_CONTENT",
+        },
+    )
+    progress = safe_progress_event(UUID(int=5), event)
+    assert progress.data == {
+        "strategy": "expanded",
+        "seed_count": 2,
+        "expanded_count": 3,
+        "deduplicated_count": 1,
+        "dropped_count": 0,
+        "packed_count": 4,
+        "estimated_tokens": 512,
+        "budget_tokens": 4000,
+    }
+    body = encode_sse_event(progress.event, progress, event_id=progress.sequence)
+    for private in ("SECRET_SOURCE_CONTENT", "Users", "secret.py"):
+        assert private not in body
+
+
 def test_review_progress_exposes_counts_and_verdict_without_review_text():
     event = TraceEvent(
         event_type="review.completed",

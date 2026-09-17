@@ -5,6 +5,7 @@ from typing import Protocol
 
 from repomind.evaluation.models import (
     CodingEvaluationReport,
+    ContextAssemblyEvaluationReport,
     RAGEvaluationReport,
     RetrievalEvaluationReport,
 )
@@ -106,6 +107,59 @@ def format_rag_comparison(reports: Sequence[RAGEvaluationReport]) -> str:
                 "Context Recall",
                 "Citation Recall",
                 "Answer Passed",
+            ),
+            rows,
+        )
+        + "\n\nCase details\n"
+        + "\n".join(details)
+    )
+
+
+def format_context_assembly_comparison(
+    reports: Sequence[ContextAssemblyEvaluationReport],
+) -> str:
+    """Format gold-evidence coverage, packing, and budget metrics per strategy.
+
+    These are context-assembly metrics, not retrieval-ranking metrics: a
+    strategy's coverage can improve with unchanged candidate ranking, and that
+    must not be read as a ranking-quality improvement.
+    """
+
+    if not reports:
+        raise ValueError("at least one context assembly report is required")
+    _validate_comparable(reports)
+    rows = [
+        (
+            report.strategy.value,
+            f"{report.mean_gold_evidence_coverage:.3f}",
+            f"{report.mean_context_precision:.3f}",
+            f"{report.mean_packed_count:.3f}",
+            f"{report.mean_budget_utilization:.3f}",
+            f"{report.mean_deduplicated_count:.3f}",
+        )
+        for report in reports
+    ]
+    details = [
+        (
+            f"{report.strategy.value}/{result.case_id}: seed_count={result.seed_count}, "
+            f"expanded_candidates={result.expanded_candidate_count}, "
+            f"deduplicated={result.deduplicated_count}, "
+            f"dropped_for_budget={result.dropped_for_budget_count}, "
+            f"packed={result.packed_count}, estimated_tokens={result.estimated_tokens}, "
+            f"budget_tokens={result.budget_tokens}"
+        )
+        for report in reports
+        for result in report.case_results
+    ]
+    return (
+        _table(
+            (
+                "Strategy",
+                "Gold Coverage",
+                "Context Precision",
+                "Mean Packed",
+                "Budget Util.",
+                "Mean Dedup",
             ),
             rows,
         )

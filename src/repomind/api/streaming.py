@@ -57,6 +57,13 @@ _NUMBERS = frozenset(
         "start_line",
         "end_line",
         "total_lines",
+        "seed_count",
+        "expanded_count",
+        "deduplicated_count",
+        "dropped_count",
+        "packed_count",
+        "estimated_tokens",
+        "budget_tokens",
     }
 )
 _BOOLEANS = frozenset(
@@ -139,6 +146,18 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
     ),
     "rag.context": frozenset({"context_chunk_count", "context_chars"}),
     "rag.answer": frozenset({"citation_count", "insufficient_evidence", "answer_chars"}),
+    "context.assembled": frozenset(
+        {
+            "strategy",
+            "seed_count",
+            "expanded_count",
+            "deduplicated_count",
+            "dropped_count",
+            "packed_count",
+            "estimated_tokens",
+            "budget_tokens",
+        }
+    ),
     "agent.decision": frozenset({"iteration", "action", "tool", "answer_chars"}),
     "agent.stopped": frozenset({"iteration", "domain_status", "blocker_codes"}),
     "tool.started": frozenset({"tool", "path", "paths", "workspace_revision"}),

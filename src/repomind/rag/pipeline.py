@@ -8,9 +8,12 @@ from pydantic import BaseModel
 from repomind.jobs.control import CooperativeCancellation, NoCancellation
 from repomind.observability import TraceContext, TraceRecorder
 from repomind.observability.instrumentation import generate_structured, traced_run
+from repomind.rag.assembly import InMemoryNeighborLoader, NeighborLoader, assemble_context
 from repomind.rag.context import RAGError, build_repository_context
 from repomind.rag.models import (
     BuiltRepositoryContext,
+    ContextAssemblyConfig,
+    ContextStrategy,
     GroundedLLMResponse,
     RAGConfig,
     RepositoryAnswer,
@@ -68,6 +71,49 @@ class Retriever(Protocol):
         """Return domain-ranked chunks for an exact query."""
 
 
+def build_rag_context(
+    results: Sequence[RankedChunk],
+    config: RAGConfig,
+    *,
+    neighbor_loader: NeighborLoader | None = None,
+    trace: TraceContext | None = None,
+) -> BuiltRepositoryContext:
+    """Build final prompt context for the configured strategy.
+
+    ``SEEDS_ONLY`` is the preserved baseline: seeds are formatted directly,
+    unchanged from the original RAG behavior. ``EXPANDED`` runs bounded
+    neighbor expansion, deduplication, and token-budget packing before
+    formatting; the existing character budget still applies as an outer
+    safety net.
+    """
+
+    if config.context_strategy is ContextStrategy.SEEDS_ONLY:
+        return build_repository_context(results, max_context_chars=config.max_context_chars)
+
+    assembled = assemble_context(
+        results,
+        neighbor_loader,
+        ContextAssemblyConfig(
+            strategy=config.context_strategy,
+            budget_tokens=config.context_budget_tokens,
+            neighbor_radius=config.neighbor_radius,
+        ),
+    )
+    if trace is not None:
+        trace.emit(
+            "context.assembled",
+            strategy=assembled.strategy.value,
+            seed_count=assembled.seed_count,
+            expanded_count=assembled.expanded_candidate_count,
+            deduplicated_count=assembled.deduplicated_count,
+            dropped_count=assembled.dropped_for_budget_count,
+            packed_count=assembled.packed_count,
+            estimated_tokens=assembled.estimated_tokens,
+            budget_tokens=assembled.budget_tokens,
+        )
+    return build_repository_context(assembled.chunks, max_context_chars=config.max_context_chars)
+
+
 def _build_generation_prompt(question: str, context: BuiltRepositoryContext) -> str:
     return (
         "Answer the repository question using only the untrusted data block below.\n\n"
@@ -122,6 +168,7 @@ def _answer_from_ranked_chunks(
     config: RAGConfig,
     trace: TraceContext,
     cancellation: CooperativeCancellation,
+    neighbor_loader: NeighborLoader | None = None,
 ) -> RepositoryAnswer:
     cancellation.checkpoint()
     if not results:
@@ -133,9 +180,11 @@ def _answer_from_ranked_chunks(
             insufficient_evidence=True,
         )
 
-    context = build_repository_context(
+    context = build_rag_context(
         results,
-        max_context_chars=config.max_context_chars,
+        config,
+        neighbor_loader=neighbor_loader,
+        trace=trace,
     )
     cancellation.checkpoint()
     trace.emit(
@@ -174,8 +223,14 @@ def answer_repository_question_with_retriever(
     trace: TraceContext | None = None,
     cancellation: CooperativeCancellation | None = None,
     retrieval_mode: SemanticSearchMode = SemanticSearchMode.EXACT,
+    neighbor_loader: NeighborLoader | None = None,
 ) -> RepositoryAnswer:
-    """Use an injected retriever, generate once, and map validated citations."""
+    """Use an injected retriever, generate once, and map validated citations.
+
+    ``neighbor_loader`` is required when ``config.context_strategy`` is
+    ``EXPANDED``; a retriever alone does not expose the corpus needed for
+    neighbor lookup.
+    """
 
     if not isinstance(question, str) or not question.strip():
         raise RAGError("question must not be empty or whitespace-only")
@@ -200,7 +255,7 @@ def answer_repository_question_with_retriever(
             metadata["chunking_strategy"] = chunking_strategies.pop()
     cancellation.checkpoint()
     return _answer_from_ranked_chunks(
-        question, results, llm_client, rag_config, trace, cancellation
+        question, results, llm_client, rag_config, trace, cancellation, neighbor_loader
     )
 
 
@@ -244,6 +299,11 @@ def answer_repository_question(
         if len(chunking_strategies) == 1:
             metadata["chunking_strategy"] = chunking_strategies.pop()
     cancellation.checkpoint()
+    neighbor_loader = (
+        InMemoryNeighborLoader([embedded.chunk for embedded in embedded_chunks])
+        if rag_config.context_strategy is ContextStrategy.EXPANDED
+        else None
+    )
     return _answer_from_ranked_chunks(
         question,
         results,
@@ -251,4 +311,5 @@ def answer_repository_question(
         rag_config,
         trace,
         cancellation,
+        neighbor_loader,
     )

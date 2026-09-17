@@ -35,7 +35,12 @@ from repomind.jobs.control import (
     NoCancellation,
 )
 from repomind.observability import InMemoryTraceRecorder, RunType, TraceContext
-from repomind.rag import RAGConfig, StructuredLLMProvider, answer_repository_question_with_retriever
+from repomind.rag import (
+    ContextStrategy,
+    RAGConfig,
+    StructuredLLMProvider,
+    answer_repository_question_with_retriever,
+)
 from repomind.retrieval import EmbeddingVector, LLMReranker, RankedChunk
 from repomind.tools import ToolContext, create_default_tool_registry, create_editing_tool_registry
 
@@ -140,16 +145,23 @@ class ExecutionService:
                         )
                     return list(candidates)
 
+                context_strategy = ContextStrategy(request.context_strategy)
+                neighbor_loader = (
+                    (lambda keys: self.repositories.store.load_neighbors(repository_id, keys))
+                    if context_strategy is ContextStrategy.EXPANDED
+                    else None
+                )
                 answer = answer_repository_question_with_retriever(
                     request.question,
                     retrieve,
                     llm,
-                    config=RAGConfig(top_k=request.top_k),
+                    config=RAGConfig(top_k=request.top_k, context_strategy=context_strategy),
                     trace=run_trace,
                     strategy="hybrid+rerank"
                     if request.strategy == "hybrid_rerank"
                     else request.strategy,
                     cancellation=cancellation,
+                    neighbor_loader=neighbor_loader,
                 )
                 return RAGResponse(
                     answer=public_text(answer.answer),

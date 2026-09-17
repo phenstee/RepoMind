@@ -117,6 +117,17 @@ can opt into AST-anchored structural chunks, and PostgreSQL can opt into a
 filtered pgvector HNSW candidate path without changing BM25, RRF, reranking, or
 RAG result contracts.
 
+**Milestone 23: Retrieval quality + context assembly V2** is complete.
+Retrieval still answers "what chunks are relevant?"; a new, explicitly separate
+`ContextAssembler` answers "what evidence should actually reach the model?" It
+performs bounded (`radius=1` by default) same-file neighbor expansion, prefers
+same-symbol structural fragments over generic neighbors, deduplicates by stable
+chunk identity, conservatively suppresses fully-contained overlapping ranges,
+and greedily packs a deterministic token budget. The preserved baseline
+(`seeds_only`) is untouched production behavior; the new `expanded` strategy is
+available per-request but is not the default. See
+[Context assembly](#context-assembly) below.
+
 ## Local HTTP API
 
 The API is for **trusted local development only**. It has **no authentication or
@@ -251,7 +262,7 @@ The public progress model is a deliberately narrow projection of retained
 `TraceEvent` objects, not a trace dump. Representative events include
 `index.started`, `ingestion.completed`, `chunking.completed`,
 `embedding.completed`, `retrieval.started`, `retrieval.completed`,
-`agent.decision`, `tool.started`, `tool.completed`, `file.mutated`,
+`context.assembled`, `agent.decision`, `tool.started`, `tool.completed`, `file.mutated`,
 `verification.completed`, `completion.blocked`, `final_review.completed`,
 `planning.started`, `planning.completed`, `review.started`, `review.completed`,
 `review.blocked`, and `run.completed`. Event names follow observability semantics; the UI
@@ -297,7 +308,10 @@ intact. Discovery and execution remain synchronous, not background jobs. Empty
 repositories can be indexed without a model call. Index responses contain counts
 and the embedding model, never source contents or vectors.
 
-RAG accepts `semantic` (default), `hybrid`, or `hybrid_rerank`, with `top_k` 1–20.
+RAG accepts `semantic` (default), `hybrid`, or `hybrid_rerank`, with `top_k` 1–20,
+and an independent `context_strategy` of `seeds_only` (default, unchanged
+Milestone 1–22 behavior) or `expanded` (Milestone 23 bounded neighbor expansion;
+see [Context assembly](#context-assembly)).
 The reranking option feeds up to 20 retrieved candidates into the existing bounded
 LLM reranker before the existing citation-validating RAG pipeline. Responses contain
 `answer`, `insufficient_evidence`, relative path/line citations, and optional
@@ -1175,19 +1189,140 @@ always improves results—evaluation must establish that later.
 
 ### Future retrieval experiments
 
-Retrieval V2 now makes AST chunking and optional structural embedding context
-measurable strategies. The following ideas remain intentionally deferred:
+Retrieval V2 made AST chunking and optional structural embedding context
+measurable strategies. Milestone 23 (see
+[Context assembly](#context-assembly)) implemented bounded neighbor-chunk
+expansion, overlap-aware deduplication, and token-aware budgeting as an
+explicit assembly stage after retrieval. The following ideas remain
+intentionally deferred:
 
-- parent or neighboring-chunk context expansion
-- overlap-aware context deduplication
-- token-aware context budgeting
-- query rewriting or multi-query retrieval
-- exact-symbol-aware retrieval fusion
+- query rewriting or multi-query retrieval (an offline, deterministic
+  experiment mode was considered for Milestone 23; current evaluation did not
+  surface a query-language-mismatch failure class clear enough to justify it)
+- exact-symbol-aware retrieval fusion (beyond the same-symbol-fragment
+  preference already used inside context assembly)
+- GraphRAG, call-graph or import-graph traversal, and multi-agent retrieval
 
 These changes may improve some workloads, but they also change cost, latency,
 recall, or context composition. They should be measured rather than assumed to
 improve repository-answer quality. Each experiment should be introduced one at
-a time and measured against the Milestone 14 baseline.
+a time and measured against an established baseline.
+
+## Context assembly
+
+Milestone 23 separates two questions that Milestones 1–22 answered together:
+
+```text
+Query
+  |
+Semantic / BM25 retrieval -> RRF -> optional reranker
+  |
+retrieved seed chunks                      <- "what chunks are relevant?"
+  |
+ContextAssembler
+  |-- bounded same-file neighbor expansion (radius=1 by default)
+  |-- same-symbol structural-fragment preference
+  |-- identity + overlap-containment deduplication
+  |-- deterministic, priority-ordered token-budget packing
+  |
+final assembled context                   <- "what evidence reaches the model?"
+  |
+RAG / Agent
+```
+
+`repomind.rag.assembly.assemble_context` is the one context-assembly
+abstraction (`ContextAssembler` in the milestone's own terms). Its input is an
+already-ranked, already-deduplicated seed list (`RankedChunk` — retrieval's
+output); its output is an `AssembledContextResult` of ordered
+`AssembledContextChunk` objects, each carrying its `CodeChunk`, an explicit
+`origin` (`seed`, `neighbor`, or `same_symbol_fragment` — never a fabricated
+relevance score), the originating seed's rank when applicable, and an
+estimated token count. Retrieval logic and prompt formatting are intentionally
+not mixed into this module.
+
+Two strategies are supported (`ContextStrategy`):
+
+- `seeds_only` — the preserved Milestone 1–22 baseline. Seeds are formatted
+  directly by the unchanged `build_repository_context`, bounded only by
+  `RAGConfig.max_context_chars`. This remains the default: it is not
+  automatically replaced without stronger evidence.
+- `expanded` — runs the assembler described above before formatting.
+
+**Neighbor expansion** is same-file, same-chunking-snapshot, and bounded by
+`neighbor_radius` (default `1`, hard-capped at `3`); it never recurses and
+never expands to a whole file. For `line_v1`, a neighbor is simply the
+previous/next chunk. For `python_ast_v1`, `CodeChunk.chunk_index` values for an
+oversized symbol's fragments are already contiguous, so the same `±radius`
+lookup naturally reaches sibling fragments; the assembler labels a neighbor
+`same_symbol_fragment` (instead of the generic `neighbor`) when it shares the
+seed's `qualified_symbol_name`, and such fragments are packed ahead of generic
+neighbors. Retrieving one method fragment never pulls in an entire enclosing
+class — only its own adjacent fragments and, generically, the immediately
+adjacent chunks.
+
+**Deduplication** uses the existing stable `chunk_identity` (relative path,
+chunk index, and line range — never a database row ID), so a neighbor that
+duplicates another seed, or two seeds that expand to the same neighbor, are
+kept exactly once. **Overlap suppression** is deliberately conservative: a
+candidate is dropped only when its line range is *fully contained* in an
+already-included chunk's range on the *same file*; two distinct symbols with
+merely intersecting ranges are never discarded, and identical text in
+different files is never treated as the same evidence.
+
+**Budgeting** uses a documented approximation
+(`repomind.rag.tokens.estimate_tokens`, `ceil(len(text) / 4)`) because no
+tokenizer dependency exists in this project yet; the estimate is applied to
+the same wrapper-plus-content text that will actually be sent (path, line
+range, symbol label, content), not to raw source alone. Packing is a
+transparent greedy walk in priority order — every seed before any neighbor,
+`same_symbol_fragment` before generic `neighbor`, both tie-broken by seed rank
+and then proximity — never a knapsack solver. Chunks are never truncated
+mid-body: a candidate that would overflow the remaining budget is skipped, not
+cut, except that the single highest-priority chunk is always kept even if it
+alone exceeds the budget (the same policy `build_repository_context` already
+used for the `seeds_only` baseline).
+
+Citations remain source-correct: an `AssembledContextChunk`'s `CodeChunk` is
+the same domain object retrieval produced, so `SourceCitation` line ranges for
+an included neighbor are exactly its original `start_line`/`end_line`, never
+invented.
+
+Database access for neighbor lookup is batched: `load_neighbor_chunks` issues
+one row-value `IN` query for every requested `(relative_path, chunk_index)`
+key across every seed, not one query per neighbor. `tests/integration/
+test_postgres_context_assembly.py` asserts this against a real PostgreSQL
+connection, alongside repository isolation, structural-fragment and `line_v1`
+expansion, and citation integrity.
+
+The assembler is retrieval-backend-agnostic: it accepts seeds from exact
+pgvector search, HNSW ANN search, or ANN+BM25/RRF fusion identically, and never
+recomputes or fabricates a score for an expanded neighbor.
+
+The read-only agent and the coding planner/reviewer do not use retrieval at
+all (they are tool-call-oriented, not RAG-context-oriented), so Milestone 23
+intentionally leaves them unchanged.
+
+`RAGRequest.context_strategy` (`"seeds_only"` default, or `"expanded"`) is the
+only new public API surface; internal knobs (`neighbor_radius`,
+`context_budget_tokens`) are not exposed over HTTP to keep the request surface
+small. `context.assembled` is a new, safe observability event (counts and
+token estimates only — never source text, paths beyond existing allowlists, or
+embeddings) emitted only on the `expanded` path.
+
+Query rewriting was evaluated as a design option and intentionally **not**
+implemented: Milestone 23's own instructions require it to stay off by default
+and be justified by a clear query-language-mismatch failure class, and no such
+class was surfaced by the fixtures or benchmarks above. There is no GraphRAG,
+call graph, dependency graph, or multi-agent retrieval, and HNSW/AST chunking
+from Milestone 22 were not modified.
+
+Run `uv run python -m benchmarks.repo_eval_v3` for the offline, deterministic
+comparison of `seeds_only` vs `expanded` context assembly (gold-evidence
+coverage, packed chunk count, estimated tokens, budget utilization, and
+duplicates removed), plus one RAG-level comparison showing that
+context-assembly gains are separate from retrieval-ranking gains: retrieval
+recall is identical between the two rows because the fixture holds the
+retrieved seed fixed, yet only the `expanded` row's answer passes.
 
 ## Evaluation harness and benchmarks
 
@@ -1967,9 +2102,12 @@ flowchart LR
     BM25 --> RRF
     RRF --> Results[Hybrid candidates]
     Results --> Reranker[Bounded LLM reranker]
-    Results -. no-rerank baseline .-> Context
+    Results -. no-rerank baseline .-> Seeds
     Reranker --> Reranked[Reranked chunks]
-    Reranked --> Context[Deterministic context builder]
+    Reranked --> Seeds[Ranked seed chunks]
+    Seeds -. seeds_only baseline .-> Context
+    Seeds --> Assembler[ContextAssembler: expand/dedup/pack]
+    Assembler --> Context[Deterministic context builder]
     Context --> Generation[Structured LLM generation]
     Client --> Generation
     Generation --> Validation[Source-ID validation]
@@ -2314,6 +2452,6 @@ The full project roadmap is described in the RepoMind engineering brief:
 19. Redis + durable worker/job architecture (complete)
 20. Cooperative cancellation / job control (complete)
 21. Structured planner + independent reviewer (complete)
-22. Retrieval V2: structural chunking + pgvector HNSW ANN (complete/current)
-23. Retrieval quality experiments / context assembly (next; selected only from
-    Retrieval V2 measurements)
+22. Retrieval V2: structural chunking + pgvector HNSW ANN (complete)
+23. Retrieval quality + context assembly V2 (complete/current)
+24. Next capability milestone (next; not yet selected)

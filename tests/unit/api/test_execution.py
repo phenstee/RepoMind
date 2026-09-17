@@ -63,6 +63,52 @@ def test_rag_real_strategy_routing_and_repository_owned_citations(
     assert "def value" not in str(trace)
 
 
+def test_rag_expanded_context_strategy_includes_neighbor_evidence(api):
+    api.store.candidates = candidates()
+    neighbor = CodeChunk(
+        relative_path="src/app.py",
+        language="python",
+        start_line=3,
+        end_line=4,
+        content="def other():\n    return 2\n",
+        chunk_index=1,
+    )
+    api.store.neighbor_corpus = [candidates()[0].chunk, neighbor]
+    api.llm.responses.append(
+        {"answer": "value returns one", "source_ids": ["S1"], "insufficient_evidence": False}
+    )
+
+    response = api.client.post(
+        "/api/v1/repositories/1/rag",
+        json={
+            "question": "What does value do?",
+            "strategy": "semantic",
+            "top_k": 3,
+            "context_strategy": "expanded",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    prompt = api.llm.calls[0][0]
+    assert "def value" in prompt
+    assert "def other" in prompt
+
+
+def test_rag_seeds_only_is_the_default_context_strategy(api):
+    api.store.candidates = candidates()
+    api.llm.responses.append(
+        {"answer": "value returns one", "source_ids": ["S1"], "insufficient_evidence": False}
+    )
+
+    response = api.client.post(
+        "/api/v1/repositories/1/rag",
+        json={"question": "What does value do?", "strategy": "semantic", "top_k": 3},
+    )
+
+    assert response.status_code == 200, response.text
+    assert api.store.neighbor_corpus == []
+
+
 @pytest.mark.parametrize("strategy", ["semantic", "hybrid", "hybrid_rerank"])
 def test_no_evidence_skips_answer_and_rerank_calls(api, strategy):
     response = api.client.post(
