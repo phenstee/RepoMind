@@ -38,6 +38,13 @@ _NUMBERS = frozenset(
         "iteration",
         "workspace_revision",
         "completion_attempt",
+        "criteria_count",
+        "step_count",
+        "criteria_covered",
+        "uncertainty_count",
+        "criteria_satisfied",
+        "criteria_unsatisfied",
+        "finding_count",
         "exit_code",
         "timeout_seconds",
         "max_failures",
@@ -76,6 +83,7 @@ _LABELS = frozenset(
         "domain_status",
         "job_type",
         "control",
+        "verdict",
     }
 )
 _HASHES = frozenset({"sha256", "before_sha256", "after_sha256"})
@@ -87,9 +95,7 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
     "run.failed": _COMMON,
     "job.cancel_requested": frozenset({"job_type", "control"}),
     "job.cancelled": _COMMON,
-    "job.cancellation_deferred": frozenset(
-        {"job_type", "control", "workspace_revision"}
-    ),
+    "job.cancellation_deferred": frozenset({"job_type", "control", "workspace_revision"}),
     "index.started": frozenset({"repository_id"}),
     "ingestion.completed": frozenset({"repository_id", "file_count", "total_size_bytes"}),
     "chunking.completed": frozenset({"repository_id", "chunk_count"}),
@@ -131,6 +137,11 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
     "preflight.started": frozenset(),
     "preflight.passed": frozenset({"clean"}),
     "preflight.failed": frozenset({"blocker_codes"}),
+    "planning.started": frozenset({"criteria_count"}),
+    "planning.completed": frozenset(
+        {"criteria_count", "step_count", "criteria_covered", "uncertainty_count"}
+    ),
+    "planning.failed": frozenset({"criteria_count", "failure_kind"}),
     "verification.started": frozenset({"tool", "paths", "workspace_revision"}),
     "verification.completed": frozenset(
         {
@@ -152,6 +163,27 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
     "final_review.completed": frozenset(
         {"workspace_revision", "changed_files_count", "truncated", "passed", "blocker_codes"}
     ),
+    "review.started": frozenset({"workspace_revision"}),
+    "review.completed": frozenset(
+        {
+            "workspace_revision",
+            "verdict",
+            "criteria_satisfied",
+            "criteria_unsatisfied",
+            "finding_count",
+        }
+    ),
+    "review.blocked": frozenset(
+        {
+            "workspace_revision",
+            "verdict",
+            "criteria_satisfied",
+            "criteria_unsatisfied",
+            "finding_count",
+            "blocker_codes",
+        }
+    ),
+    "review.failed": frozenset({"workspace_revision", "failure_kind"}),
 }
 
 

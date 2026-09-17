@@ -77,6 +77,42 @@ export interface VerificationSummary {
   execution_failed: boolean;
 }
 
+export interface CodingPlanStep {
+  step_id: number;
+  action: string;
+  likely_paths: string[];
+  criterion_indices: number[];
+  verification: Array<"pytest" | "ruff">;
+}
+
+export interface PlanAcceptanceCoverage {
+  criterion_index: number;
+  step_ids: number[];
+  uncertainty: string | null;
+}
+
+export interface CodingPlan {
+  task_summary: string;
+  relevant_areas: string[];
+  steps: CodingPlanStep[];
+  acceptance_coverage: PlanAcceptanceCoverage[];
+  verification_plan: Array<"pytest" | "ruff">;
+  risks: string[];
+  uncertainties: string[];
+}
+
+export interface CodingReview {
+  verdict: "approve" | "changes_required";
+  workspace_revision: number;
+  acceptance_results: Array<{
+    criterion_index: number;
+    status: "satisfied" | "not_satisfied" | "uncertain";
+    evidence: string;
+  }>;
+  findings: string[];
+  required_corrections: string[];
+}
+
 export interface CodingResponse {
   status: string;
   final_answer: string | null;
@@ -85,6 +121,10 @@ export interface CodingResponse {
   changed_files: string[];
   completion_attempts: number;
   workspace_revision: number;
+  plan: CodingPlan | null;
+  review: CodingReview | null;
+  review_attempts: number;
+  review_blocks: number;
   trace_run_id: string | null;
 }
 

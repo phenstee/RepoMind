@@ -3,7 +3,9 @@
 from dataclasses import dataclass
 
 from repomind.coding.models import (
+    CodingReview,
     FinalChangeReview,
+    ReviewVerdict,
     VerificationPolicy,
     VerificationReport,
 )
@@ -95,17 +97,39 @@ def _review_blockers(
     return blockers
 
 
+def _independent_review_blockers(
+    review: CodingReview | None,
+    workspace_revision: int,
+) -> list[str]:
+    if review is None:
+        return ["Required independent coding review is unavailable."]
+    if review.workspace_revision != workspace_revision:
+        return [
+            (
+                "Independent coding review is stale: captured at workspace revision "
+                f"{review.workspace_revision}, current revision is {workspace_revision}."
+            )
+        ]
+    if review.verdict is ReviewVerdict.CHANGES_REQUIRED:
+        return ["Independent coding review requires changes."]
+    return []
+
+
 def _evaluate_completion(
     *,
     agent_requested_completion: bool,
     workspace_revision: int,
     verification: VerificationReport,
     final_review: FinalChangeReview | None,
+    coding_review: CodingReview | None,
     policy: VerificationPolicy,
+    require_coding_review: bool = True,
 ) -> _CompletionDecision:
     blockers: list[str] = []
     if not agent_requested_completion:
         blockers.append("The agent did not request completion.")
     blockers.extend(_verification_blockers(verification, policy, workspace_revision))
     blockers.extend(_review_blockers(final_review, policy, workspace_revision))
+    if require_coding_review:
+        blockers.extend(_independent_review_blockers(coding_review, workspace_revision))
     return _CompletionDecision(completed=not blockers, blockers=tuple(blockers))

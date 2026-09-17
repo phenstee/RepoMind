@@ -95,13 +95,45 @@ export function CodePanel({
   );
 }
 
-function CodingResult({ result }: { result: CodingResponse }) {
+export function CodingResult({ result }: { result: CodingResponse }) {
   return (
     <article className="answer">
       <h3>{result.status}</h3>
       <p>{result.final_answer ?? "No final coding answer was returned."}</p>
       <p>Revision {result.workspace_revision} · {result.completion_attempts} completion attempts</p>
       <p>Tests: {verificationLabel(result.tests)} · Ruff: {verificationLabel(result.ruff)}</p>
+      {result.plan ? (
+        <section aria-label="Coding plan">
+          <h4>Plan</h4>
+          <p>{result.plan.task_summary}</p>
+          <ol>
+            {result.plan.steps.map((step) => <li key={step.step_id}>{step.action}</li>)}
+          </ol>
+          {result.plan.acceptance_coverage.length > 0 ? (
+            <ul>
+              {result.plan.acceptance_coverage.map((coverage) => (
+                <li key={coverage.criterion_index}>
+                  Criterion {coverage.criterion_index + 1} → {coverage.step_ids.length > 0
+                    ? `Step${coverage.step_ids.length === 1 ? "" : "s"} ${coverage.step_ids.join(", ")}`
+                    : coverage.uncertainty}
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </section>
+      ) : null}
+      {result.review ? (
+        <section aria-label="Coding review">
+          <h4>Reviewer: {result.review.verdict === "approve" ? "Approved" : "Changes required"}</h4>
+          <p>{result.review_attempts} review attempt{result.review_attempts === 1 ? "" : "s"}</p>
+          {result.review.findings.length > 0 ? (
+            <ul>{result.review.findings.map((finding) => <li key={finding}>{finding}</li>)}</ul>
+          ) : null}
+          {result.review.required_corrections.length > 0 ? (
+            <ul>{result.review.required_corrections.map((item) => <li key={item}>{item}</li>)}</ul>
+          ) : null}
+        </section>
+      ) : null}
       {result.changed_files.length > 0 ? <ul className="citations">{result.changed_files.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : null}
       {result.trace_run_id ? <small>Trace {result.trace_run_id}</small> : null}
     </article>

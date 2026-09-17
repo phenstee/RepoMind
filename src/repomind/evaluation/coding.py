@@ -11,7 +11,13 @@ from tempfile import TemporaryDirectory
 from typing import Protocol
 
 from repomind.agent import AgentStep
-from repomind.coding import CodingTask, CodingTaskResult, CodingTaskStatus, VerificationPolicy
+from repomind.coding import (
+    CodingTask,
+    CodingTaskResult,
+    CodingTaskStatus,
+    ReviewVerdict,
+    VerificationPolicy,
+)
 from repomind.evaluation.models import (
     CodingBenchmarkCase,
     CodingBenchmarkCaseResult,
@@ -251,6 +257,7 @@ def _evaluate_case(
     task_success = completed and oracle.passed
     agent_run = result.agent_run
     failures = tuple(check.message for check in oracle.checks if not check.passed)
+    review_approved = result.review is not None and result.review.verdict is ReviewVerdict.APPROVE
     return CodingBenchmarkCaseResult(
         case_id=case.id,
         trace_run_id=trace.run_id,
@@ -266,6 +273,14 @@ def _evaluate_case(
         successful_mutations=result.successful_mutations,
         agent_iterations=agent_run.iterations if agent_run is not None else 0,
         completion_attempts=result.completion_attempts,
+        planner_generated=result.plan is not None,
+        review_attempts=result.review_attempts,
+        review_blocks=result.review_blocks,
+        review_approved=review_approved,
+        completion_after_review=completed and review_approved,
+        false_positive_prevented_by_review=(
+            not completed and not oracle.passed and result.review_blocks > 0
+        ),
         changed_files=result.changed_files,
         oracle_failures=failures,
         workflow_blockers=result.blockers,
@@ -334,4 +349,11 @@ def evaluate_coding_suite(
         mean_successful_mutations=_mean([result.successful_mutations for result in case_results]),
         mean_agent_iterations=_mean([result.agent_iterations for result in case_results]),
         mean_completion_attempts=_mean([result.completion_attempts for result in case_results]),
+        planner_generation_rate=sum(result.planner_generated for result in case_results) / count,
+        review_approval_rate=sum(result.review_approved for result in case_results) / count,
+        mean_review_attempts=_mean([result.review_attempts for result in case_results]),
+        review_block_rate=sum(result.review_blocks > 0 for result in case_results) / count,
+        false_positive_prevented_by_review_count=sum(
+            result.false_positive_prevented_by_review for result in case_results
+        ),
     )

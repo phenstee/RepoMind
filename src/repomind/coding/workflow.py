@@ -21,14 +21,25 @@ from repomind.agent import (
 from repomind.agent.loop import _FinalDecisionControl, _run_editing_agent_controlled
 from repomind.coding.completion import _evaluate_completion
 from repomind.coding.models import (
+    AcceptanceReviewStatus,
+    CodingPlan,
+    CodingReview,
     CodingTask,
     CodingTaskResult,
     CodingTaskStatus,
     CodingWorkflowConfig,
     FinalChangeReview,
+    ReviewVerdict,
     VerificationPolicy,
     VerificationReport,
     WorkspaceBaseline,
+)
+from repomind.coding.reasoning import (
+    CodingReviewError,
+    PlanningError,
+    bounded_review_diff,
+    generate_coding_plan,
+    generate_coding_review,
 )
 from repomind.jobs.control import CooperativeCancellation, NoCancellation
 from repomind.observability import TraceContext, TraceRecorder
@@ -74,10 +85,23 @@ class _WorkflowState:
     verification_executions: int = 0
     last_final_answer: str | None = None
     blockers: tuple[str, ...] = ()
+    plan: CodingPlan | None = None
+    review: CodingReview | None = None
+    review_attempts: int = 0
+    review_blocks: int = 0
 
 
 def _sorted_paths(paths: set[Path]) -> tuple[Path, ...]:
     return tuple(sorted(paths, key=lambda path: (path.as_posix().casefold(), path.as_posix())))
+
+
+def _prompt_json(value: Any) -> str:
+    return (
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+    )
 
 
 def _policy_prompt(
@@ -85,6 +109,7 @@ def _policy_prompt(
     policy: VerificationPolicy,
     agent_config: EditingAgentConfig,
     workflow_config: CodingWorkflowConfig,
+    plan: CodingPlan,
 ) -> str:
     criteria = list(task.acceptance_criteria) or ["(none supplied)"]
     policy_data = {
@@ -115,8 +140,13 @@ def _policy_prompt(
         + "\n".join(f"- {criterion}" for criterion in criteria)
         + "\n</coding_task>\n\n"
         '<workflow_policy source="application-controlled">\n'
-        f"{json.dumps(policy_data, ensure_ascii=False, sort_keys=True)}\n"
-        "</workflow_policy>"
+        f"{_prompt_json(policy_data)}\n"
+        "</workflow_policy>\n\n"
+        '<advisory_plan trust="model-authored-advice">\n'
+        f"{_prompt_json(plan.model_dump(mode='json'))}\n"
+        "</advisory_plan>\n"
+        "The plan is advisory, not an execution script. Inspect actual repository "
+        "state and adapt when its paths or assumptions are incomplete or wrong."
     )
 
 
@@ -175,6 +205,8 @@ def _record_agent_observation(
             state.mutated_paths.add(Path(path))
         state.workspace_revision += 1
         state.successful_mutations += 1
+        state.final_review = None
+        state.review = None
         return
 
     if observation.tool_name == "run_tests":
@@ -408,6 +440,28 @@ def _precondition_result(
     )
 
 
+def _planning_failure_result(
+    task: CodingTask,
+    policy: VerificationPolicy,
+    baseline: WorkspaceBaseline,
+) -> CodingTaskResult:
+    return CodingTaskResult(
+        task=task,
+        status=CodingTaskStatus.ERROR,
+        baseline=baseline,
+        agent_run=None,
+        final_answer=None,
+        changed_files=baseline.changed_files,
+        workspace_revision=0,
+        successful_mutations=0,
+        verification=_empty_verification(policy),
+        final_review=None,
+        blockers=("Required structured planning could not be completed.",),
+        completion_attempts=0,
+        verification_executions=0,
+    )
+
+
 @traced_run("coding_task")
 def run_coding_task(
     task: CodingTask,
@@ -471,6 +525,26 @@ def run_coding_task(
     trace.emit("preflight.passed", clean=baseline.clean)
     cancellation.checkpoint()
     state = _WorkflowState()
+    try:
+        with trace.operation("planning", criteria_count=len(task.acceptance_criteria)) as metadata:
+            state.plan = generate_coding_plan(
+                task,
+                baseline,
+                policy,
+                llm_provider,
+                trace=trace,
+            )
+            metadata.update(
+                step_count=len(state.plan.steps),
+                criteria_covered=len(state.plan.acceptance_coverage),
+                uncertainty_count=len(state.plan.uncertainties)
+                + sum(item.uncertainty is not None for item in state.plan.acceptance_coverage),
+            )
+        cancellation.checkpoint()
+    except PlanningError:
+        return _planning_failure_result(task, policy, baseline)
+
+    assert state.plan is not None
 
     def observe(step: AgentStep) -> None:
         _record_agent_observation(step, state, policy)
@@ -489,26 +563,105 @@ def run_coding_task(
         state.last_final_answer = decision.final_answer
         cancellation.checkpoint()
         _run_required_verification(tool_registry, state, policy, cancellation)
-        review, review_blockers = _capture_final_review(
+        final_review, final_review_blockers = _capture_final_review(
             tool_registry, state, baseline, policy, cancellation
         )
-        state.final_review = review
+        state.final_review = final_review
         report = _verification_report(state, policy)
-        completion = _evaluate_completion(
+        deterministic = _evaluate_completion(
             agent_requested_completion=True,
             workspace_revision=state.workspace_revision,
             verification=report,
-            final_review=review,
+            final_review=final_review,
+            coding_review=None,
             policy=policy,
+            require_coding_review=False,
         )
-        state.blockers = (*review_blockers, *completion.blockers)
+        state.blockers = (*final_review_blockers, *deterministic.blockers)
+        codes = _trace_blocker_codes(report, final_review, policy, state.workspace_revision)
+        if final_review_blockers:
+            codes.append("review_unavailable")
+
+        if not state.blockers and final_review is not None:
+            state.review = None
+            state.review_attempts += 1
+            diff = bounded_review_diff(
+                final_review,
+                max_chars=resolved_workflow_config.max_review_diff_chars,
+            )
+            if diff is None:
+                state.blockers = ("Independent review context is too large or truncated.",)
+                codes.append("review_context_too_large")
+                trace.emit(
+                    "review.blocked",
+                    workspace_revision=state.workspace_revision,
+                    verdict="unavailable",
+                    blocker_codes=["review_context_too_large"],
+                )
+            else:
+                cancellation.checkpoint()
+                try:
+                    with trace.operation(
+                        "review", workspace_revision=state.workspace_revision
+                    ) as metadata:
+                        state.review = generate_coding_review(
+                            task,
+                            state.plan,
+                            report,
+                            final_review,
+                            diff,
+                            llm_provider,
+                            workspace_revision=state.workspace_revision,
+                            trace=trace,
+                        )
+                        satisfied = sum(
+                            item.status is AcceptanceReviewStatus.SATISFIED
+                            for item in state.review.acceptance_results
+                        )
+                        metadata.update(
+                            verdict=state.review.verdict.value,
+                            criteria_satisfied=satisfied,
+                            criteria_unsatisfied=len(state.review.acceptance_results) - satisfied,
+                            finding_count=len(state.review.findings),
+                        )
+                except CodingReviewError:
+                    state.blockers = ("Required independent coding review could not be completed.",)
+                    codes.append("review_failed")
+                cancellation.checkpoint()
+
+                if state.review is not None:
+                    completion = _evaluate_completion(
+                        agent_requested_completion=True,
+                        workspace_revision=state.workspace_revision,
+                        verification=report,
+                        final_review=final_review,
+                        coding_review=state.review,
+                        policy=policy,
+                    )
+                    state.blockers = completion.blockers
+                    if state.review.verdict is ReviewVerdict.CHANGES_REQUIRED:
+                        state.review_blocks += 1
+                        codes.append("review_changes_required")
+                        trace.emit(
+                            "review.blocked",
+                            workspace_revision=state.workspace_revision,
+                            verdict=state.review.verdict.value,
+                            criteria_satisfied=sum(
+                                item.status is AcceptanceReviewStatus.SATISFIED
+                                for item in state.review.acceptance_results
+                            ),
+                            criteria_unsatisfied=sum(
+                                item.status is not AcceptanceReviewStatus.SATISFIED
+                                for item in state.review.acceptance_results
+                            ),
+                            finding_count=len(state.review.findings),
+                            blocker_codes=["review_changes_required"],
+                        )
+
         if not state.blockers:
             trace.emit("completion.completed", workspace_revision=state.workspace_revision)
             return _FinalDecisionControl()
 
-        codes = _trace_blocker_codes(report, review, policy, state.workspace_revision)
-        if review_blockers:
-            codes.append("review_unavailable")
         if state.completion_attempts >= resolved_workflow_config.max_completion_attempts:
             codes.append("completion_attempt_limit")
         trace.emit(
@@ -524,10 +677,13 @@ def run_coding_task(
             evidence={
                 "verification": report.model_dump(mode="json", exclude_none=True),
                 "unexpected_changed_files": [
-                    path.as_posix() for path in review.unexpected_changed_files
+                    path.as_posix() for path in final_review.unexpected_changed_files
                 ]
-                if review is not None
+                if final_review is not None
                 else [],
+                "review": state.review.model_dump(mode="json")
+                if state.review is not None
+                else None,
             },
         )
         return _FinalDecisionControl(
@@ -535,7 +691,13 @@ def run_coding_task(
             stop=state.completion_attempts >= resolved_workflow_config.max_completion_attempts,
         )
 
-    query = _policy_prompt(task, policy, resolved_agent_config, resolved_workflow_config)
+    query = _policy_prompt(
+        task,
+        policy,
+        resolved_agent_config,
+        resolved_workflow_config,
+        state.plan,
+    )
     try:
         agent_run = _run_editing_agent_controlled(
             query,
@@ -565,6 +727,10 @@ def run_coding_task(
             blockers=(f"Editing agent failed: {exc}",),
             completion_attempts=state.completion_attempts,
             verification_executions=state.verification_executions,
+            plan=state.plan,
+            review=state.review,
+            review_attempts=state.review_attempts,
+            review_blocks=state.review_blocks,
         )
 
     if state.final_review is None:
@@ -595,4 +761,8 @@ def run_coding_task(
         blockers=blockers,
         completion_attempts=state.completion_attempts,
         verification_executions=state.verification_executions,
+        plan=state.plan,
+        review=state.review,
+        review_attempts=state.review_attempts,
+        review_blocks=state.review_blocks,
     )

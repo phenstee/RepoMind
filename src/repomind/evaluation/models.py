@@ -312,6 +312,12 @@ class CodingBenchmarkCaseResult(BaseModel):
     successful_mutations: int = Field(ge=0)
     agent_iterations: int = Field(ge=0)
     completion_attempts: int = Field(ge=0)
+    planner_generated: bool = False
+    review_attempts: int = Field(default=0, ge=0)
+    review_blocks: int = Field(default=0, ge=0)
+    review_approved: bool = False
+    completion_after_review: bool = False
+    false_positive_prevented_by_review: bool = False
     changed_files: tuple[Path, ...]
     oracle_failures: tuple[str, ...]
     workflow_blockers: tuple[str, ...]
@@ -347,6 +353,11 @@ class CodingEvaluationReport(BaseModel):
     mean_successful_mutations: float = Field(ge=0)
     mean_agent_iterations: float = Field(ge=0)
     mean_completion_attempts: float = Field(ge=0)
+    planner_generation_rate: float = Field(default=0, ge=0, le=1)
+    review_approval_rate: float = Field(default=0, ge=0, le=1)
+    mean_review_attempts: float = Field(default=0, ge=0)
+    review_block_rate: float = Field(default=0, ge=0, le=1)
+    false_positive_prevented_by_review_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="after")
     def _validate_report(self) -> "CodingEvaluationReport":

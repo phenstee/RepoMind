@@ -2,10 +2,19 @@
 
 from enum import StrEnum
 from pathlib import Path
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from repomind.agent import AgentRun
+from repomind.ingestion import validate_repository_relative_path
 from repomind.tools import (
     GitDiffOutput,
     GitStatusOutput,
@@ -14,6 +23,166 @@ from repomind.tools import (
     RunTestsInput,
     RunTestsOutput,
 )
+
+ConciseText = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
+]
+
+
+class CodingPlanStep(BaseModel):
+    """One bounded advisory action; it never executes capabilities directly."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    step_id: int = Field(ge=1, le=12, strict=True)
+    action: ConciseText
+    likely_paths: tuple[Path, ...] = Field(default=(), max_length=8)
+    criterion_indices: tuple[int, ...] = Field(default=(), max_length=50)
+    verification: tuple[Literal["pytest", "ruff"], ...] = Field(default=(), max_length=2)
+
+    @field_validator("likely_paths")
+    @classmethod
+    def _relative_paths(cls, values: tuple[Path, ...]) -> tuple[Path, ...]:
+        return tuple(validate_repository_relative_path(value) for value in values)
+
+    @model_validator(mode="after")
+    def _unique_references(self) -> "CodingPlanStep":
+        if len(set(self.likely_paths)) != len(self.likely_paths):
+            raise ValueError("plan step paths must be unique")
+        if len(set(self.criterion_indices)) != len(self.criterion_indices):
+            raise ValueError("plan step criterion references must be unique")
+        if any(index < 0 for index in self.criterion_indices):
+            raise ValueError("plan step criterion references must be non-negative")
+        if len(set(self.verification)) != len(self.verification):
+            raise ValueError("plan step verification mechanisms must be unique")
+        return self
+
+
+class PlanAcceptanceCoverage(BaseModel):
+    """Explicit mapping from one task criterion to steps or an uncertainty."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    criterion_index: int = Field(ge=0, le=49, strict=True)
+    step_ids: tuple[int, ...] = Field(default=(), max_length=12)
+    uncertainty: ConciseText | None = None
+
+    @model_validator(mode="after")
+    def _mapped_or_uncertain(self) -> "PlanAcceptanceCoverage":
+        if not self.step_ids and self.uncertainty is None:
+            raise ValueError("criterion coverage needs a planned step or uncertainty")
+        if len(set(self.step_ids)) != len(self.step_ids):
+            raise ValueError("criterion coverage step references must be unique")
+        return self
+
+
+class CodingPlan(BaseModel):
+    """Compact explicit planning output, not hidden model reasoning."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    task_summary: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=1000),
+    ]
+    relevant_areas: tuple[ConciseText, ...] = Field(default=(), max_length=12)
+    steps: tuple[CodingPlanStep, ...] = Field(min_length=1, max_length=12)
+    acceptance_coverage: tuple[PlanAcceptanceCoverage, ...] = Field(default=(), max_length=50)
+    verification_plan: tuple[Literal["pytest", "ruff"], ...] = Field(default=(), max_length=2)
+    risks: tuple[ConciseText, ...] = Field(default=(), max_length=8)
+    uncertainties: tuple[ConciseText, ...] = Field(default=(), max_length=8)
+
+    @model_validator(mode="after")
+    def _consistent_references(self) -> "CodingPlan":
+        step_ids = tuple(step.step_id for step in self.steps)
+        if step_ids != tuple(range(1, len(self.steps) + 1)):
+            raise ValueError("plan step IDs must be contiguous and start at one")
+        coverage_indices = [item.criterion_index for item in self.acceptance_coverage]
+        if len(set(coverage_indices)) != len(coverage_indices):
+            raise ValueError("each acceptance criterion may appear only once")
+        valid_steps = set(step_ids)
+        if any(not set(item.step_ids).issubset(valid_steps) for item in self.acceptance_coverage):
+            raise ValueError("acceptance coverage references an unknown plan step")
+        steps_by_id = {step.step_id: step for step in self.steps}
+        if any(
+            item.criterion_index not in steps_by_id[step_id].criterion_indices
+            for item in self.acceptance_coverage
+            for step_id in item.step_ids
+        ):
+            raise ValueError("acceptance coverage and plan step criteria must agree")
+        if len(set(self.verification_plan)) != len(self.verification_plan):
+            raise ValueError("plan verification mechanisms must be unique")
+        return self
+
+    def validate_for_task(self, task: "CodingTask") -> "CodingPlan":
+        expected = set(range(len(task.acceptance_criteria)))
+        actual = {item.criterion_index for item in self.acceptance_coverage}
+        if actual != expected:
+            raise ValueError("plan must cover every acceptance criterion exactly once")
+        if any(not set(step.criterion_indices).issubset(expected) for step in self.steps):
+            raise ValueError("plan step references an unknown acceptance criterion")
+        return self
+
+
+class ReviewVerdict(StrEnum):
+    APPROVE = "approve"
+    CHANGES_REQUIRED = "changes_required"
+
+
+class AcceptanceReviewStatus(StrEnum):
+    SATISFIED = "satisfied"
+    NOT_SATISFIED = "not_satisfied"
+    UNCERTAIN = "uncertain"
+
+
+class AcceptanceReview(BaseModel):
+    """Concise reviewer judgment for one human acceptance criterion."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    criterion_index: int = Field(ge=0, le=49, strict=True)
+    status: AcceptanceReviewStatus
+    evidence: ConciseText
+
+
+class CodingReview(BaseModel):
+    """Bounded independent review tied to one logical workspace revision."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    verdict: ReviewVerdict
+    workspace_revision: int = Field(ge=0, strict=True)
+    acceptance_results: tuple[AcceptanceReview, ...] = Field(default=(), max_length=50)
+    findings: tuple[ConciseText, ...] = Field(default=(), max_length=8)
+    required_corrections: tuple[ConciseText, ...] = Field(default=(), max_length=8)
+
+    @model_validator(mode="after")
+    def _consistent_verdict(self) -> "CodingReview":
+        indices = [item.criterion_index for item in self.acceptance_results]
+        if len(set(indices)) != len(indices):
+            raise ValueError("each acceptance criterion may be reviewed only once")
+        all_satisfied = all(
+            item.status is AcceptanceReviewStatus.SATISFIED for item in self.acceptance_results
+        )
+        if self.verdict is ReviewVerdict.APPROVE and (
+            not all_satisfied or self.required_corrections
+        ):
+            raise ValueError("approval requires satisfied criteria and no corrections")
+        if self.verdict is ReviewVerdict.CHANGES_REQUIRED and not (
+            self.required_corrections or not all_satisfied
+        ):
+            raise ValueError("changes-required review needs a correction or unmet criterion")
+        return self
+
+    def validate_for_task(self, task: "CodingTask", workspace_revision: int) -> "CodingReview":
+        expected = set(range(len(task.acceptance_criteria)))
+        actual = {item.criterion_index for item in self.acceptance_results}
+        if actual != expected:
+            raise ValueError("review must evaluate every acceptance criterion exactly once")
+        if self.workspace_revision != workspace_revision:
+            raise ValueError("review workspace revision does not match current revision")
+        return self
 
 
 class CodingTask(BaseModel):
@@ -65,6 +234,7 @@ class CodingWorkflowConfig(BaseModel):
 
     require_clean_worktree: bool = True
     max_completion_attempts: int = Field(default=3, gt=0, strict=True)
+    max_review_diff_chars: int = Field(default=20_000, gt=0, le=100_000, strict=True)
 
 
 class WorkspaceBaseline(BaseModel):
@@ -176,3 +346,7 @@ class CodingTaskResult(BaseModel):
     blockers: tuple[str, ...]
     completion_attempts: int = Field(ge=0)
     verification_executions: int = Field(ge=0)
+    plan: CodingPlan | None = None
+    review: CodingReview | None = None
+    review_attempts: int = Field(default=0, ge=0)
+    review_blocks: int = Field(default=0, ge=0)

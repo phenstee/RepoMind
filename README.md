@@ -105,6 +105,12 @@ durable job state while Redis provides best-effort worker wakeups and live progr
 intent is durable in PostgreSQL and workers honor it only at explicit safe workflow
 boundaries; no worker thread or in-flight blocking call is forcefully terminated.
 
+**Milestone 21: structured planning and independent review** is complete. Each
+coding task gets one bounded advisory `CodingPlan` before the existing executor;
+fresh deterministic verification and Git evidence then feed a revision-bound
+`CodingReview`. Reviewer corrections return to the same executor loop, while
+Python-owned verification and safety gates retain final authority.
+
 ## Local HTTP API
 
 The API is for **trusted local development only**. It has **no authentication or
@@ -238,8 +244,9 @@ The public progress model is a deliberately narrow projection of retained
 `index.started`, `ingestion.completed`, `chunking.completed`,
 `embedding.completed`, `retrieval.started`, `retrieval.completed`,
 `agent.decision`, `tool.started`, `tool.completed`, `file.mutated`,
-`verification.completed`, `completion.blocked`, `final_review.completed`, and
-`run.completed`. Event names follow observability semantics; a future UI should
+`verification.completed`, `completion.blocked`, `final_review.completed`,
+`planning.started`, `planning.completed`, `review.started`, `review.completed`,
+`review.blocked`, and `run.completed`. Event names follow observability semantics; the UI
 render their structured fields rather than parse prose. Internal event families
 are not automatically public API promises.
 
@@ -311,8 +318,10 @@ overrides. Objective/query/question strings are nonblank and at most 10,000
 characters; coding allows up to 50 criteria of at most 2,000 characters each.
 Iteration limits are 1–20. Verification scopes allow 1–32 paths each.
 Responses include workflow status, summary, compact verification evidence,
-changed relative paths, completion attempts, workspace revision, and optional trace
-ID, not diffs, replacements, or test output. A `200` can describe an incomplete or
+changed relative paths, a safe compact plan/review, completion and review attempts,
+workspace revision, and optional trace ID, not prompts, diffs, replacements, or test
+output. Review evidence is bounded and redacted for recognizable secrets, host paths,
+and exact changed source fragments. A `200` can describe an incomplete or
 verification-failed workflow; inspect `status`. Applied edits are not automatically
 rolled back. Re-index explicitly after editing when fresh retrieval data is needed.
 There is no approve/reject/resume API or Git publication capability.
@@ -350,7 +359,7 @@ not an OS-level race-proof sandbox. A disconnected HTTP request is not guarantee
 to cancel a running workflow. No automatic retry of mutation requests is safe.
 
 Readiness probes, evaluation execution APIs, approval/resume, auth, MCP, native tool calling,
-planner/reviewer agents, multi-agent execution, arbitrary shell, Git mutation,
+autonomous planner/reviewer agents, multi-agent execution, arbitrary shell, Git mutation,
 deployment, and retrieval experiments remain deferred. No `BackgroundTasks` are
 implemented here.
 
@@ -403,7 +412,8 @@ cancellation wakeup); durable checkpoint reads from PostgreSQL remain correct ac
 Redis loss or restart.
 
 Coding cancellation is intentionally conservative. Before the first successful file
-mutation, it can stop at the next checkpoint. At the first successful mutation the
+mutation, it can stop at the next checkpoint, including immediately before or after
+the bounded planner call and before review. At the first successful mutation the
 worker durably records `side_effect_started_at`. Later cancel requests remain visible
 as `deferred`, but do not interrupt the edit/verification/final-review workflow; the
 job reaches its normal terminal result. RepoMind does not yet implement file rollback,
@@ -463,7 +473,9 @@ select it, index it, then use **Ask**, **Investigate**, or **Code**. Ask keeps
 Q&A history only in browser state, so it clears on refresh. Investigate is visibly
 read-only. Code requires an explicit checkbox before it sends a controlled coding
 request; it exposes only the existing relative pytest/Ruff path scopes, never
-shell commands, executables, environment variables, Git controls, or diffs.
+shell commands, executables, environment variables, Git controls, or diffs. Completed
+coding results render the plan, criterion-to-step coverage, reviewer verdict, concise
+findings, and review-attempt count without displaying raw model JSON or hidden reasoning.
 
 The frontend submits long operations as durable jobs and observes them through a
 buffered incremental SSE parser. It saves the active job ID in local storage and
@@ -518,8 +530,10 @@ entry points accept the same optional `recorder` and `trace` keywords. An explic
 `TraceContext(recorder, run_type)` can join nested operations into one timeline;
 the caller that creates this handle calls `trace.finish()` when the run ends.
 High-level entry points create and finish their own handle when only a recorder
-is supplied. A coding workflow shares its handle with agent decisions, tool
-calls, automatic verification, and final review.
+is supplied. A coding workflow shares its handle with planning, agent decisions,
+tool calls, automatic verification, final Git review, and independent review.
+Planning and review remain stages inside the same durable coding job and trace,
+not child jobs.
 
 For configurable RAG, pass `strategy="semantic"`, `"hybrid"`, or `"hybrid+rerank"`
 to `answer_repository_question_with_retriever` to label the configured retriever.
@@ -546,7 +560,8 @@ there is no process-global current run. Event families cover:
 
 - Run lifecycle, model requests/attempts/usage, and agent decisions.
 - Tool start/completion/failure, validation vs execution failure, and blocked calls.
-- Successful file mutations, verification, preflight, completion gates, and final review.
+- Successful file mutations, planning, verification, preflight, completion gates,
+  final Git review, and independent review.
 - Retrieval/context/answer summaries and evaluation case start/completion/failure.
 
 `llm_calls` counts logical provider requests, including failed requests; retries
@@ -1175,6 +1190,10 @@ Reports also preserve final verification, changed paths, oracle failures, and
 the existing LLM-call, tool-call, successful-mutation, agent-iteration, and
 completion-attempt counters. Oracles support fixed file existence, absence,
 substring, and changed-path checks; they execute no Python, shell, or model.
+Milestone 21 additionally records whether a plan was generated, review attempts
+and blocks, final reviewer approval, completion after review, and fixture-observed
+false positives prevented by review. These are descriptive benchmark measurements,
+not a claim that a small scripted fixture establishes general quality improvement.
 
 ### `repo-eval-v1` offline baseline
 
@@ -1216,6 +1235,11 @@ Mean tool calls                 1.000
 Mean successful mutations       1.000
 Mean agent iterations           2.500
 Mean completion attempts        1.500
+Planner generation              1.000
+Reviewer approval               0.750
+Mean review attempts            0.750
+Review block rate               0.000
+False positives prevented       0
 ```
 
 These are `offline_fixture` and `offline_scripted` infrastructure baselines.
@@ -1472,10 +1496,12 @@ stale until the caller performs an explicit re-index.
 ```text
 CodingTask
     -> preflight Git state
+    -> bounded structured planner (advisory)
     -> editing agent
     -> completion request
     -> required verification
     -> final Git review
+    -> bounded independent reviewer
     -> deterministic completion gate
     -> CodingTaskResult
 ```
@@ -1491,6 +1517,19 @@ semantic acceptance criterion. A policy requiring
 `tests/unit/test_llm_client.py` and `ruff check .` describes checks RepoMind can
 actually execute. Passing checks provide evidence but do not pretend to prove
 every natural-language requirement.
+
+The planner receives the visible task, acceptance criteria, verification policy,
+and compact repository metadata. Its strict schema limits steps, path hints,
+criterion mapping, risks, and verification labels. It has no tools and cannot
+mutate the workspace. The executor receives the plan as model-authored advice,
+inspects the actual repository, and may adapt when a path or assumption is wrong.
+
+The reviewer is a separate structured call, not another agent loop. It receives
+the task, advisory plan, current revision, deterministic verification facts,
+changed paths, and only a complete bounded Git diff. A truncated or oversized diff
+produces an explicit blocker rather than an approval based on partial evidence.
+It evaluates each acceptance criterion and returns `approve` or
+`changes_required` with bounded findings and corrections.
 
 `VerificationPolicy` is selected by application code before the run. It fixes
 the exact required pytest and Ruff scopes and whether final status/diff evidence
@@ -1510,8 +1549,9 @@ revision 0 -> edit -> revision 1 -> tests pass at revision 1
 
 Only successful structured `create_file` and `replace_text` observations advance
 the revision. Failed mutations, reads, Git inspection, and verification do not.
-Required tests and Ruff must pass at the current revision. Final review is also
-tagged with the current revision. This avoids creating commits merely to track
+Required tests and Ruff must pass at the current revision. Final Git review and
+independent reviewer output are also tagged with the current revision. A mutation
+invalidates every older approval. This avoids creating commits merely to track
 ephemeral agent state.
 
 By default, preflight requires a clean working tree. If tracked or untracked
@@ -1532,7 +1572,9 @@ When a gate fails, typed workflow feedback is returned to the same editing loop:
 ```text
 incorrect edit -> completion request -> pytest fails
     -> trusted completion feedback + untrusted test evidence
-    -> corrective edit -> fresh tests/Ruff -> fresh Git review -> completed
+    -> corrective edit -> fresh tests/Ruff -> fresh Git review
+    -> reviewer requests a correction -> same executor edits
+    -> fresh tests/Ruff + fresh Git review + fresh reviewer approval -> completed
 ```
 
 Completion attempts are finite. Exhaustion returns `verification_failed`; agent
@@ -2089,9 +2131,15 @@ uv run python scripts/inspect_repository.py . --chunks
   actual and unexpected changes before a completed result is possible.
 - **Clean preflight protects user work.** Dirty operation requires explicit
   application opt-in and preserves baseline attribution.
-- **No planner or reviewer model is needed yet.** One editing agent receives
-  deterministic workflow feedback; completion and final review remain Python
-  policy rather than another model's opinion.
+- **Planning is advisory.** A bounded plan improves task decomposition but cannot
+  expand capabilities or require blind compliance from the executor.
+- **Review is independent and revision-sensitive.** It evaluates current evidence,
+  not the executor's completion claim, and an edit invalidates its older approval.
+- **Models cannot override deterministic gates.** Failed, missing, stale, or
+  wrong-scope tests/Ruff and incomplete Git evidence block completion regardless
+  of planner, executor, or reviewer prose.
+- **This is not multi-agent architecture.** Planner and reviewer are single typed
+  model calls inside one existing coding workflow, without tools or independent loops.
 
 ## Roadmap
 
@@ -2117,4 +2165,8 @@ The full project roadmap is described in the RepoMind engineering brief:
 17. Semantic SSE progress streaming (complete)
 18. Next.js + TypeScript frontend (complete)
 19. Redis + durable worker/job architecture (complete)
-20. Cooperative cancellation / job control (complete/current)
+20. Cooperative cancellation / job control (complete)
+21. Structured planner + independent reviewer (complete/current)
+22. Retrieval V2 / scalable code indexing (next): AST-aware structural chunking,
+    size/token-aware fallback, richer symbol metadata, PostgreSQL pgvector HNSW,
+    exact-vs-ANN comparison, BM25/RRF integration, and quality/latency benchmarks

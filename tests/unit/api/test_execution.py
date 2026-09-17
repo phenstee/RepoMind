@@ -1,6 +1,7 @@
 """Real strategy orchestration and distinct read-only/editing HTTP capabilities."""
 
 import hashlib
+import json
 import shutil
 import subprocess
 
@@ -209,12 +210,82 @@ def test_coding_real_edit_and_verification_gates(coding_project):
     assert body["workspace_revision"] == 1 and body["completion_attempts"] == 1
     assert body["tests"]["passed"] and body["ruff"]["passed"]
     assert body["tests"]["workspace_revision"] == body["ruff"]["workspace_revision"] == 1
+    assert body["plan"]["steps"]
+    assert body["review"]["verdict"] == "approve"
+    assert body["review_attempts"] == 1 and body["review_blocks"] == 0
     assert (api.repo / "app.py").read_bytes() == before.replace(b"return 1", b"return 2")
-    for private in ("stdout", "stderr", "old_text", "new_text", "diff", "steps", "baseline"):
+    for private in ("stdout", "stderr", "old_text", "new_text", "diff", "baseline"):
         assert private not in body
     trace = api.client.get(f"/api/v1/runs/{body['trace_run_id']}").json()
     assert trace["status"] == "completed" and trace["successful_mutations"] == 1
     assert any(e["event_type"] == "final_review.completed" for e in trace["events"])
+
+
+def test_coding_plan_and_review_public_contract_redacts_private_model_text(
+    coding_project,
+):
+    api = coding_project
+    before = (api.repo / "app.py").read_bytes()
+    api.llm.plan_responses.append(
+        {
+            "task_summary": r"Use sk-test-secret at C:\Users\private\workspace.",
+            "steps": [
+                {
+                    "step_id": 1,
+                    "action": "Implement and verify the requested change.",
+                    "criterion_indices": [0],
+                }
+            ],
+            "acceptance_coverage": [{"criterion_index": 0, "step_ids": [1]}],
+        }
+    )
+
+    def private_review(prompt):
+        revision = json.loads(prompt)["workspace_revision"]
+        return {
+            "verdict": "approve",
+            "workspace_revision": revision,
+            "acceptance_results": [
+                {
+                    "criterion_index": 0,
+                    "status": "satisfied",
+                    "evidence": "SECRET_SOURCE_CONTENT Bearer private-token",
+                }
+            ],
+            "findings": [r"See C:\Users\private\workspace and SECRET_SOURCE_CONTENT"],
+        }
+
+    api.llm.review_responses.append(private_review)
+    api.llm.responses.extend(
+        [
+            {
+                "action": "tool",
+                "tool_name": "replace_text",
+                "tool_arguments": {
+                    "path": "app.py",
+                    "old_text": "return 1",
+                    "new_text": "# SECRET_SOURCE_CONTENT\n    return 2",
+                    "expected_sha256": hashlib.sha256(before).hexdigest(),
+                },
+            },
+            {"action": "final", "final_answer": "Updated value()."},
+        ]
+    )
+
+    response = api.client.post(
+        "/api/v1/repositories/1/coding/runs",
+        json={"objective": "Return two", "acceptance_criteria": ["The test passes"]},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["review"]["verdict"] == "approve"
+    for private in (
+        "sk-test-secret",
+        "private-token",
+        "Users",
+        "SECRET_SOURCE_CONTENT",
+    ):
+        assert private not in response.text
 
 
 def test_coding_dirty_preflight_prevents_llm_call(coding_project):

@@ -22,6 +22,9 @@ const labels: Record<string, string> = {
   "preflight.started": "Preflight started",
   "preflight.passed": "Preflight passed",
   "preflight.failed": "Preflight blocked",
+  "planning.started": "Planning started",
+  "planning.completed": "Planning completed",
+  "planning.failed": "Planning failed",
   "verification.started": "Verification started",
   "verification.completed": "Verification completed",
   "completion.requested": "Completion requested",
@@ -29,6 +32,10 @@ const labels: Record<string, string> = {
   "completion.completed": "Completion accepted",
   "final_review.started": "Final review started",
   "final_review.completed": "Final review completed",
+  "review.started": "Independent review started",
+  "review.completed": "Independent review completed",
+  "review.blocked": "Review: changes required",
+  "review.failed": "Independent review failed",
 };
 
 const blockerLabels: Record<string, string> = {
@@ -37,6 +44,9 @@ const blockerLabels: Record<string, string> = {
   ruff_failed: "Ruff failed",
   review_stale: "Final review needs to be re-run",
   unexpected_files: "Unexpected files changed",
+  review_changes_required: "Independent review requires changes",
+  review_context_too_large: "Review context is too large",
+  review_failed: "Independent review failed",
 };
 
 function stateFor(event: string): string {
@@ -71,6 +81,10 @@ function eventMetadata(data: Record<string, JsonValue>): string[] {
     "chunk_count",
     "embedding_model",
     "passed",
+    "verdict",
+    "criteria_satisfied",
+    "criteria_unsatisfied",
+    "finding_count",
   ];
   return visible.flatMap((key) => {
     const value = data[key];

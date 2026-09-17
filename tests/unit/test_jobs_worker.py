@@ -2,7 +2,8 @@ from threading import Event, Thread
 from types import SimpleNamespace
 from uuid import uuid4
 
-from repomind.api.models import RAGResponse
+from repomind.api.models import CodingResponse, RAGResponse, VerificationSummary
+from repomind.coding import CodingPlan, CodingReview, CodingTaskStatus
 from repomind.jobs.models import Job, JobStatus, JobType
 from repomind.jobs.worker import JobWorker
 
@@ -89,6 +90,20 @@ def _job():
     )
 
 
+def _coding_job():
+    from datetime import UTC, datetime
+
+    return Job(
+        id=uuid4(),
+        job_type=JobType.CODING,
+        repository_id=1,
+        status=JobStatus.QUEUED,
+        request_payload={"objective": "Make one bounded change."},
+        attempt_count=0,
+        created_at=datetime.now(UTC),
+    )
+
+
 def test_worker_reuses_rag_service_persists_safe_result_and_forwards_progress():
     store, broker = FakeStore(_job()), FakeBroker()
     assert JobWorker(store, broker, FakeExecution(), worker_id="test", lease_seconds=30).run_once()
@@ -98,6 +113,74 @@ def test_worker_reuses_rag_service_persists_safe_result_and_forwards_progress():
     assert [event.event for event in broker.events] == [
         "run.started",
         "retrieval.started",
+        "run.completed",
+    ]
+
+
+def test_durable_coding_keeps_plan_executor_review_and_result_under_one_job_trace():
+    class CodingExecution(FakeExecution):
+        def coding(self, repository_id, request, *, trace, cancellation):
+            del repository_id, request
+            cancellation.checkpoint()
+            trace.emit("planning.started", criteria_count=0)
+            trace.emit(
+                "planning.completed",
+                criteria_count=0,
+                step_count=1,
+                criteria_covered=0,
+                uncertainty_count=0,
+            )
+            trace.emit("agent.decision", iteration=1, action="final")
+            trace.emit("review.started", workspace_revision=0)
+            trace.emit(
+                "review.completed",
+                workspace_revision=0,
+                verdict="approve",
+                criteria_satisfied=0,
+                criteria_unsatisfied=0,
+                finding_count=0,
+            )
+            trace.finish("completed")
+            empty_verification = VerificationSummary(
+                passed=None,
+                workspace_revision=None,
+                exit_code=None,
+                timed_out=None,
+                execution_failed=False,
+            )
+            return CodingResponse(
+                status=CodingTaskStatus.COMPLETED,
+                final_answer="Completed.",
+                tests=empty_verification,
+                ruff=empty_verification,
+                changed_files=[],
+                completion_attempts=1,
+                workspace_revision=0,
+                plan=CodingPlan(
+                    task_summary="Make one bounded change.",
+                    steps=[{"step_id": 1, "action": "Inspect and complete the task."}],
+                ),
+                review=CodingReview(verdict="approve", workspace_revision=0),
+                review_attempts=1,
+                review_blocks=0,
+                trace_run_id=trace.run_id,
+            )
+
+    store, broker = FakeStore(_coding_job()), FakeBroker()
+    worker = JobWorker(store, broker, CodingExecution(), worker_id="test", lease_seconds=30)
+
+    assert worker.run_once()
+    assert store.error is None
+    assert store.result["plan"]["steps"][0]["step_id"] == 1
+    assert store.result["review"]["verdict"] == "approve"
+    assert store.result["trace_run_id"] == str(store.trace_run_id)
+    assert [event.event for event in broker.events] == [
+        "run.started",
+        "planning.started",
+        "planning.completed",
+        "agent.decision",
+        "review.started",
+        "review.completed",
         "run.completed",
     ]
 

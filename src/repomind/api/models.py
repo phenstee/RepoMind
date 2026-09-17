@@ -15,7 +15,7 @@ from pydantic import (
 )
 
 from repomind.agent import AgentRunStatus
-from repomind.coding import CodingTaskStatus
+from repomind.coding import CodingPlan, CodingReview, CodingTaskStatus
 from repomind.ingestion import validate_repository_relative_path
 from repomind.jobs import CancellationState, JobStatus, JobType
 from repomind.llm.models import TokenUsage
@@ -173,6 +173,10 @@ class CodingResponse(BaseModel):
     changed_files: list[PublicRelativePath]
     completion_attempts: int
     workspace_revision: int
+    plan: CodingPlan | None = None
+    review: CodingReview | None = None
+    review_attempts: int = Field(default=0, ge=0)
+    review_blocks: int = Field(default=0, ge=0)
     trace_run_id: UUID | None = None
 
 

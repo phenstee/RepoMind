@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import subprocess
 from collections.abc import Sequence
@@ -13,6 +14,8 @@ from pydantic import BaseModel
 
 from repomind.agent import AgentDecision, EditingAgentConfig
 from repomind.coding import (
+    CodingPlan,
+    CodingReview,
     CodingTask,
     CodingTaskResult,
     CodingWorkflowConfig,
@@ -275,6 +278,42 @@ class _ScriptedLLM:
         system_prompt: str | None = None,
         temperature: float | None = None,
     ) -> BaseModel:
+        if response_model is CodingPlan:
+            payload = json.loads(prompt)
+            criteria = payload["task"]["acceptance_criteria"]
+            return CodingPlan.model_validate(
+                {
+                    "task_summary": "Implement and verify the visible benchmark task.",
+                    "steps": [
+                        {
+                            "step_id": 1,
+                            "action": "Inspect, implement, and verify the requested change.",
+                            "criterion_indices": list(range(len(criteria))),
+                        }
+                    ],
+                    "acceptance_coverage": [
+                        {"criterion_index": index, "step_ids": [1]}
+                        for index in range(len(criteria))
+                    ],
+                }
+            )
+        if response_model is CodingReview:
+            payload = json.loads(prompt)
+            criteria = payload["task"]["acceptance_criteria"]
+            return CodingReview.model_validate(
+                {
+                    "verdict": "approve",
+                    "workspace_revision": payload["workspace_revision"],
+                    "acceptance_results": [
+                        {
+                            "criterion_index": index,
+                            "status": "satisfied",
+                            "evidence": "Visible verification and bounded diff evidence pass.",
+                        }
+                        for index in range(len(criteria))
+                    ],
+                }
+            )
         return self.responses.pop(0)
 
 

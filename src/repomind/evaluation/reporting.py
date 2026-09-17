@@ -16,17 +16,14 @@ class _ComparableReport(Protocol):
 
 
 def _validate_comparable(reports: Sequence[_ComparableReport]) -> None:
-    versions_and_modes = {
-        (report.benchmark_version, report.mode) for report in reports
-    }
+    versions_and_modes = {(report.benchmark_version, report.mode) for report in reports}
     if len(versions_and_modes) != 1:
         raise ValueError("comparison reports must use the same benchmark version and mode")
 
 
 def _table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
     widths = [
-        max(len(header), *(len(row[index]) for row in rows))
-        for index, header in enumerate(headers)
+        max(len(header), *(len(row[index]) for row in rows)) for index, header in enumerate(headers)
     ]
     header = "  ".join(value.ljust(width) for value, width in zip(headers, widths, strict=True))
     divider = "  ".join("-" * width for width in widths)
@@ -135,6 +132,14 @@ def format_coding_report(report: CodingEvaluationReport) -> str:
             f"Mean successful mutations: {report.mean_successful_mutations:.3f}",
             f"Mean agent iterations: {report.mean_agent_iterations:.3f}",
             f"Mean completion attempts: {report.mean_completion_attempts:.3f}",
+            f"Planner generation: {report.planner_generation_rate:.3f}",
+            f"Reviewer approval: {report.review_approval_rate:.3f}",
+            f"Mean review attempts: {report.mean_review_attempts:.3f}",
+            f"Review block rate: {report.review_block_rate:.3f}",
+            (
+                "False positives prevented by review: "
+                f"{report.false_positive_prevented_by_review_count}"
+            ),
         )
     )
     details = [

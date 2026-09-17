@@ -18,10 +18,17 @@ from repomind.api.models import (
     RAGResponse,
     VerificationSummary,
 )
-from repomind.api.privacy import public_text
+from repomind.api.privacy import public_metadata, public_review_metadata, public_text
 from repomind.api.services.repositories import ChunkEmbedder, RepositoryService
 from repomind.api.services.runs import TraceStore
-from repomind.coding import CodingTask, CodingTaskStatus, VerificationPolicy, run_coding_task
+from repomind.coding import (
+    CodingPlan,
+    CodingReview,
+    CodingTask,
+    CodingTaskStatus,
+    VerificationPolicy,
+    run_coding_task,
+)
 from repomind.jobs.control import (
     CooperativeCancellation,
     JobCancellationRequested,
@@ -202,8 +209,9 @@ class ExecutionService:
         with self.tracing(request.trace, RunType.CODING_TASK, trace=trace) as run_trace:
             cancellation.checkpoint()
             _, root = self.repositories.locate(repository_id)
-            with self.repositories.workspace.operation(root), self.repositories.execution_lock.hold(
-                repository_id
+            with (
+                self.repositories.workspace.operation(root),
+                self.repositories.execution_lock.hold(repository_id),
             ):
                 registry = create_editing_tool_registry(ToolContext(repository_root=root))
                 result = run_coding_task(
@@ -249,5 +257,35 @@ class ExecutionService:
                     changed_files=[p.as_posix() for p in result.changed_files],
                     completion_attempts=result.completion_attempts,
                     workspace_revision=result.workspace_revision,
+                    plan=(
+                        CodingPlan.model_validate(
+                            public_metadata(result.plan.model_dump(mode="json"))
+                        )
+                        if result.plan is not None
+                        else None
+                    ),
+                    review=(
+                        CodingReview.model_validate(
+                            public_review_metadata(
+                                result.review.model_dump(mode="json"),
+                                tuple(
+                                    diff.content
+                                    for diff in (
+                                        result.final_review.unstaged_diff
+                                        if result.final_review is not None
+                                        else None,
+                                        result.final_review.staged_diff
+                                        if result.final_review is not None
+                                        else None,
+                                    )
+                                    if diff is not None
+                                ),
+                            )
+                        )
+                        if result.review is not None
+                        else None
+                    ),
+                    review_attempts=result.review_attempts,
+                    review_blocks=result.review_blocks,
                     trace_run_id=run_trace.run_id,
                 )

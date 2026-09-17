@@ -1,5 +1,6 @@
 """Offline API dependencies; real services/domain, fake external boundaries."""
 
+import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ from repomind.api import create_app
 from repomind.api.errors import APIError
 from repomind.api.models import RepositoryFileResponse
 from repomind.api.store import RepositoryBinding
+from repomind.coding import CodingPlan, CodingReview
 from repomind.config import Settings
 from repomind.db.repositories import RepositoryNotFoundError
 from repomind.llm import OpenAILLMClient
@@ -104,10 +106,64 @@ class FakeEmbeddings:
 class ScriptedLLM:
     def __init__(self):
         self.responses = []
+        self.plan_responses = []
+        self.review_responses = []
         self.calls = []
 
     def generate_structured(self, prompt, response_model, **kwargs):
         self.calls.append((prompt, response_model, kwargs))
+        if response_model is CodingPlan:
+            if self.plan_responses:
+                response = self.plan_responses.pop(0)
+                if isinstance(response, Exception):
+                    raise response
+                if callable(response):
+                    response = response(prompt)
+                return response_model.model_validate(response)
+            payload = json.loads(prompt)
+            criteria = payload["task"]["acceptance_criteria"]
+            return CodingPlan.model_validate(
+                {
+                    "task_summary": "Implement and verify the requested change.",
+                    "steps": [
+                        {
+                            "step_id": 1,
+                            "action": "Inspect, implement, and verify the requested change.",
+                            "criterion_indices": list(range(len(criteria))),
+                            "verification": ["pytest", "ruff"],
+                        }
+                    ],
+                    "acceptance_coverage": [
+                        {"criterion_index": index, "step_ids": [1]}
+                        for index in range(len(criteria))
+                    ],
+                    "verification_plan": ["pytest", "ruff"],
+                }
+            )
+        if response_model is CodingReview:
+            if self.review_responses:
+                response = self.review_responses.pop(0)
+                if isinstance(response, Exception):
+                    raise response
+                if callable(response):
+                    response = response(prompt)
+                return response_model.model_validate(response)
+            payload = json.loads(prompt)
+            criteria = payload["task"]["acceptance_criteria"]
+            return CodingReview.model_validate(
+                {
+                    "verdict": "approve",
+                    "workspace_revision": payload["workspace_revision"],
+                    "acceptance_results": [
+                        {
+                            "criterion_index": index,
+                            "status": "satisfied",
+                            "evidence": "The bounded diff and verification support this criterion.",
+                        }
+                        for index in range(len(criteria))
+                    ],
+                }
+            )
         if not self.responses:
             raise AssertionError("Unexpected model request")
         response = self.responses.pop(0)

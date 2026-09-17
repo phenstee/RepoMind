@@ -135,8 +135,10 @@ def test_coding_case_links_hidden_oracle_to_actual_workflow(tmp_path):
     assert report.case_results[0].task_success
     assert report.case_results[0].trace_run_id == trace.run_id
     assert trace.run_type == "evaluation"
-    assert trace.llm_calls == 2 and trace.successful_mutations == 1
+    assert trace.llm_calls == 4 and trace.successful_mutations == 1
     assert trace.evaluation_summary["task_success_rate"] == 1
     assert any(e.event_type == "completion.completed" for e in trace.events)
+    assert any(e.event_type == "planning.completed" for e in trace.events)
+    assert any(e.event_type == "review.completed" for e in trace.events)
     assert "return 2" not in trace.model_dump_json()
     assert (tmp_path / "app.py").read_bytes() == b"def value():\n    return 0\n"

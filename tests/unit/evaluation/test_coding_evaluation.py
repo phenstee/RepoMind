@@ -13,6 +13,8 @@ from pydantic import BaseModel, ValidationError
 
 from repomind.agent import AgentDecision, EditingAgentConfig
 from repomind.coding import (
+    CodingPlan,
+    CodingReview,
     CodingTask,
     CodingTaskResult,
     CodingWorkflowConfig,
@@ -45,8 +47,11 @@ def _final(message: str = "Ready for deterministic completion.") -> AgentDecisio
 
 
 class _ScriptedLLM:
-    def __init__(self, responses: list[AgentDecision]) -> None:
+    def __init__(
+        self, responses: list[AgentDecision], review_responses: list[object] | None = None
+    ) -> None:
         self.responses = responses
+        self.review_responses = review_responses or []
         self.calls: list[dict[str, Any]] = []
 
     def generate_structured(
@@ -57,7 +62,49 @@ class _ScriptedLLM:
         system_prompt: str | None = None,
         temperature: float | None = None,
     ) -> BaseModel:
-        self.calls.append({"prompt": prompt, "system_prompt": system_prompt})
+        call = {"prompt": prompt, "system_prompt": system_prompt}
+        if response_model is CodingPlan:
+            payload = json.loads(prompt)
+            criteria = payload["task"]["acceptance_criteria"]
+            return CodingPlan.model_validate(
+                {
+                    "task_summary": "Implement the benchmark task.",
+                    "steps": [
+                        {
+                            "step_id": 1,
+                            "action": "Inspect, implement, and verify the change.",
+                            "criterion_indices": list(range(len(criteria))),
+                        }
+                    ],
+                    "acceptance_coverage": [
+                        {"criterion_index": index, "step_ids": [1]}
+                        for index in range(len(criteria))
+                    ],
+                }
+            )
+        if response_model is CodingReview:
+            payload = json.loads(prompt)
+            if self.review_responses:
+                response = self.review_responses.pop(0)
+                if callable(response):
+                    response = response(prompt)
+                return CodingReview.model_validate(response)
+            criteria = payload["task"]["acceptance_criteria"]
+            return CodingReview.model_validate(
+                {
+                    "verdict": "approve",
+                    "workspace_revision": payload["workspace_revision"],
+                    "acceptance_results": [
+                        {
+                            "criterion_index": index,
+                            "status": "satisfied",
+                            "evidence": "The bounded evidence supports this criterion.",
+                        }
+                        for index in range(len(criteria))
+                    ],
+                }
+            )
+        self.calls.append(call)
         return self.responses.pop(0)
 
 
@@ -68,10 +115,12 @@ class _ScriptedWorkflowRunner:
         *,
         max_iterations: int = 5,
         max_completion_attempts: int = 3,
+        reviews: Callable[[Path], list[object]] | None = None,
     ) -> None:
         self.script = script
         self.max_iterations = max_iterations
         self.max_completion_attempts = max_completion_attempts
+        self.reviews = reviews
         self.starting_contents: list[bytes] = []
         self.llms: list[_ScriptedLLM] = []
         self.results: list[CodingTaskResult] = []
@@ -85,7 +134,10 @@ class _ScriptedWorkflowRunner:
     ) -> CodingTaskResult:
         self.visible_tasks.append(task)
         self.starting_contents.append((workspace / "app.py").read_bytes())
-        llm = _ScriptedLLM(self.script(workspace))
+        llm = _ScriptedLLM(
+            self.script(workspace),
+            self.reviews(workspace) if self.reviews is not None else None,
+        )
         self.llms.append(llm)
         result = run_coding_task(
             task,
@@ -187,7 +239,14 @@ def test_completed_workflow_and_passing_hidden_oracle_is_true_success(
     assert result.llm_calls == 2
     assert result.tool_calls == 1
     assert result.successful_mutations == 1
+    assert result.planner_generated is True
+    assert result.review_attempts == 1
+    assert result.review_approved is True
+    assert result.completion_after_review is True
     assert report.task_success_rate == 1.0
+    assert report.planner_generation_rate == 1.0
+    assert report.review_approval_rate == 1.0
+    assert report.mean_review_attempts == 1.0
 
 
 def test_completed_workflow_can_be_hidden_oracle_false_positive(tmp_path: Path) -> None:
@@ -211,6 +270,44 @@ def test_completed_workflow_can_be_hidden_oracle_false_positive(tmp_path: Path) 
     assert report.workflow_completion_rate == 1.0
     assert report.task_success_rate == 0.0
     assert report.false_positive_completion_rate == 1.0
+    assert any("configured evaluator substring" in item for item in result.oracle_failures)
+
+
+def test_review_block_is_counted_when_it_prevents_a_fixture_false_positive(
+    tmp_path: Path,
+) -> None:
+    original = b"def add(a, b):\n    return a - b\n"
+    fixture = _fixture_repository(tmp_path / "template", original)
+
+    def changes_required(prompt: str) -> dict[str, object]:
+        revision = json.loads(prompt)["workspace_revision"]
+        return {
+            "verdict": "changes_required",
+            "workspace_revision": revision,
+            "required_corrections": ["Implement addition without hard-coding the fixture value."],
+        }
+
+    runner = _ScriptedWorkflowRunner(
+        lambda workspace: _replace_script(original, "return a - b", "return 5"),
+        max_completion_attempts=1,
+        reviews=lambda workspace: [changes_required],
+    )
+
+    report = evaluate_coding_suite(
+        CodingBenchmarkSuite(cases=(_case(fixture, "review-block", contains="a + b"),)),
+        runner,
+    )
+    result = report.case_results[0]
+
+    assert result.final_verification_passed is True
+    assert result.oracle_passed is False
+    assert result.false_positive_completion is False
+    assert result.false_positive_prevented_by_review is True
+    assert result.review_blocks == 1
+    assert report.review_block_rate == 1.0
+    assert report.false_positive_prevented_by_review_count == 1
+    assert report.task_success_rate == 0.0
+    assert report.false_positive_completion_rate == 0.0
     assert any("configured evaluator substring" in item for item in result.oracle_failures)
 
 
@@ -310,9 +407,7 @@ def test_hidden_oracle_fields_never_reach_task_prompt_or_agent_events(tmp_path: 
             "task": runner.visible_tasks[0].model_dump(mode="json"),
             "prompts": runner.llms[0].calls,
             "agent_query": agent_result.agent_run.query,
-            "steps": [
-                step.model_dump(mode="json") for step in agent_result.agent_run.steps
-            ],
+            "steps": [step.model_dump(mode="json") for step in agent_result.agent_run.steps],
         },
         sort_keys=True,
     )

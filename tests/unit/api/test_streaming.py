@@ -106,9 +106,7 @@ def test_cancelled_durable_job_stream_has_safe_terminal_frame(api):
     assert events[0]["data"]["status"] == "cancelled"
     assert "result" not in events[0]["data"]
     assert "error" not in events[0]["data"]
-    assert "private question" not in api.client.get(
-        f"/api/v1/jobs/{queued['job_id']}/events"
-    ).text
+    assert "private question" not in api.client.get(f"/api/v1/jobs/{queued['job_id']}/events").text
 
 
 def test_progress_projection_is_allowlisted_and_relative_path_only():
@@ -137,6 +135,34 @@ def test_progress_projection_is_allowlisted_and_relative_path_only():
         "Users",
     ):
         assert private not in body
+
+
+def test_review_progress_exposes_counts_and_verdict_without_review_text():
+    event = TraceEvent(
+        event_type="review.completed",
+        sequence=7,
+        timestamp=datetime(2026, 9, 16, tzinfo=UTC),
+        metadata={
+            "workspace_revision": 2,
+            "verdict": "changes_required",
+            "criteria_satisfied": 1,
+            "criteria_unsatisfied": 1,
+            "finding_count": 1,
+            "findings": ["SECRET_SOURCE_CONTENT sk-test-secret"],
+            "repository_diff": "private diff",
+        },
+    )
+
+    progress = safe_progress_event(UUID(int=7), event)
+
+    assert progress.data == {
+        "workspace_revision": 2,
+        "verdict": "changes_required",
+        "criteria_satisfied": 1,
+        "criteria_unsatisfied": 1,
+        "finding_count": 1,
+    }
+    assert "SECRET_SOURCE_CONTENT" not in progress.model_dump_json()
 
 
 def test_index_stream_has_coarse_stages_terminal_result_and_retained_trace(api):
@@ -282,10 +308,12 @@ def test_coding_recovery_streams_failure_then_correction_and_completion(coding_p
     )
     events = _stream(api, "/repositories/1/coding/runs/stream", {"objective": "Return two"})
     names = [event["event"] for event in events]
+    assert names.index("planning.started") < names.index("planning.completed")
     assert names.count("file.mutated") == 2
     assert names.count("completion.requested") == 2
     assert names.count("verification.completed") >= 4
     assert "completion.blocked" in names
+    assert names.index("review.started") < names.index("review.completed")
     assert names[-2:] == ["run.completed", "result"]
     blocked = next(event for event in events if event["event"] == "completion.blocked")
     assert "tests_failed" in blocked["data"]["data"]["blocker_codes"]

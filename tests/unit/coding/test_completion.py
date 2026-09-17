@@ -4,6 +4,7 @@ from pathlib import Path
 
 from repomind.coding.completion import _evaluate_completion
 from repomind.coding.models import (
+    CodingReview,
     FinalChangeReview,
     VerificationPolicy,
     VerificationReport,
@@ -41,15 +42,17 @@ def _review(revision: int, *, unexpected: tuple[Path, ...] = ()) -> FinalChangeR
     return FinalChangeReview(
         workspace_revision=revision,
         git_status=GitStatusOutput(branch="main", changed_files=[], clean=True),
-        unstaged_diff=GitDiffOutput(
-            content="", truncated=False, staged=False, path=None
-        ),
+        unstaged_diff=GitDiffOutput(content="", truncated=False, staged=False, path=None),
         changed_files=(),
         baseline_changed_files=(),
         workflow_changed_files=(),
         unexpected_changed_files=unexpected,
         diff_truncated=False,
     )
+
+
+def _coding_review(revision: int) -> CodingReview:
+    return CodingReview(verdict="approve", workspace_revision=revision)
 
 
 def _report(revision: int, *, test_revision: int | None = None) -> VerificationReport:
@@ -72,6 +75,7 @@ def test_completion_accepts_fresh_required_evidence() -> None:
         workspace_revision=2,
         verification=_report(2),
         final_review=_review(2),
+        coding_review=_coding_review(2),
         policy=VerificationPolicy(),
     )
     assert decision.completed
@@ -84,6 +88,7 @@ def test_completion_rejects_stale_test_and_final_review_evidence() -> None:
         workspace_revision=2,
         verification=_report(2, test_revision=1),
         final_review=_review(1),
+        coding_review=_coding_review(2),
         policy=VerificationPolicy(),
     )
     assert not decision.completed
@@ -94,9 +99,7 @@ def test_completion_rejects_stale_test_and_final_review_evidence() -> None:
 def test_completion_rejects_passing_but_narrower_test_scope() -> None:
     report = _report(1).model_copy(
         update={
-            "tests_result": _tests().model_copy(
-                update={"paths": [Path("tests/unit/test_one.py")]}
-            )
+            "tests_result": _tests().model_copy(update={"paths": [Path("tests/unit/test_one.py")]})
         }
     )
     decision = _evaluate_completion(
@@ -104,6 +107,7 @@ def test_completion_rejects_passing_but_narrower_test_scope() -> None:
         workspace_revision=1,
         verification=report,
         final_review=_review(1),
+        coding_review=_coding_review(1),
         policy=VerificationPolicy(),
     )
     assert not decision.completed
@@ -128,6 +132,7 @@ def test_timeout_and_execution_error_never_count_as_verification() -> None:
             workspace_revision=0,
             verification=report,
             final_review=_review(0),
+            coding_review=_coding_review(0),
             policy=VerificationPolicy(require_ruff=False),
         )
         assert not decision.completed
@@ -139,7 +144,22 @@ def test_unexpected_changes_block_completion_without_git_cleanup() -> None:
         workspace_revision=0,
         verification=_report(0),
         final_review=_review(0, unexpected=(Path("surprise.py"),)),
+        coding_review=_coding_review(0),
         policy=VerificationPolicy(),
     )
     assert not decision.completed
     assert decision.blockers == ("Unexpected changed files detected: surprise.py.",)
+
+
+def test_stale_independent_review_cannot_complete_a_new_revision() -> None:
+    decision = _evaluate_completion(
+        agent_requested_completion=True,
+        workspace_revision=2,
+        verification=_report(2),
+        final_review=_review(2),
+        coding_review=_coding_review(1),
+        policy=VerificationPolicy(),
+    )
+
+    assert not decision.completed
+    assert "Independent coding review is stale" in decision.blockers[0]

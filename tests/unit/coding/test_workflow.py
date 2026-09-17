@@ -1,6 +1,7 @@
 """End-to-end offline tests for autonomous coding-task completion gates."""
 
 import hashlib
+import json
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -12,6 +13,8 @@ from pydantic import BaseModel
 
 from repomind.agent import AgentDecision, AgentRunStatus, EditingAgentConfig
 from repomind.coding import (
+    CodingPlan,
+    CodingReview,
     CodingTask,
     CodingTaskStatus,
     CodingWorkflowConfig,
@@ -48,9 +51,16 @@ class _ScriptedLLM:
     def __init__(
         self,
         responses: list[AgentDecision | Callable[[str], AgentDecision]],
+        *,
+        plan_response: object | None = None,
+        review_responses: list[object] | None = None,
     ) -> None:
         self.responses = responses
+        self.plan_response = plan_response
+        self.review_responses = review_responses or []
         self.calls: list[dict[str, Any]] = []
+        self.planning_calls: list[dict[str, Any]] = []
+        self.review_calls: list[dict[str, Any]] = []
 
     def generate_structured(
         self,
@@ -60,7 +70,63 @@ class _ScriptedLLM:
         system_prompt: str | None = None,
         temperature: float | None = None,
     ) -> BaseModel:
-        self.calls.append({"prompt": prompt, "system_prompt": system_prompt})
+        call = {"prompt": prompt, "system_prompt": system_prompt}
+        if response_model is CodingPlan:
+            payload = json.loads(prompt)
+            self.planning_calls.append(call)
+            if self.plan_response is not None:
+                if isinstance(self.plan_response, Exception):
+                    raise self.plan_response
+                response = (
+                    self.plan_response(prompt)
+                    if callable(self.plan_response)
+                    else self.plan_response
+                )
+                return response_model.model_validate(response)
+            criteria = payload["task"]["acceptance_criteria"]
+            return CodingPlan.model_validate(
+                {
+                    "task_summary": "Implement the requested bounded change.",
+                    "steps": [
+                        {
+                            "step_id": 1,
+                            "action": "Inspect, implement, and verify the requested change.",
+                            "criterion_indices": list(range(len(criteria))),
+                            "verification": ["pytest", "ruff"],
+                        }
+                    ],
+                    "acceptance_coverage": [
+                        {"criterion_index": index, "step_ids": [1]}
+                        for index in range(len(criteria))
+                    ],
+                    "verification_plan": ["pytest", "ruff"],
+                }
+            )
+        if response_model is CodingReview:
+            payload = json.loads(prompt)
+            self.review_calls.append(call)
+            if self.review_responses:
+                scripted = self.review_responses.pop(0)
+                if isinstance(scripted, Exception):
+                    raise scripted
+                response = scripted(prompt) if callable(scripted) else scripted
+                return response_model.model_validate(response)
+            criteria = payload["task"]["acceptance_criteria"]
+            return CodingReview.model_validate(
+                {
+                    "verdict": "approve",
+                    "workspace_revision": payload["workspace_revision"],
+                    "acceptance_results": [
+                        {
+                            "criterion_index": index,
+                            "status": "satisfied",
+                            "evidence": "The bounded diff and verification support this criterion.",
+                        }
+                        for index in range(len(criteria))
+                    ],
+                }
+            )
+        self.calls.append(call)
         response = self.responses.pop(0)
         return response(prompt) if callable(response) else response
 
@@ -88,8 +154,7 @@ def _project(
     (root / "app.py").write_bytes(source)
     (root / "tests").mkdir()
     (root / "tests" / "test_app.py").write_text(
-        "from app import value\n\n\ndef test_value():\n"
-        f"    assert value() == {expected}\n",
+        f"from app import value\n\n\ndef test_value():\n    assert value() == {expected}\n",
         encoding="utf-8",
     )
     _git(root, "init", "-b", "main")
@@ -100,9 +165,7 @@ def _project(
 
 
 def _registry(root: Path, config: ToolConfig | None = None) -> ToolRegistry:
-    return create_editing_tool_registry(
-        ToolContext(repository_root=root), config=config
-    )
+    return create_editing_tool_registry(ToolContext(repository_root=root), config=config)
 
 
 def test_successful_task_runs_automatic_gates_and_returns_git_evidence(
@@ -144,6 +207,10 @@ def test_successful_task_runs_automatic_gates_and_returns_git_evidence(
     assert "return 2" in result.final_review.unstaged_diff.content
     assert "The value test passes." in llm.calls[0]["prompt"]
     assert "only a request" in llm.calls[0]["prompt"]
+    assert '<advisory_plan trust="model-authored-advice">' in llm.calls[0]["prompt"]
+    assert "Inspect, implement, and verify the requested change." in llm.calls[0]["prompt"]
+    assert len(llm.planning_calls) == 1
+    assert len(llm.review_calls) == 1
 
 
 def test_cancellation_after_first_mutation_is_deferred_through_verification(
@@ -357,9 +424,7 @@ def test_failed_final_tests_feed_back_into_same_agent_then_correction_completes(
     assert result.verification_executions == 4
     assert result.agent_run.steps[1].workflow_feedback is not None
     assert "Required pytest verification did not pass" in llm.calls[2]["prompt"]
-    assert '<workflow_feedback trust="trusted-workflow-instruction">' in llm.calls[2][
-        "prompt"
-    ]
+    assert '<workflow_feedback trust="trusted-workflow-instruction">' in llm.calls[2]["prompt"]
     assert (tmp_path / "app.py").read_bytes() == original
 
 
@@ -511,9 +576,7 @@ def test_narrow_agent_test_scope_does_not_prove_broader_policy_scope(
     tmp_path: Path,
 ) -> None:
     _project(tmp_path, expected=1)
-    llm = _ScriptedLLM(
-        [_tool("run_tests", paths=["tests/test_app.py"]), _final()]
-    )
+    llm = _ScriptedLLM([_tool("run_tests", paths=["tests/test_app.py"]), _final()])
 
     result = run_coding_task(
         CodingTask(objective="Verify the repository."), llm, _registry(tmp_path)
@@ -547,11 +610,227 @@ def test_final_review_preserves_diff_truncation(tmp_path: Path) -> None:
         llm,
         _registry(tmp_path, ToolConfig(max_diff_chars=40)),
         verification_policy=policy,
+        workflow_config=CodingWorkflowConfig(max_completion_attempts=1),
+    )
+
+    assert result.status is CodingTaskStatus.VERIFICATION_FAILED
+    assert result.final_review.diff_truncated
+    assert result.final_review.unstaged_diff.truncated
+    assert result.review is None
+    assert result.review_attempts == 1
+    assert "too large or truncated" in result.blockers[0]
+
+
+def test_planner_failure_stops_before_any_mutation(tmp_path: Path) -> None:
+    before = b"def value():\n    return 1\n"
+    _project(tmp_path, source=before, expected=1)
+    llm = _ScriptedLLM(
+        [
+            _tool(
+                "replace_text",
+                path="app.py",
+                old_text="return 1",
+                new_text="return 2",
+                expected_sha256=_hash(before),
+            )
+        ],
+        plan_response=RuntimeError("sk-test-secret"),
+    )
+
+    result = run_coding_task(CodingTask(objective="Return two."), llm, _registry(tmp_path))
+
+    assert result.status is CodingTaskStatus.ERROR
+    assert result.successful_mutations == 0
+    assert (tmp_path / "app.py").read_bytes() == before
+    assert result.blockers == ("Required structured planning could not be completed.",)
+    assert llm.calls == []
+
+
+def test_cancellation_requested_during_planning_stops_before_executor(
+    tmp_path: Path,
+) -> None:
+    before = b"def value():\n    return 1\n"
+    _project(tmp_path, source=before, expected=1)
+
+    class CancellationDuringPlan:
+        requested = False
+        side_effects = 0
+
+        def checkpoint(self) -> None:
+            if self.requested:
+                raise JobCancellationRequested("cancelled after planner returned")
+
+        def side_effect_started(self) -> None:
+            self.side_effects += 1
+
+    cancellation = CancellationDuringPlan()
+
+    def plan_response(prompt: str) -> dict[str, object]:
+        cancellation.requested = True
+        return {
+            "task_summary": "Inspect and implement the change.",
+            "steps": [{"step_id": 1, "action": "Inspect and implement the change."}],
+            "acceptance_coverage": [],
+        }
+
+    llm = _ScriptedLLM([_final()], plan_response=plan_response)
+
+    with pytest.raises(JobCancellationRequested):
+        run_coding_task(
+            CodingTask(objective="Return two."),
+            llm,
+            _registry(tmp_path),
+            cancellation=cancellation,
+        )
+
+    assert cancellation.side_effects == 0
+    assert llm.calls == []
+    assert (tmp_path / "app.py").read_bytes() == before
+
+
+def test_review_block_triggers_fresh_edit_verification_and_review(
+    tmp_path: Path,
+) -> None:
+    before = b"def value():\n    return 1\n"
+    first = before.replace(b"return 1", b"return 2")
+    _project(tmp_path, source=before, expected=2)
+
+    def corrective_edit(prompt: str) -> AgentDecision:
+        assert "Add a focused implementation note." in prompt
+        return _tool(
+            "replace_text",
+            path="app.py",
+            old_text="def value():\n",
+            new_text="def value():\n    # focused implementation note\n",
+            expected_sha256=_hash(first),
+        )
+
+    def review(verdict: str, revision: int) -> Callable[[str], dict[str, object]]:
+        def response(prompt: str) -> dict[str, object]:
+            payload = json.loads(prompt)
+            assert payload["workspace_revision"] == revision
+            satisfied = verdict == "approve"
+            return {
+                "verdict": verdict,
+                "workspace_revision": revision,
+                "acceptance_results": [
+                    {
+                        "criterion_index": 0,
+                        "status": "satisfied" if satisfied else "not_satisfied",
+                        "evidence": "The current bounded diff was independently reviewed.",
+                    }
+                ],
+                "findings": [] if satisfied else ["The implementation note is missing."],
+                "required_corrections": [] if satisfied else ["Add a focused implementation note."],
+            }
+
+        return response
+
+    llm = _ScriptedLLM(
+        [
+            _tool(
+                "replace_text",
+                path="app.py",
+                old_text="return 1",
+                new_text="return 2",
+                expected_sha256=_hash(before),
+            ),
+            _final("Initial implementation complete."),
+            corrective_edit,
+            _final("Corrective implementation complete."),
+        ],
+        review_responses=[review("changes_required", 1), review("approve", 2)],
+    )
+
+    result = run_coding_task(
+        CodingTask(
+            objective="Return two with a focused note.",
+            acceptance_criteria=("The implementation is tested and documented.",),
+        ),
+        llm,
+        _registry(tmp_path),
     )
 
     assert result.status is CodingTaskStatus.COMPLETED
-    assert result.final_review.diff_truncated
-    assert result.final_review.unstaged_diff.truncated
+    assert result.workspace_revision == 2
+    assert result.verification.tests_revision == 2
+    assert result.verification.ruff_revision == 2
+    assert result.verification_executions == 4
+    assert result.review is not None and result.review.workspace_revision == 2
+    assert result.review.verdict.value == "approve"
+    assert result.review_attempts == 2
+    assert result.review_blocks == 1
+    assert len(llm.review_calls) == 2
+
+
+def test_reviewer_failure_cannot_false_complete(tmp_path: Path) -> None:
+    before = b"def value():\n    return 1\n"
+    _project(tmp_path, source=before, expected=2)
+    llm = _ScriptedLLM(
+        [
+            _tool(
+                "replace_text",
+                path="app.py",
+                old_text="return 1",
+                new_text="return 2",
+                expected_sha256=_hash(before),
+            ),
+            _final(),
+        ],
+        review_responses=[RuntimeError("Bearer private-review-secret")],
+    )
+
+    result = run_coding_task(
+        CodingTask(objective="Return two."),
+        llm,
+        _registry(tmp_path),
+        workflow_config=CodingWorkflowConfig(max_completion_attempts=1),
+    )
+
+    assert result.status is CodingTaskStatus.VERIFICATION_FAILED
+    assert result.review is None
+    assert result.review_attempts == 1
+    assert result.blockers == ("Required independent coding review could not be completed.",)
+    assert "private-review-secret" not in result.model_dump_json()
+
+
+def test_reviewer_is_not_called_when_deterministic_verification_fails(
+    tmp_path: Path,
+) -> None:
+    _project(tmp_path, expected=2)
+    llm = _ScriptedLLM([_final("This is complete.")])
+
+    result = run_coding_task(
+        CodingTask(objective="Return two."),
+        llm,
+        _registry(tmp_path),
+        workflow_config=CodingWorkflowConfig(max_completion_attempts=1),
+    )
+
+    assert result.status is CodingTaskStatus.VERIFICATION_FAILED
+    assert result.verification.tests_passed is False
+    assert llm.review_calls == []
+
+
+def test_reviewer_cannot_override_failed_ruff(tmp_path: Path) -> None:
+    _project(
+        tmp_path,
+        source=b"import os\n\n\ndef value():\n    return 1\n",
+        expected=1,
+    )
+    llm = _ScriptedLLM([_final("This is complete.")])
+
+    result = run_coding_task(
+        CodingTask(objective="Keep value working."),
+        llm,
+        _registry(tmp_path),
+        workflow_config=CodingWorkflowConfig(max_completion_attempts=1),
+    )
+
+    assert result.status is CodingTaskStatus.VERIFICATION_FAILED
+    assert result.verification.tests_passed is True
+    assert result.verification.ruff_passed is False
+    assert llm.review_calls == []
 
 
 def test_verification_start_error_is_distinct_and_blocks_completion(

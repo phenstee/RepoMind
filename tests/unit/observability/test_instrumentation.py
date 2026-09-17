@@ -1,4 +1,5 @@
 import hashlib
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -9,7 +10,13 @@ import openai
 import pytest
 
 from repomind.agent import AgentConfig, AgentDecision, run_editing_agent, run_read_only_agent
-from repomind.coding import CodingTask, CodingWorkflowConfig, run_coding_task
+from repomind.coding import (
+    CodingPlan,
+    CodingReview,
+    CodingTask,
+    CodingWorkflowConfig,
+    run_coding_task,
+)
 from repomind.config import Settings
 from repomind.ingestion import CodeChunk
 from repomind.llm import LLMError, OpenAILLMClient
@@ -43,6 +50,42 @@ class ScriptedLLM:
         self.decisions = iter(decisions)
 
     def generate_structured(self, prompt, response_model, **kwargs):
+        if response_model is CodingPlan:
+            payload = json.loads(prompt)
+            criteria = payload["task"]["acceptance_criteria"]
+            return CodingPlan.model_validate(
+                {
+                    "task_summary": "Implement and verify the requested change.",
+                    "steps": [
+                        {
+                            "step_id": 1,
+                            "action": "Inspect, implement, and verify the change.",
+                            "criterion_indices": list(range(len(criteria))),
+                        }
+                    ],
+                    "acceptance_coverage": [
+                        {"criterion_index": index, "step_ids": [1]}
+                        for index in range(len(criteria))
+                    ],
+                }
+            )
+        if response_model is CodingReview:
+            payload = json.loads(prompt)
+            criteria = payload["task"]["acceptance_criteria"]
+            return CodingReview.model_validate(
+                {
+                    "verdict": "approve",
+                    "workspace_revision": payload["workspace_revision"],
+                    "acceptance_results": [
+                        {
+                            "criterion_index": index,
+                            "status": "satisfied",
+                            "evidence": "The bounded evidence supports this criterion.",
+                        }
+                        for index in range(len(criteria))
+                    ],
+                }
+            )
         return next(self.decisions)
 
 
@@ -214,8 +257,13 @@ def test_coding_recovery_flagship(tmp_path, tracing):
         return
     trace = stored(recorder)
     assert len(recorder.traces) == 1
-    assert trace.llm_calls == 4
+    assert trace.llm_calls == 6
     assert trace.successful_mutations == 2
+    event_types = [event.event_type for event in trace.events]
+    assert event_types.index("planning.started") < event_types.index("planning.completed")
+    assert event_types.index("planning.completed") < event_types.index("file.mutated")
+    assert event_types.index("review.started") < event_types.index("review.completed")
+    assert event_types.index("review.completed") < event_types.index("completion.completed")
     selected = [
         e
         for e in trace.events
