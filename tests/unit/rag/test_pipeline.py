@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from repomind.ingestion import CodeChunk
+from repomind.ingestion import ChunkingStrategy, ChunkKind, CodeChunk
 from repomind.rag import RAGConfig, RAGError, answer_repository_question
 from repomind.retrieval import EmbeddedChunk, EmbeddingVector
 
@@ -137,6 +137,31 @@ def test_pipeline_maps_only_llm_selected_source_metadata() -> None:
     assert citation.relative_path == Path("src/token.py")
     assert citation.start_line == 5
     assert citation.end_line == 6
+
+
+def test_structural_chunk_citation_keeps_original_ast_line_range() -> None:
+    corpus = _corpus()
+    structural = corpus[0].model_copy(
+        update={
+            "chunk": corpus[0].chunk.model_copy(
+                update={
+                    "chunking_strategy": ChunkingStrategy.STRUCTURAL,
+                    "chunk_kind": ChunkKind.METHOD,
+                    "qualified_symbol_name": "AuthService.authenticate",
+                }
+            )
+        }
+    )
+
+    answer = answer_repository_question(
+        "Where is authentication handled?",
+        [structural],
+        _FakeEmbeddingProvider(),
+        _FakeStructuredLLM(source_ids=["S1"]),
+    )
+
+    assert answer.citations[0].relative_path == Path("src/auth.py")
+    assert (answer.citations[0].start_line, answer.citations[0].end_line) == (10, 11)
 
 
 def test_pipeline_rejects_unknown_source_id() -> None:

@@ -1,5 +1,6 @@
 """Pydantic models used by repository ingestion."""
 
+from enum import StrEnum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -124,16 +125,39 @@ class RepositorySnapshot(BaseModel):
         return value
 
 
+class ChunkingStrategy(StrEnum):
+    """Versioned source chunking strategies suitable for persisted indexes."""
+
+    LINE = "line_v1"
+    STRUCTURAL = "python_ast_v1"
+
+
+class ChunkKind(StrEnum):
+    """The source unit represented by one chunk."""
+
+    LINE = "line"
+    LINE_FALLBACK = "line_fallback"
+    MODULE = "module"
+    FUNCTION = "function"
+    CLASS = "class"
+    METHOD = "method"
+    STRUCTURAL_FRAGMENT = "structural_fragment"
+
+
 class ChunkingConfig(BaseModel):
-    """Configuration for deterministic line-based source chunking.
+    """Configuration for deterministic source chunking.
 
     ``max_lines_per_chunk`` is the maximum number of logical source lines in a
     chunk. ``overlap_lines`` is the number of lines repeated between adjacent
-    chunks, which helps preserve context across chunk boundaries.
+    line chunks, which helps preserve context across chunk boundaries.
+    ``max_chars_per_chunk`` is a cheap deterministic approximation used to
+    bound structural chunks without adding a tokenizer dependency.
     """
 
+    strategy: ChunkingStrategy = ChunkingStrategy.LINE
     max_lines_per_chunk: int = Field(default=120, gt=0)
     overlap_lines: int = Field(default=20, ge=0)
+    max_chars_per_chunk: int = Field(default=12_000, gt=0)
 
     @model_validator(mode="after")
     def _validate_overlap(self) -> "ChunkingConfig":
@@ -155,6 +179,13 @@ class CodeChunk(BaseModel):
     end_line: int = Field(ge=1)
     content: str
     chunk_index: int = Field(ge=0)
+    chunking_strategy: ChunkingStrategy = ChunkingStrategy.LINE
+    chunk_kind: ChunkKind = ChunkKind.LINE
+    symbol_name: str | None = Field(default=None, min_length=1, max_length=512)
+    qualified_symbol_name: str | None = Field(default=None, min_length=1, max_length=2048)
+    parent_symbol: str | None = Field(default=None, min_length=1, max_length=2048)
+    fragment_index: int | None = Field(default=None, ge=1)
+    fragment_count: int | None = Field(default=None, ge=1)
 
     @field_validator("relative_path")
     @classmethod
@@ -165,4 +196,17 @@ class CodeChunk(BaseModel):
     def _validate_line_range(self) -> "CodeChunk":
         if self.end_line < self.start_line:
             raise ValueError("end_line must be greater than or equal to start_line")
+        if (self.fragment_index is None) != (self.fragment_count is None):
+            raise ValueError("fragment_index and fragment_count must be provided together")
+        if (
+            self.fragment_index is not None
+            and self.fragment_count is not None
+            and self.fragment_index > self.fragment_count
+        ):
+            raise ValueError("fragment_index must not exceed fragment_count")
+        has_fragment = self.fragment_index is not None
+        if has_fragment != (self.chunk_kind is ChunkKind.STRUCTURAL_FRAGMENT):
+            raise ValueError(
+                "structural_fragment chunks require fragment metadata and vice versa"
+            )
         return self

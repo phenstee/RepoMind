@@ -1,6 +1,7 @@
 """Typed, provider-independent models for repository retrieval."""
 
 from collections.abc import Sequence
+from enum import StrEnum
 from math import isfinite
 from typing import Protocol
 
@@ -16,10 +17,25 @@ class RankedChunk(Protocol):
     rank: int
 
 
+class SemanticSearchMode(StrEnum):
+    """Persisted vector-search behavior selected explicitly for evaluation."""
+
+    EXACT = "exact"
+    ANN = "ann"
+
+
+class EmbeddingTextStrategy(StrEnum):
+    """Explicit, benchmarkable representations sent to an embedding provider."""
+
+    RAW_SOURCE = "raw_source"
+    STRUCTURAL_CONTEXT = "structural_context"
+
+
 class EmbeddingConfig(BaseModel):
     """Configuration for deterministic item-count-based embedding batches."""
 
     batch_size: int = Field(default=64, gt=0)
+    text_strategy: EmbeddingTextStrategy = EmbeddingTextStrategy.RAW_SOURCE
 
 
 class EmbeddingUsage(BaseModel):

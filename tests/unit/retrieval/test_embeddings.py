@@ -8,11 +8,17 @@ import openai
 import pytest
 
 from repomind.config import Settings
-from repomind.ingestion.models import CodeChunk
+from repomind.ingestion.models import (
+    ChunkingStrategy,
+    ChunkKind,
+    CodeChunk,
+)
 from repomind.retrieval import (
     EmbeddingConfig,
     EmbeddingError,
+    EmbeddingTextStrategy,
     OpenAIEmbeddingClient,
+    embedding_text_for_chunk,
 )
 
 
@@ -70,6 +76,30 @@ def _chunk(content: str, *, path: str, chunk_index: int) -> CodeChunk:
         content=content,
         chunk_index=chunk_index,
     )
+
+
+def test_embedding_text_strategy_keeps_raw_source_as_default() -> None:
+    chunk = _chunk("def run():\n    pass\n", path="src/worker.py", chunk_index=0)
+
+    assert embedding_text_for_chunk(chunk) == chunk.content
+
+
+def test_structural_embedding_text_adds_metadata_without_mutating_source() -> None:
+    chunk = _chunk("def run():\n    pass\n", path="src/worker.py", chunk_index=0).model_copy(
+        update={
+            "chunking_strategy": ChunkingStrategy.STRUCTURAL,
+            "chunk_kind": ChunkKind.METHOD,
+            "qualified_symbol_name": "Worker.run",
+        }
+    )
+
+    text = embedding_text_for_chunk(chunk, EmbeddingTextStrategy.STRUCTURAL_CONTEXT)
+
+    assert text == (
+        "Path: src/worker.py\nSymbol: Worker.run\nKind: method\n\n"
+        "def run():\n    pass\n"
+    )
+    assert chunk.content == "def run():\n    pass\n"
 
 
 def test_embed_single_text_returns_normalized_vector() -> None:

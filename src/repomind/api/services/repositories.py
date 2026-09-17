@@ -17,6 +17,7 @@ from repomind.api.models import (
 )
 from repomind.api.store import RepositoryBinding, RepositoryStore
 from repomind.ingestion import (
+    ChunkingConfig,
     CodeChunk,
     chunk_repository,
     find_source_files,
@@ -105,10 +106,12 @@ class RepositoryService:
         store: RepositoryStore,
         workspace: WorkspacePolicy,
         execution_lock: RepositoryExecutionLock | None = None,
+        chunking_config: ChunkingConfig | None = None,
     ):
         self.store = store
         self.workspace = workspace
         self.execution_lock = execution_lock or NullRepositoryExecutionLock()
+        self.chunking_config = chunking_config or ChunkingConfig()
 
     @staticmethod
     def response(binding: RepositoryBinding) -> RepositoryResponse:
@@ -191,7 +194,7 @@ class RepositoryService:
                     file_count=snapshot.file_count,
                     total_size_bytes=snapshot.total_size_bytes,
                 )
-            chunks = chunk_repository(snapshot)
+            chunks = chunk_repository(snapshot, self.chunking_config)
             cancellation.checkpoint()
             if len(chunks) > self.MAX_CHUNKS:
                 raise APIError(
@@ -199,7 +202,10 @@ class RepositoryService:
                 )
             if trace is not None:
                 trace.emit(
-                    "chunking.completed", repository_id=repository_id, chunk_count=len(chunks)
+                    "chunking.completed",
+                    repository_id=repository_id,
+                    chunk_count=len(chunks),
+                    chunking_strategy=self.chunking_config.strategy.value,
                 )
                 trace.emit(
                     "embedding.started", repository_id=repository_id, chunk_count=len(chunks)

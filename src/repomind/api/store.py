@@ -20,7 +20,12 @@ from repomind.db import (
 from repomind.db.models import RepositoryFileRecord, RepositoryRecord
 from repomind.db.repositories import RepositoryNotFoundError
 from repomind.ingestion import RepositorySnapshot
-from repomind.retrieval import EmbeddedChunk, EmbeddingVector, RankedChunk
+from repomind.retrieval import (
+    EmbeddedChunk,
+    EmbeddingVector,
+    RankedChunk,
+    SemanticSearchMode,
+)
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,7 @@ class RepositoryStore(Protocol):
         *,
         hybrid: bool,
         top_k: int,
+        semantic_mode: SemanticSearchMode = SemanticSearchMode.EXACT,
     ) -> Sequence[RankedChunk]: ...
 
 
@@ -133,8 +139,22 @@ class PostgresRepositoryStore:
         *,
         hybrid: bool,
         top_k: int,
+        semantic_mode: SemanticSearchMode = SemanticSearchMode.EXACT,
     ) -> Sequence[RankedChunk]:
         with self.factory() as session:
             if hybrid:
-                return postgres_hybrid_search(session, repository_id, query, embedding, top_k=top_k)
-            return pgvector_semantic_search(session, repository_id, embedding, top_k=top_k)
+                return postgres_hybrid_search(
+                    session,
+                    repository_id,
+                    query,
+                    embedding,
+                    top_k=top_k,
+                    semantic_mode=semantic_mode,
+                )
+            return pgvector_semantic_search(
+                session,
+                repository_id,
+                embedding,
+                top_k=top_k,
+                mode=semantic_mode,
+            )

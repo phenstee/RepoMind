@@ -19,6 +19,14 @@ def _validate_top_k(top_k: int) -> None:
         raise BM25Error("top_k must be a positive integer")
 
 
+def _lexical_text(chunk: CodeChunk) -> str:
+    """Expose structural symbol context without changing line-v1 scoring."""
+
+    if chunk.qualified_symbol_name is None:
+        return chunk.content
+    return f"{chunk.qualified_symbol_name}\n{chunk.content}"
+
+
 class BM25Index:
     """A deterministic derived lexical index for a fixed chunk sequence."""
 
@@ -30,7 +38,7 @@ class BM25Index:
         self.config = config or BM25Config()
         self.chunks = tuple(chunks)
         self._term_frequencies = tuple(
-            Counter(tokenize_code(chunk.content)) for chunk in self.chunks
+            Counter(tokenize_code(_lexical_text(chunk))) for chunk in self.chunks
         )
         self.document_lengths = tuple(
             sum(term_frequency.values()) for term_frequency in self._term_frequencies

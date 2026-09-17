@@ -20,6 +20,7 @@ from repomind.retrieval import (
     EmbeddedChunk,
     EmbeddingProvider,
     RankedChunk,
+    SemanticSearchMode,
     semantic_search,
 )
 
@@ -172,6 +173,7 @@ def answer_repository_question_with_retriever(
     recorder: TraceRecorder | None = None,
     trace: TraceContext | None = None,
     cancellation: CooperativeCancellation | None = None,
+    retrieval_mode: SemanticSearchMode = SemanticSearchMode.EXACT,
 ) -> RepositoryAnswer:
     """Use an injected retriever, generate once, and map validated citations."""
 
@@ -182,11 +184,20 @@ def answer_repository_question_with_retriever(
     trace = trace if trace is not None else TraceContext()
     cancellation = cancellation or NoCancellation()
     cancellation.checkpoint()
+    resolved_retrieval_mode = SemanticSearchMode(retrieval_mode)
     with trace.operation(
-        "retrieval", strategy=strategy, reranking_enabled=strategy == "hybrid+rerank"
+        "retrieval",
+        strategy=strategy,
+        reranking_enabled=strategy == "hybrid+rerank",
+        retrieval_mode=resolved_retrieval_mode.value,
+        ann_enabled=resolved_retrieval_mode is SemanticSearchMode.ANN,
+        top_k=rag_config.top_k,
     ) as metadata:
         results = retriever(question, top_k=rag_config.top_k)
         metadata["candidate_count"] = len(results)
+        chunking_strategies = {result.chunk.chunking_strategy.value for result in results}
+        if len(chunking_strategies) == 1:
+            metadata["chunking_strategy"] = chunking_strategies.pop()
     cancellation.checkpoint()
     return _answer_from_ranked_chunks(
         question, results, llm_client, rag_config, trace, cancellation
@@ -214,7 +225,14 @@ def answer_repository_question(
     trace = trace if trace is not None else TraceContext()
     cancellation = cancellation or NoCancellation()
     cancellation.checkpoint()
-    with trace.operation("retrieval", strategy="semantic", reranking_enabled=False) as metadata:
+    with trace.operation(
+        "retrieval",
+        strategy="semantic",
+        reranking_enabled=False,
+        retrieval_mode="exact",
+        ann_enabled=False,
+        top_k=rag_config.top_k,
+    ) as metadata:
         results = semantic_search(
             question,
             embedded_chunks,
@@ -222,6 +240,9 @@ def answer_repository_question(
             top_k=rag_config.top_k,
         )
         metadata["candidate_count"] = len(results)
+        chunking_strategies = {result.chunk.chunking_strategy.value for result in results}
+        if len(chunking_strategies) == 1:
+            metadata["chunking_strategy"] = chunking_strategies.pop()
     cancellation.checkpoint()
     return _answer_from_ranked_chunks(
         question,

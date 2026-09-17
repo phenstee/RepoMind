@@ -5,7 +5,7 @@ from math import log
 import pytest
 from pydantic import ValidationError
 
-from repomind.ingestion import CodeChunk
+from repomind.ingestion import ChunkingStrategy, ChunkKind, CodeChunk
 from repomind.retrieval import BM25Config, BM25Error, BM25Index
 
 
@@ -49,6 +49,27 @@ def test_exact_identifier_outweighs_partial_concept_matches() -> None:
 
     assert results[0].chunk.relative_path.as_posix() == "settings.py"
     assert results[0].score > results[1].score
+
+
+def test_structural_qualified_symbol_improves_exact_method_lookup() -> None:
+    method = _chunk("service.py", "def login(self): pass", 0).model_copy(
+        update={
+            "chunking_strategy": ChunkingStrategy.STRUCTURAL,
+            "chunk_kind": ChunkKind.METHOD,
+            "qualified_symbol_name": "UserService.login",
+        }
+    )
+    class_context = _chunk("service.py", "class UserService:", 1).model_copy(
+        update={
+            "chunking_strategy": ChunkingStrategy.STRUCTURAL,
+            "chunk_kind": ChunkKind.CLASS,
+            "qualified_symbol_name": "UserService",
+        }
+    )
+
+    results = BM25Index.from_chunks([class_context, method]).search("UserService.login")
+
+    assert results[0].chunk == method
 
 
 @pytest.mark.parametrize("query", ["persist_embedded_chunks", "persist embedded chunks"])

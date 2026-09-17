@@ -20,6 +20,7 @@ from repomind.retrieval.models import (
     EmbeddedChunk,
     EmbeddingBatchResult,
     EmbeddingConfig,
+    EmbeddingTextStrategy,
     EmbeddingUsage,
     EmbeddingVector,
 )
@@ -36,6 +37,24 @@ _RETRYABLE_ERRORS = (
 
 class EmbeddingError(RuntimeError):
     """Raised when embedding generation fails or returns invalid data."""
+
+
+def embedding_text_for_chunk(
+    chunk: CodeChunk,
+    strategy: EmbeddingTextStrategy = EmbeddingTextStrategy.RAW_SOURCE,
+) -> str:
+    """Build embedding input without altering stored source or citations."""
+
+    resolved = EmbeddingTextStrategy(strategy)
+    if resolved is EmbeddingTextStrategy.RAW_SOURCE:
+        return chunk.content
+    symbol = chunk.qualified_symbol_name or "<module>"
+    return (
+        f"Path: {chunk.relative_path.as_posix()}\n"
+        f"Symbol: {symbol}\n"
+        f"Kind: {chunk.chunk_kind.value}\n\n"
+        f"{chunk.content}"
+    )
 
 
 def _retry_delay(attempt: int, base_delay: float) -> float:
@@ -238,7 +257,9 @@ class OpenAIEmbeddingClient:
 
         if not chunks:
             return []
-        result = self.embed_texts([chunk.content for chunk in chunks])
+        result = self.embed_texts(
+            [embedding_text_for_chunk(chunk, self.config.text_strategy) for chunk in chunks]
+        )
         return [
             EmbeddedChunk(chunk=chunk, embedding=embedding)
             for chunk, embedding in zip(chunks, result.embeddings, strict=True)
@@ -249,7 +270,9 @@ class OpenAIEmbeddingClient:
 
         if not chunks:
             return []
-        result = await self.aembed_texts([chunk.content for chunk in chunks])
+        result = await self.aembed_texts(
+            [embedding_text_for_chunk(chunk, self.config.text_strategy) for chunk in chunks]
+        )
         return [
             EmbeddedChunk(chunk=chunk, embedding=embedding)
             for chunk, embedding in zip(chunks, result.embeddings, strict=True)

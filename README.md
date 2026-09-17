@@ -111,6 +111,12 @@ fresh deterministic verification and Git evidence then feed a revision-bound
 `CodingReview`. Reviewer corrections return to the same executor loop, while
 Python-owned verification and safety gates retain final authority.
 
+**Milestone 22: Retrieval V2** is complete. The original deterministic line
+chunker and exact vector search remain explicit baselines; Python repositories
+can opt into AST-anchored structural chunks, and PostgreSQL can opt into a
+filtered pgvector HNSW candidate path without changing BM25, RRF, reranking, or
+RAG result contracts.
+
 ## Local HTTP API
 
 The API is for **trusted local development only**. It has **no authentication or
@@ -145,8 +151,10 @@ uv run alembic current
 uv run uvicorn repomind.api.app:app --host 127.0.0.1 --port 8000
 ```
 
-The current migration head is `20260916_02`. It adds durable jobs and cooperative
-cancellation state while preserving existing repository, index, and trace data.
+The current migration head is `20260917_01`. It adds backward-compatible chunk
+provenance/symbol metadata and a cosine HNSW expression index for the default
+1,536-dimensional embedding shape while preserving existing repository, job,
+index, and trace data.
 Pre-API repositories remain unbound and return `409` for workspace
 operations. They are not silently mapped to local files. Register a new unique
 repository name to index a workspace through HTTP. Reusing an API-registered name
@@ -720,7 +728,8 @@ handling would require substantially more platform-specific file-handle logic.
 `chunk_repository` applies that process across all files in a
 `RepositorySnapshot` and returns one flat, deterministically ordered list.
 
-The current baseline is simple line-based chunking:
+`ChunkingStrategy.LINE` (`line_v1`) remains the production default and stable
+comparison baseline:
 
 - `max_lines_per_chunk` defaults to 120
 - `overlap_lines` defaults to 20
@@ -732,8 +741,34 @@ Overlap exists because code near a chunk boundary often depends on surrounding
 context. Repeating nearby lines helps prevent that context from being split
 completely across two retrieval units.
 
-Chunking is intentionally deterministic and synchronous. It does not perform
-embeddings, retrieval, or syntax-aware parsing.
+`ChunkingStrategy.STRUCTURAL` (`python_ast_v1`) is an explicit opt-in. For valid
+Python it uses the standard-library AST to anchor module regions, functions,
+classes, methods, decorators, and qualified nested symbols such as
+`UserService.login`. Stored content is always sliced from the original source;
+it is never reconstructed with `ast.unparse`, so formatting, CRLF newlines,
+docstrings, and comments inside a selected range remain exact. Imports,
+constants, assignments, and other module-level content are retained in bounded
+module chunks. A class is represented by bounded class context plus its methods
+rather than one duplicated giant class chunk.
+
+Structural chunks obey both `max_lines_per_chunk` and the deterministic
+`max_chars_per_chunk` approximation (12,000 characters by default). An
+oversized symbol is split at child-statement boundaries when possible, then by
+exact line/character slices as needed. Each fragment retains its symbol,
+qualified/parent symbol, and 1-based fragment position. Tiny module statements
+are naturally coalesced into contiguous module regions; unrelated functions are
+not merged just to hit a target size.
+
+Unsupported languages, invalid Python, and parser failures fall back to the
+unchanged line algorithm. Those chunks retain the requested `python_ast_v1`
+provenance and are marked `line_fallback`, so fallback is not mistaken for AST
+parsing. Every chunk persists its strategy/version, kind, and useful symbol
+metadata. Re-index after changing strategy: repository replacement is atomic
+and never intentionally mixes stale `line_v1` and `python_ast_v1` chunks.
+
+Both strategies are deterministic and synchronous. They do not embed or
+retrieve content. The same file and configuration produce the same ordering,
+ranges, metadata, source slices, and source-domain identities.
 
 ## Embeddings
 
@@ -763,8 +798,12 @@ operation. Usage returned by the provider is aggregated so future indexing cost
 can be measured. Batching is currently based on item count; token-aware batching
 is a future improvement.
 
-Chunk content is sent exactly as stored, including indentation and newline
-characters. Empty strings are rejected; whitespace-only strings are deliberately
+Chunk content is sent exactly as stored by default (`raw_source`), including
+indentation and newline characters. `structural_context` is a separate,
+benchmarkable embedding-text option that prefixes path, qualified symbol, and
+kind while leaving stored content and citations untouched. The offline v2
+fixture did not show a consistent gain from that prefix, so `raw_source` remains
+the default. Empty strings are rejected; whitespace-only strings are deliberately
 allowed without stripping.
 
 Vectors are immutable Python tuples held only in memory. Automated embedding
@@ -886,11 +925,26 @@ repositories
     ↓ one-to-many
 repository_files (metadata, exact decoded content, SHA-256)
     ↓ one-to-many
-code_chunks (line ranges, exact content, SHA-256, model, dimensions, vector)
+code_chunks (source ranges, structural metadata, exact content, model, vector)
     ↓
-exact pgvector cosine search
+exact pgvector baseline or pgvector HNSW candidates
     ↓
 SemanticSearchResult[]
+```
+
+The complete Retrieval V2 path is:
+
+```text
+source -> line_v1 or python_ast_v1 -> embedding
+                                      |
+                         PostgreSQL + pgvector HNSW
+                                      + BM25
+                                      |
+                                     RRF
+                                      |
+                             optional reranker
+                                      |
+                                 RAG / agent
 ```
 
 PostgreSQL is the general relational database that stores repository, file,
@@ -932,10 +986,32 @@ relative path, start line, chunk index, and database ID as deterministic
 secondary ordering. This differs deliberately from the in-memory baseline,
 which preserves caller input order for ties.
 
-No approximate-nearest-neighbor index is created yet. Exact search keeps the
-Milestone 5 mathematics directly comparable and avoids imposing one fixed
-dimension on every embedding model. ANN design and measurement can follow when
-the corpus size justifies it.
+Retrieval V2 adds `ix_code_chunks_embedding_hnsw_1536_cosine`, a partial HNSW
+expression index over `embedding::vector(1536)` with `vector_cosine_ops`. This
+shape matches the default `text-embedding-3-small` output while keeping the
+underlying column dimension-flexible. Explicit ANN mode therefore requires
+1,536-dimensional vectors; other dimensions continue to work in exact mode
+instead of being silently coerced or rejected at persistence time.
+
+Exact and ANN are separate modes. Exact uses the original uncast pgvector
+distance expression, which cannot match the fixed-dimension expression index,
+and remains the correctness/debugging reference. ANN uses the matching cast and
+normal nearest-neighbor `ORDER BY ... <=> ... LIMIT k` shape. Both filter by
+repository, embedding model, and dimension and reconstruct the same domain
+objects. Filtered ANN enables pgvector 0.8's `strict_order` iterative scan with
+transaction-local `SET LOCAL`; it never changes database-global settings.
+Persisted search defaults to exact until a real-service scale run establishes a
+safe default for the deployment's corpus; callers and benchmarks select ANN
+explicitly through `SemanticSearchMode.ANN`.
+
+PostgreSQL remains free to choose a sequential plan for tiny repositories. The
+production query never disables sequential scans. A real-PostgreSQL integration
+test temporarily uses `enable_seqscan = off` inside its rolled-back transaction
+only to prove the named HNSW index is valid and planner-usable. HNSW trades
+approximate recall plus index build/storage/memory for scalable candidate
+lookup; exact mode remains available for Recall@k measurement.
+The migration leaves pgvector's `m`, `ef_construction`, and `hnsw.ef_search`
+defaults unchanged because the current fixture does not justify custom tuning.
 
 ## BM25 and hybrid retrieval
 
@@ -979,7 +1055,10 @@ no results.
 ### BM25
 
 `BM25Index` derives term frequencies, document frequencies, document lengths,
-and average document length once from `CodeChunk` content. It uses `k1 = 1.5`
+and average document length once from `CodeChunk` content. Structural chunks
+also contribute their qualified symbol name, which lets a query such as
+`UserService.login` match a method without adding a second symbol index. Line-v1
+scoring remains unchanged. BM25 uses `k1 = 1.5`
 for term-frequency saturation and `b = 0.75` for length normalization. For each
 query term it calculates:
 
@@ -1016,8 +1095,9 @@ each retriever for `top_k × 4` candidates by default before fusion. That depth 
 a simple correctness baseline, not an empirically optimal setting. Stored
 chunks are never re-embedded.
 
-For persisted repositories, `postgres_hybrid_search` combines exact pgvector
-semantic results with `load_chunks` → an in-memory `BM25Index` → RRF. The query
+For persisted repositories, `postgres_hybrid_search` combines the selected exact
+or ANN pgvector semantic results with `load_chunks` → an in-memory `BM25Index`
+→ RRF. The query
 embedding remains an input to the database layer, so neither BM25 nor database
 code calls OpenAI. Lexical indexing is currently rebuilt for each database
 hybrid call; callers performing repeated in-memory searches can reuse a
@@ -1025,8 +1105,8 @@ hybrid call; callers performing repeated in-memory searches can reuse a
 
 Approximate costs are O(N × D) for in-memory semantic comparison, O(N × |Q|)
 for this straightforward BM25 scorer over N chunks and query terms Q, and
-O(candidate results) for RRF. PostgreSQL handles the exact database semantic
-scan, while database-backed lexical work still loads chunks into Python. This
+O(candidate results) for RRF. PostgreSQL handles exact scanning or HNSW candidate
+lookup, while database-backed lexical work still loads chunks into Python. This
 is not yet a production-scale persisted lexical index.
 
 ## LLM-based reranking
@@ -1095,11 +1175,9 @@ always improves results—evaluation must establish that later.
 
 ### Future retrieval experiments
 
-The following ideas are intentionally deferred until the evaluation harness can
-measure them against the current baseline:
+Retrieval V2 now makes AST chunking and optional structural embedding context
+measurable strategies. The following ideas remain intentionally deferred:
 
-- syntax-aware / AST chunking
-- richer embedding text containing path or symbol metadata
 - parent or neighboring-chunk context expansion
 - overlap-aware context deduplication
 - token-aware context budgeting
@@ -1247,6 +1325,72 @@ Embeddings and model decisions are deterministic fakes; the scores do not
 measure an OpenAI embedding, reranking, generation, or coding model. A
 `live_model` report is a separate mode and must never be aggregated with fake-
 provider results. No live benchmark runs automatically.
+
+### `repo-eval-v2` structural retrieval
+
+Run benchmark entry points as modules from the repository root. The benchmark
+files import one another through the `benchmarks` package, so direct file-path
+execution such as `python benchmarks/repo_eval_v2_postgres.py` is not supported.
+To inspect the PostgreSQL benchmark CLIs without connecting to a database, run:
+
+```powershell
+uv run python -m benchmarks.repo_eval_v2_postgres --help
+uv run python -m benchmarks.ann_pgvector --help
+```
+
+Run the deterministic Python-structure fixture with:
+
+```powershell
+uv run python -m benchmarks.repo_eval_v2
+```
+
+The four-case fixture covers a class with similar methods, an exact qualified
+symbol query, a natural-language behavior query, a nested function, decorators/
+module content, and whole-symbol containment. The current offline hashed-vector
+result at `k=3` is:
+
+```text
+Strategy                      Recall@3  MRR    nDCG@3
+line_v1+exact                 1.000     0.583  0.690
+python_ast_v1+exact           1.000     0.750  0.831
+python_ast_v1+exact+bm25_rrf  1.000     0.875  0.908
+python_ast_v1+context+exact   1.000     0.750  0.795
+Whole-symbol containment      4/4
+```
+
+This small fake-embedding fixture supports the structural plumbing and boundary
+decision but does not establish real-model generalization. In particular, the
+metadata-enriched representation did not consistently beat raw source, so raw
+source remains the embedding default. The application also retains `line_v1`
+as its chunking default until broader real-repository evidence is available.
+
+Run the opt-in PostgreSQL scale/quality benchmark only against an isolated,
+migrated test database:
+
+```powershell
+$env:REPOMIND_TEST_DATABASE_URL = "postgresql+psycopg://.../repomind_test"
+uv run python -m benchmarks.ann_pgvector --sizes 100 500 2000 --k 10 --queries 5
+```
+
+It reports corpus size, exact and ANN elapsed time, ANN Recall@k against exact
+neighbors, and whether the normal planner selected HNSW. It inserts a uniquely
+named repository inside one transaction and always rolls that transaction back.
+There are no hard latency assertions because machine load and PostgreSQL state
+make timing unsuitable as a CI correctness contract.
+
+With the same environment variable, the structural fixture can run the required
+real-pgvector matrix:
+
+```powershell
+uv run python -m benchmarks.repo_eval_v2_postgres
+```
+
+It compares `line_v1 + exact`, `python_ast_v1 + exact`, `python_ast_v1 + ANN`,
+and `python_ast_v1 + ANN + BM25/RRF`, then reports ANN neighbor Recall@3 against
+exact. Because this fixture is tiny, it disables sequential scans only inside
+its rollback-only transaction to exercise the eligible HNSW path. Production
+never changes that planner setting. This command is opt-in and is not part of
+normal pytest.
 
 ## Read-only tool system
 
@@ -2041,9 +2185,9 @@ uv run python scripts/inspect_repository.py . --chunks
   `repomind.config.Settings`, and `.env` is gitignored.
 - **Tests are offline by default.** SDK objects are injected in tests, so CI and
   local development do not require paid API calls.
-- **Chunking starts with a deterministic baseline.** Line-based chunking is
-  deliberately simple so later syntax-aware strategies can be compared against
-  a stable reference.
+- **Line chunking remains the deterministic baseline.** Python AST chunking is
+  opt-in, slices original source, bounds oversized symbols, and falls back to
+  line boundaries rather than making indexing fail.
 - **Embedding generation stays separate.** It uses the official OpenAI SDK
   directly, normalizes provider responses, and keeps vectors associated with
   their source chunks.
@@ -2067,8 +2211,11 @@ uv run python scripts/inspect_repository.py . --chunks
   RAG do not depend on SQLAlchemy.
 - **Persistence is transaction-controlled by callers.** Low-level operations
   flush for validation but do not commit repeatedly.
-- **Exact pgvector search comes first.** No HNSW or IVFFlat index is claimed or
-  added before corpus-scale measurements justify approximate retrieval.
+- **Exact pgvector search remains the reference.** HNSW is an explicit
+  1,536-dimensional acceleration path; the planner is not forced, and exact
+  results measure ANN Recall@k.
+- **PostgreSQL plus pgvector remains the vector database.** HNSW is an index on
+  the existing persistence layer, not a reason to add another database.
 - **BM25 stays explicit and dependency-free.** Its positive IDF, saturation,
   and length-normalization math remain inspectable and independently testable.
 - **Tokenization understands common code forms.** Exact normalized identifiers
@@ -2166,7 +2313,7 @@ The full project roadmap is described in the RepoMind engineering brief:
 18. Next.js + TypeScript frontend (complete)
 19. Redis + durable worker/job architecture (complete)
 20. Cooperative cancellation / job control (complete)
-21. Structured planner + independent reviewer (complete/current)
-22. Retrieval V2 / scalable code indexing (next): AST-aware structural chunking,
-    size/token-aware fallback, richer symbol metadata, PostgreSQL pgvector HNSW,
-    exact-vs-ANN comparison, BM25/RRF integration, and quality/latency benchmarks
+21. Structured planner + independent reviewer (complete)
+22. Retrieval V2: structural chunking + pgvector HNSW ANN (complete/current)
+23. Retrieval quality experiments / context assembly (next; selected only from
+    Retrieval V2 measurements)

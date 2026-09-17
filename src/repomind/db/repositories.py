@@ -1,18 +1,25 @@
-"""Transactional persistence and exact pgvector retrieval operations."""
+"""Transactional persistence plus exact and HNSW pgvector retrieval."""
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from hashlib import sha256
 
-from sqlalchemy import distinct, select
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import cast, distinct, select, text
 from sqlalchemy.orm import Session
 
-from repomind.db.models import CodeChunkRecord, RepositoryFileRecord, RepositoryRecord
+from repomind.db.models import (
+    HNSW_EMBEDDING_DIMENSIONS,
+    CodeChunkRecord,
+    RepositoryFileRecord,
+    RepositoryRecord,
+)
 from repomind.ingestion import CodeChunk, RepositorySnapshot
 from repomind.retrieval import (
     EmbeddedChunk,
     EmbeddingVector,
     SemanticSearchError,
+    SemanticSearchMode,
     SemanticSearchResult,
     SimilarityError,
     cosine_similarity,
@@ -132,6 +139,13 @@ def _replace_chunks(
             end_line=chunk.end_line,
             content=chunk.content,
             content_hash=content_sha256(chunk.content),
+            chunking_strategy=chunk.chunking_strategy.value,
+            chunk_kind=chunk.chunk_kind.value,
+            symbol_name=chunk.symbol_name,
+            qualified_symbol_name=chunk.qualified_symbol_name,
+            parent_symbol=chunk.parent_symbol,
+            fragment_index=chunk.fragment_index,
+            fragment_count=chunk.fragment_count,
             embedding=list(embedding.values) if embedding is not None else None,
             embedding_model=embedding.model if embedding is not None else None,
             embedding_dimensions=embedding.dimensions if embedding is not None else None,
@@ -206,6 +220,13 @@ def _code_chunk_from_record(
         end_line=record.end_line,
         content=record.content,
         chunk_index=record.chunk_index,
+        chunking_strategy=record.chunking_strategy or "line_v1",
+        chunk_kind=record.chunk_kind or "line",
+        symbol_name=record.symbol_name,
+        qualified_symbol_name=record.qualified_symbol_name,
+        parent_symbol=record.parent_symbol,
+        fragment_index=record.fragment_index,
+        fragment_count=record.fragment_count,
     )
 
 
@@ -277,6 +298,13 @@ def load_chunks(
             CodeChunkRecord.start_line,
             CodeChunkRecord.end_line,
             CodeChunkRecord.content,
+            CodeChunkRecord.chunking_strategy,
+            CodeChunkRecord.chunk_kind,
+            CodeChunkRecord.symbol_name,
+            CodeChunkRecord.qualified_symbol_name,
+            CodeChunkRecord.parent_symbol,
+            CodeChunkRecord.fragment_index,
+            CodeChunkRecord.fragment_count,
         )
         .join(RepositoryFileRecord)
         .where(RepositoryFileRecord.repository_id == repository_id)
@@ -295,8 +323,29 @@ def load_chunks(
             end_line=end_line,
             content=content,
             chunk_index=chunk_index,
+            chunking_strategy=chunking_strategy,
+            chunk_kind=chunk_kind,
+            symbol_name=symbol_name,
+            qualified_symbol_name=qualified_symbol_name,
+            parent_symbol=parent_symbol,
+            fragment_index=fragment_index,
+            fragment_count=fragment_count,
         )
-        for relative_path, language, chunk_index, start_line, end_line, content in rows
+        for (
+            relative_path,
+            language,
+            chunk_index,
+            start_line,
+            end_line,
+            content,
+            chunking_strategy,
+            chunk_kind,
+            symbol_name,
+            qualified_symbol_name,
+            parent_symbol,
+            fragment_index,
+            fragment_count,
+        ) in rows
     ]
 
 
@@ -306,11 +355,16 @@ def pgvector_semantic_search(
     query_embedding: EmbeddingVector,
     *,
     top_k: int = 5,
+    mode: SemanticSearchMode = SemanticSearchMode.EXACT,
 ) -> list[SemanticSearchResult]:
-    """Run exact cosine search for one repository, model, and vector dimension."""
+    """Run exact or HNSW cosine search within one repository and model."""
 
     if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
         raise SemanticSearchError("top_k must be a positive integer")
+    try:
+        resolved_mode = SemanticSearchMode(mode)
+    except ValueError as exc:
+        raise SemanticSearchError("mode must be 'exact' or 'ann'") from exc
     _repository_or_raise(session, repository_id)
     try:
         cosine_similarity(query_embedding.values, query_embedding.values)
@@ -340,9 +394,30 @@ def pgvector_semantic_search(
             f"model {query_embedding.model!r} uses {stored_dimensions}"
         )
 
-    distance = CodeChunkRecord.embedding.cosine_distance(
-        list(query_embedding.values)
-    ).label("cosine_distance")
+    if resolved_mode is SemanticSearchMode.ANN:
+        if query_embedding.dimensions != HNSW_EMBEDDING_DIMENSIONS:
+            raise PersistenceError(
+                "ANN search requires "
+                f"{HNSW_EMBEDDING_DIMENSIONS}-dimensional embeddings; use exact mode "
+                f"for {query_embedding.dimensions}-dimensional vectors"
+            )
+        # PostgreSQL 17 + pgvector 0.8.x can continue filtered HNSW scans until
+        # enough repository/model matches are found. SET LOCAL never changes the
+        # database-wide setting and expires with the current transaction.
+        session.execute(text("SET LOCAL hnsw.iterative_scan = 'strict_order'"))
+        indexed_embedding = cast(
+            CodeChunkRecord.embedding,
+            Vector(HNSW_EMBEDDING_DIMENSIONS),
+        )
+        distance = indexed_embedding.cosine_distance(
+            list(query_embedding.values)
+        ).label("cosine_distance")
+    else:
+        # The uncast expression intentionally cannot match the fixed-dimension
+        # expression index, preserving an exact pgvector baseline.
+        distance = CodeChunkRecord.embedding.cosine_distance(
+            list(query_embedding.values)
+        ).label("cosine_distance")
     rows = session.execute(
         select(
             CodeChunkRecord,

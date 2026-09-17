@@ -227,7 +227,11 @@ def test_rag_stream_reuses_service_result_and_strategy_projection(
     } == {
         "strategy": trace_strategy,
         "reranking_enabled": reranking,
+        "retrieval_mode": "exact",
+        "ann_enabled": False,
+        "top_k": 3,
         "candidate_count": 1,
+        "chunking_strategy": "line_v1",
     }
     result = events[-1]["data"]["result"]
     assert result["answer"] == "value returns one"

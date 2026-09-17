@@ -24,6 +24,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from repomind.db.base import Base
 
+HNSW_EMBEDDING_DIMENSIONS = 1536
+HNSW_INDEX_NAME = "ix_code_chunks_embedding_hnsw_1536_cosine"
+
 
 class RepositoryRecord(Base):
     """A named repository index without a machine-specific absolute root."""
@@ -108,6 +111,22 @@ class CodeChunkRecord(Base):
         CheckConstraint("start_line >= 1", name="ck_code_chunks_start_line"),
         CheckConstraint("end_line >= start_line", name="ck_code_chunks_line_range"),
         CheckConstraint(
+            "chunking_strategy IN ('line_v1', 'python_ast_v1')",
+            name="ck_code_chunks_chunking_strategy",
+        ),
+        CheckConstraint(
+            "chunk_kind IN ('line', 'line_fallback', 'module', 'function', "
+            "'class', 'method', 'structural_fragment')",
+            name="ck_code_chunks_kind",
+        ),
+        CheckConstraint(
+            "(chunk_kind <> 'structural_fragment' AND fragment_index IS NULL "
+            "AND fragment_count IS NULL) OR "
+            "(chunk_kind = 'structural_fragment' AND fragment_index >= 1 "
+            "AND fragment_count >= fragment_index)",
+            name="ck_code_chunks_fragment",
+        ),
+        CheckConstraint(
             "char_length(content_hash) = 64",
             name="ck_code_chunks_hash_length",
         ),
@@ -134,6 +153,15 @@ class CodeChunkRecord(Base):
     end_line: Mapped[int] = mapped_column(Integer, nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    chunking_strategy: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="line_v1"
+    )
+    chunk_kind: Mapped[str] = mapped_column(String(32), nullable=False, server_default="line")
+    symbol_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    qualified_symbol_name: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    parent_symbol: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    fragment_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fragment_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(), nullable=True)
     embedding_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     embedding_dimensions: Mapped[int | None] = mapped_column(Integer, nullable=True)

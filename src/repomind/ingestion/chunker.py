@@ -1,33 +1,30 @@
-"""Deterministic line-based code chunking.
+"""Versioned deterministic source chunking.
 
 Chunking turns a complete :class:`SourceFile` into smaller ``CodeChunk``
 objects so later retrieval stages can work with useful, citation-friendly
-units. The implementation is intentionally simple and deterministic; more
-sophisticated syntax-aware chunking can be added later as a separate strategy.
+units. The original line algorithm remains the default while Python structural
+chunking is dispatched as an explicit, independently benchmarkable strategy.
 """
 
 from __future__ import annotations
 
 from repomind.ingestion.models import (
     ChunkingConfig,
+    ChunkingStrategy,
+    ChunkKind,
     CodeChunk,
     RepositorySnapshot,
     SourceFile,
 )
 
 
-def chunk_source_file(
+def _line_chunks(
     source_file: SourceFile,
-    config: ChunkingConfig | None = None,
+    config: ChunkingConfig,
 ) -> list[CodeChunk]:
-    """Split one source file into ordered, deterministic chunks.
+    """Apply the preserved line-v1 algorithm."""
 
-    An empty file produces an empty list because there is no useful text to
-    embed or retrieve. Newline characters are preserved exactly by using
-    ``splitlines(keepends=True)``.
-    """
-
-    chunking_config = config or ChunkingConfig()
+    chunking_config = config
     lines = source_file.content.splitlines(keepends=True)
 
     if not lines:
@@ -51,6 +48,8 @@ def chunk_source_file(
                 end_line=end_index,
                 content="".join(lines[start_index:end_index]),
                 chunk_index=len(chunks),
+                chunking_strategy=ChunkingStrategy.LINE,
+                chunk_kind=ChunkKind.LINE,
             )
         )
 
@@ -59,6 +58,24 @@ def chunk_source_file(
         start_index += step
 
     return chunks
+
+
+def chunk_source_file(
+    source_file: SourceFile,
+    config: ChunkingConfig | None = None,
+) -> list[CodeChunk]:
+    """Split one source file using the explicitly selected strategy.
+
+    An empty file produces an empty list. Both strategies preserve source text
+    exactly; structural parsing failures fall back to the line-v1 boundaries.
+    """
+
+    chunking_config = config or ChunkingConfig()
+    if chunking_config.strategy is ChunkingStrategy.STRUCTURAL:
+        from repomind.ingestion.structural import chunk_python_source
+
+        return chunk_python_source(source_file, chunking_config)
+    return _line_chunks(source_file, chunking_config)
 
 
 def chunk_repository(

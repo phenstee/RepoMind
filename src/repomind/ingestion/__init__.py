@@ -9,6 +9,8 @@ from repomind.ingestion.language import (
 )
 from repomind.ingestion.models import (
     ChunkingConfig,
+    ChunkingStrategy,
+    ChunkKind,
     CodeChunk,
     IngestionConfig,
     RepositorySnapshot,
@@ -30,7 +32,9 @@ from repomind.ingestion.repository import (
 __all__ = [
     "LANGUAGE_BY_EXTENSION",
     "SUPPORTED_EXTENSIONS",
+    "ChunkKind",
     "ChunkingConfig",
+    "ChunkingStrategy",
     "CodeChunk",
     "IngestionConfig",
     "InvalidRepositoryRootError",

@@ -31,6 +31,7 @@ _NUMBERS = frozenset(
         "attempts",
         "retries",
         "candidate_count",
+        "top_k",
         "context_chunk_count",
         "context_chars",
         "citation_count",
@@ -61,6 +62,7 @@ _NUMBERS = frozenset(
 _BOOLEANS = frozenset(
     {
         "reranking_enabled",
+        "ann_enabled",
         "insufficient_evidence",
         "passed",
         "timed_out",
@@ -79,6 +81,8 @@ _LABELS = frozenset(
         "failure_kind",
         "mutation_type",
         "strategy",
+        "chunking_strategy",
+        "retrieval_mode",
         "action",
         "domain_status",
         "job_type",
@@ -98,7 +102,9 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
     "job.cancellation_deferred": frozenset({"job_type", "control", "workspace_revision"}),
     "index.started": frozenset({"repository_id"}),
     "ingestion.completed": frozenset({"repository_id", "file_count", "total_size_bytes"}),
-    "chunking.completed": frozenset({"repository_id", "chunk_count"}),
+    "chunking.completed": frozenset(
+        {"repository_id", "chunk_count", "chunking_strategy"}
+    ),
     "embedding.started": frozenset({"repository_id", "chunk_count"}),
     "embedding.completed": frozenset({"repository_id", "chunk_count", "embedding_model"}),
     "persistence.completed": frozenset({"repository_id", "file_count", "chunk_count"}),
@@ -107,9 +113,30 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
     "model.completed": frozenset({"model", "operation", "schema", "output_chars"}),
     "model.failed": frozenset({"operation", "failure_kind"}),
     "model.usage": frozenset({"attempts", "retries"}),
-    "retrieval.started": frozenset({"strategy", "reranking_enabled"}),
-    "retrieval.completed": frozenset({"strategy", "reranking_enabled", "candidate_count"}),
-    "retrieval.failed": frozenset({"strategy", "reranking_enabled", "failure_kind"}),
+    "retrieval.started": frozenset(
+        {"strategy", "reranking_enabled", "retrieval_mode", "ann_enabled", "top_k"}
+    ),
+    "retrieval.completed": frozenset(
+        {
+            "strategy",
+            "reranking_enabled",
+            "retrieval_mode",
+            "ann_enabled",
+            "top_k",
+            "candidate_count",
+            "chunking_strategy",
+        }
+    ),
+    "retrieval.failed": frozenset(
+        {
+            "strategy",
+            "reranking_enabled",
+            "retrieval_mode",
+            "ann_enabled",
+            "top_k",
+            "failure_kind",
+        }
+    ),
     "rag.context": frozenset({"context_chunk_count", "context_chars"}),
     "rag.answer": frozenset({"citation_count", "insufficient_evidence", "answer_chars"}),
     "agent.decision": frozenset({"iteration", "action", "tool", "answer_chars"}),

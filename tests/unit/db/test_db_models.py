@@ -3,7 +3,12 @@
 import pytest
 
 from repomind.db import PersistenceError
-from repomind.db.models import CodeChunkRecord, RepositoryFileRecord
+from repomind.db.models import (
+    HNSW_EMBEDDING_DIMENSIONS,
+    HNSW_INDEX_NAME,
+    CodeChunkRecord,
+    RepositoryFileRecord,
+)
 from repomind.db.repositories import _embedded_chunk_from_record
 
 
@@ -15,6 +20,8 @@ def test_vector_column_is_dimension_flexible_but_metadata_checked() -> None:
 
     assert embedding_type.dim is None
     assert "ck_code_chunks_embedding_metadata" in constraint_names
+    assert HNSW_EMBEDDING_DIMENSIONS == 1536
+    assert HNSW_INDEX_NAME == "ix_code_chunks_embedding_hnsw_1536_cosine"
 
 
 def test_foreign_keys_cascade_on_repository_deletion() -> None:

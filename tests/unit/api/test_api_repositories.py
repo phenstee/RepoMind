@@ -11,6 +11,7 @@ from repomind.api import create_app
 from repomind.api.errors import APIError
 from repomind.api.services.repositories import WorkspacePolicy
 from repomind.config import Settings
+from repomind.ingestion import ChunkingConfig, ChunkingStrategy, ChunkKind
 from repomind.jobs import JobCancellationRequested
 
 
@@ -178,6 +179,23 @@ def test_index_composes_real_ingestion_chunks_and_fake_embeddings(api):
     assert files["files"][0]["relative_path"] == "app.py"
     assert "content" not in files["files"][0]
     assert api.client.get("/api/v1/repositories/1/files?offset=1").json()["files"] == []
+
+
+def test_index_service_can_select_structural_chunking_without_api_redesign(api):
+    service = api.app.state.container.get().repositories
+    service.chunking_config = ChunkingConfig(
+        strategy=ChunkingStrategy.STRUCTURAL,
+        overlap_lines=0,
+    )
+
+    response = api.client.post("/api/v1/repositories/1/index")
+
+    assert response.status_code == 200
+    chunk = api.store.chunks[1][0].chunk
+    assert chunk.chunking_strategy is ChunkingStrategy.STRUCTURAL
+    assert chunk.chunk_kind is ChunkKind.FUNCTION
+    assert chunk.qualified_symbol_name == "value"
+    assert chunk.content == "def value():\r\n    return 1\r\n"
 
 
 def test_failed_embedding_preserves_index_and_size_limits_prevent_calls(api, monkeypatch):

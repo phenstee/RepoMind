@@ -25,7 +25,13 @@ from repomind.db import (
     postgres_hybrid_search,
 )
 from repomind.db.models import CodeChunkRecord, RepositoryFileRecord, RepositoryRecord
-from repomind.ingestion import CodeChunk, RepositorySnapshot, SourceFile
+from repomind.ingestion import (
+    ChunkingStrategy,
+    ChunkKind,
+    CodeChunk,
+    RepositorySnapshot,
+    SourceFile,
+)
 from repomind.rag import (
     answer_repository_question_with_retriever,
     build_repository_context,
@@ -222,6 +228,31 @@ def test_embedded_chunk_round_trip_preserves_domain_values(db_session: Session) 
     loaded = load_embedded_chunks(db_session, repository.id)
 
     assert loaded == embedded
+
+
+def test_structural_metadata_round_trip_and_strategy_replacement(db_session: Session) -> None:
+    source = _source("src/example.py", "def run():\n    return 1\n")
+    repository = persist_repository_snapshot(
+        db_session,
+        _snapshot(_name("structural-round-trip"), source),
+    )
+    line_chunk = _chunk("src/example.py", source.content, chunk_index=0)
+    persist_chunks(db_session, repository.id, [line_chunk])
+    structural_chunk = line_chunk.model_copy(
+        update={
+            "chunking_strategy": ChunkingStrategy.STRUCTURAL,
+            "chunk_kind": ChunkKind.METHOD,
+            "symbol_name": "run",
+            "qualified_symbol_name": "Service.run",
+            "parent_symbol": "Service",
+        }
+    )
+
+    persist_chunks(db_session, repository.id, [structural_chunk])
+    loaded = load_chunks(db_session, repository.id)
+
+    assert loaded == [structural_chunk]
+    assert db_session.scalar(select(func.count()).select_from(CodeChunkRecord)) == 1
 
 
 def test_empty_stored_chunk_index_returns_no_search_results(db_session: Session) -> None:

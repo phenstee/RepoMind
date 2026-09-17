@@ -1,7 +1,11 @@
 """Semantic, lexical, and hybrid repository retrieval primitives."""
 
 from repomind.retrieval.bm25 import BM25Error, BM25Index
-from repomind.retrieval.embeddings import EmbeddingError, OpenAIEmbeddingClient
+from repomind.retrieval.embeddings import (
+    EmbeddingError,
+    OpenAIEmbeddingClient,
+    embedding_text_for_chunk,
+)
 from repomind.retrieval.hybrid import (
     DEFAULT_CANDIDATE_MULTIPLIER,
     DEFAULT_RRF_K,
@@ -17,12 +21,14 @@ from repomind.retrieval.models import (
     EmbeddedChunk,
     EmbeddingBatchResult,
     EmbeddingConfig,
+    EmbeddingTextStrategy,
     EmbeddingUsage,
     EmbeddingVector,
     HybridSearchResult,
     RankedChunk,
     RerankedSearchResult,
     RerankingConfig,
+    SemanticSearchMode,
     SemanticSearchResult,
 )
 from repomind.retrieval.reranking import (
@@ -53,6 +59,7 @@ __all__ = [
     "EmbeddingConfig",
     "EmbeddingError",
     "EmbeddingProvider",
+    "EmbeddingTextStrategy",
     "EmbeddingUsage",
     "EmbeddingVector",
     "HybridSearchError",
@@ -66,10 +73,12 @@ __all__ = [
     "RerankingError",
     "RetrievalError",
     "SemanticSearchError",
+    "SemanticSearchMode",
     "SemanticSearchResult",
     "SimilarityError",
     "chunk_identity",
     "cosine_similarity",
+    "embedding_text_for_chunk",
     "hybrid_search",
     "hybrid_search_with_reranking",
     "rank_by_similarity",

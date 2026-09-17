@@ -10,6 +10,7 @@ from repomind.retrieval import (
     EmbeddingVector,
     HybridSearchError,
     HybridSearchResult,
+    SemanticSearchMode,
     reciprocal_rank_fusion,
 )
 
@@ -36,8 +37,9 @@ def postgres_hybrid_search(
     semantic_candidates: int | None = None,
     lexical_candidates: int | None = None,
     rrf_k: float = DEFAULT_RRF_K,
+    semantic_mode: SemanticSearchMode = SemanticSearchMode.EXACT,
 ) -> list[HybridSearchResult]:
-    """Combine exact pgvector ranking with BM25 rebuilt from persisted chunks."""
+    """Combine selected pgvector ranking with BM25 rebuilt from persisted chunks."""
 
     if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k <= 0:
         raise HybridSearchError("top_k must be a positive integer")
@@ -60,6 +62,7 @@ def postgres_hybrid_search(
         repository_id,
         query_embedding,
         top_k=semantic_depth,
+        mode=semantic_mode,
     )
     lexical_results = BM25Index.from_chunks(chunks).search(
         query,
