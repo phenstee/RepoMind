@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -66,6 +67,7 @@ def _run_fixed_verifier(
     paths: list[Path],
     timeout_seconds: int,
     max_output_chars: int,
+    environment: dict[str, str] | None = None,
 ) -> VerificationOutput:
     started = time.monotonic()
     timed_out = False
@@ -82,6 +84,7 @@ def _run_fixed_verifier(
                 timeout=timeout_seconds,
                 check=False,
                 shell=False,
+                env=environment,
             )
             exit_code = completed.returncode
         except subprocess.TimeoutExpired:
@@ -133,13 +136,17 @@ def run_tests(
         f"--maxfail={max_failures}",
         "-q",
     ]
-    output = _run_fixed_verifier(
-        command,
-        context=context,
-        paths=paths,
-        timeout_seconds=timeout,
-        max_output_chars=resolved_config.max_verification_output_chars,
-    )
+    environment = os.environ.copy()
+    with tempfile.TemporaryDirectory(prefix="repomind-pycache-") as pycache_prefix:
+        environment["PYTHONPYCACHEPREFIX"] = pycache_prefix
+        output = _run_fixed_verifier(
+            command,
+            context=context,
+            paths=paths,
+            timeout_seconds=timeout,
+            max_output_chars=resolved_config.max_verification_output_chars,
+            environment=environment,
+        )
     return RunTestsOutput.model_validate(output.model_dump())
 
 

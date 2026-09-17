@@ -1,6 +1,7 @@
 """Tests for fixed, bounded pytest and Ruff verification tools."""
 
 import json
+import py_compile
 import subprocess
 from pathlib import Path
 
@@ -38,6 +39,40 @@ def test_run_tests_reports_passing_and_failing_checks_as_results(tmp_path: Path)
     assert not failed.passed and failed.exit_code != 0 and not failed.timed_out
     assert "failed" in (failed.stdout + failed.stderr).casefold()
     assert json.loads(failed.model_dump_json())["paths"] == ["tests"]
+
+
+def test_run_tests_does_not_reuse_stale_same_size_module_bytecode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("PYTHONPYCACHEPREFIX", raising=False)
+    module = tmp_path / "sample.py"
+    old_source = "def value():\n    return 1\n"
+    new_source = "def value():\n    return 2\n"
+    assert len(old_source) == len(new_source)
+    module.write_text(old_source, encoding="utf-8")
+    _write_test(
+        tmp_path,
+        "from sample import value\n\ndef test_value():\n    assert value() == 2\n",
+    )
+    context = ToolContext(repository_root=tmp_path)
+    arguments = RunTestsInput(paths=["tests/test_sample.py"])
+
+    initial = run_tests(context, arguments)
+    assert not initial.passed
+
+    stale_cache = Path(
+        py_compile.compile(
+            str(module),
+            doraise=True,
+            invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+        )
+    )
+    assert stale_cache.is_file()
+    module.write_text(new_source, encoding="utf-8")
+
+    corrected = run_tests(context, arguments)
+
+    assert corrected.passed
 
 
 def test_run_tests_bounds_captured_output(tmp_path: Path) -> None:
@@ -100,6 +135,9 @@ def test_run_tests_uses_argument_array_and_never_shell(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _write_test(tmp_path, "def test_value():\n    assert True\n")
+    inherited_cache = tmp_path / "inherited-cache"
+    monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(inherited_cache))
+    monkeypatch.setenv("REPOMIND_TEST_ENVIRONMENT_SENTINEL", "preserved")
     captured: dict[str, object] = {}
 
     def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -118,6 +156,12 @@ def test_run_tests_uses_argument_array_and_never_shell(
     assert command[1:3] == ["-m", "pytest"]
     assert command[-2:] == ["--maxfail=2", "-q"]
     assert captured["shell"] is False
+    environment = captured["env"]
+    assert isinstance(environment, dict)
+    isolated_cache = Path(environment["PYTHONPYCACHEPREFIX"])
+    assert isolated_cache != inherited_cache
+    assert environment["REPOMIND_TEST_ENVIRONMENT_SENTINEL"] == "preserved"
+    assert not isolated_cache.exists()
     assert output.passed
 
 
