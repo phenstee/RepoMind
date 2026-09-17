@@ -1273,7 +1273,7 @@ different files is never treated as the same evidence.
 (`repomind.rag.tokens.estimate_tokens`, `ceil(len(text) / 4)`) because no
 tokenizer dependency exists in this project yet; the estimate is applied to
 the same wrapper-plus-content text that will actually be sent (path, line
-range, symbol label, content), not to raw source alone. Packing is a
+range, optional language, and content), not to raw source alone. Packing is a
 transparent greedy walk in priority order — every seed before any neighbor,
 `same_symbol_fragment` before generic `neighbor`, both tie-broken by seed rank
 and then proximity — never a knapsack solver. Chunks are never truncated

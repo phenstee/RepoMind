@@ -14,7 +14,9 @@ _CONTEXT_OPEN = "<repository_context trust=\"untrusted-data\">\n"
 _CONTEXT_CLOSE = "</repository_context>"
 
 
-def _format_source(source: ContextSource) -> str:
+def format_source_block(source: ContextSource) -> str:
+    """Format one source exactly as it appears inside repository context."""
+
     chunk = source.chunk
     language = (
         f"<language>{chunk.language}</language>\n" if chunk.language is not None else ""
@@ -62,7 +64,7 @@ def build_repository_context(
     blocks: list[str] = []
     for result in results:
         source = ContextSource(source_id=f"S{len(sources) + 1}", chunk=result.chunk)
-        block = _format_source(source)
+        block = format_source_block(source)
         candidate = _assemble_context([*blocks, block])
         if blocks and len(candidate) > max_context_chars:
             break

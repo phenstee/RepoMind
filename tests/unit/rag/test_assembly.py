@@ -9,7 +9,9 @@ from repomind.rag.assembly import (
     InMemoryNeighborLoader,
     assemble_context,
 )
+from repomind.rag.context import build_repository_context, format_source_block
 from repomind.rag.models import ContextAssemblyConfig
+from repomind.rag.tokens import estimate_tokens
 from repomind.retrieval import SemanticSearchResult
 
 
@@ -161,6 +163,54 @@ def test_two_seeds_expanding_to_the_same_neighbor_keep_it_once() -> None:
     assert result.deduplicated_count == 1
 
 
+def test_duplicate_neighbor_retains_best_same_symbol_provenance() -> None:
+    higher_ranked_unrelated_seed = _fragment_chunk(
+        "src/service.py",
+        1,
+        fragment_index=1,
+        fragment_count=1,
+        qualified_symbol_name="AuditService.record",
+        start_line=20,
+        content="audit fragment\n",
+    )
+    shared_neighbor = _fragment_chunk(
+        "src/service.py",
+        2,
+        fragment_index=1,
+        fragment_count=2,
+        qualified_symbol_name="UserService.login",
+        start_line=40,
+        content="login fragment one\n",
+    )
+    lower_ranked_same_symbol_seed = _fragment_chunk(
+        "src/service.py",
+        3,
+        fragment_index=2,
+        fragment_count=2,
+        qualified_symbol_name="UserService.login",
+        start_line=60,
+        content="login fragment two\n",
+    )
+    seeds = [
+        _seed(higher_ranked_unrelated_seed, 1),
+        _seed(lower_ranked_same_symbol_seed, 2),
+    ]
+    loader = InMemoryNeighborLoader(
+        [higher_ranked_unrelated_seed, shared_neighbor, lower_ranked_same_symbol_seed]
+    )
+
+    result = assemble_context(
+        seeds,
+        loader,
+        ContextAssemblyConfig(strategy=ContextStrategy.EXPANDED, neighbor_radius=1),
+    )
+
+    matches = [chunk for chunk in result.chunks if chunk.chunk == shared_neighbor]
+    assert len(matches) == 1
+    assert matches[0].origin is ContextOrigin.SAME_SYMBOL_FRAGMENT
+    assert result.deduplicated_count == 1
+
+
 def test_neighbor_equal_to_another_seed_is_kept_once_as_seed() -> None:
     chunks = _line_file("src/a.py", 3)
     seeds = [_seed(chunks[0], 1), _seed(chunks[1], 2)]
@@ -227,6 +277,28 @@ def test_oversized_first_chunk_is_still_included() -> None:
 
     assert result.packed_count == 1
     assert result.estimated_tokens > config.budget_tokens
+
+
+def test_token_estimate_uses_the_exact_prompt_source_block() -> None:
+    chunk = _fragment_chunk(
+        "src/service.py",
+        0,
+        fragment_index=1,
+        fragment_count=1,
+        qualified_symbol_name="UserService.login",
+        start_line=1,
+        content="def login():\n    return True\n",
+    )
+    result = assemble_context(
+        [_seed(chunk, 1)],
+        None,
+        ContextAssemblyConfig(strategy=ContextStrategy.EXPANDED, neighbor_radius=0),
+    )
+    context = build_repository_context(result.chunks)
+    source_block = format_source_block(context.sources[0])
+
+    assert source_block in context.text
+    assert result.chunks[0].estimated_tokens == estimate_tokens(source_block)
 
 
 def test_expanded_requires_neighbor_loader() -> None:

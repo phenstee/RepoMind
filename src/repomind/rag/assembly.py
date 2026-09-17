@@ -11,11 +11,13 @@ from collections.abc import Sequence
 from typing import Protocol
 
 from repomind.ingestion import ChunkKind, CodeChunk
+from repomind.rag.context import format_source_block
 from repomind.rag.models import (
     AssembledContextChunk,
     AssembledContextResult,
     ContextAssemblyConfig,
     ContextOrigin,
+    ContextSource,
     ContextStrategy,
 )
 from repomind.rag.tokens import estimate_tokens
@@ -107,25 +109,10 @@ class _Candidate:
         self.identity: ChunkIdentity = chunk_identity(chunk)
 
 
-def _format_block(candidate_chunk: CodeChunk, source_id: str) -> str:
-    # A cheap, stable proxy for the eventual prompt block so budget accounting
-    # reflects wrapper overhead (path/lines/symbol), not raw source text alone.
-    language = f"<language>{candidate_chunk.language}</language>\n" if candidate_chunk.language else ""
-    symbol = (
-        f"<symbol>{candidate_chunk.qualified_symbol_name}</symbol>\n"
-        if candidate_chunk.qualified_symbol_name
-        else ""
-    )
-    return (
-        f'<source id="{source_id}">\n'
-        f"<path>{candidate_chunk.relative_path.as_posix()}</path>\n"
-        f"<lines>{candidate_chunk.start_line}-{candidate_chunk.end_line}</lines>\n"
-        f"{language}{symbol}"
-        '<content trust="untrusted-data" encoding="verbatim">\n'
-        f"{candidate_chunk.content}"
-        "</content>\n"
-        "</source>"
-    )
+def _candidate_priority(candidate: _Candidate) -> tuple[int, int, int]:
+    if candidate.seed_rank is None:
+        raise ContextAssemblyError("neighbor candidate must retain its originating seed rank")
+    return (_ORIGIN_PRIORITY[candidate.origin], candidate.seed_rank, candidate.distance)
 
 
 def assemble_context(
@@ -161,6 +148,7 @@ def assemble_context(
     expanded_candidate_count = 0
     deduplicated_count = 0
     neighbor_pool: list[_Candidate] = []
+    neighbor_by_identity: dict[ChunkIdentity, _Candidate] = {}
 
     if config.strategy is ContextStrategy.EXPANDED and config.neighbor_radius > 0 and seed_list:
         if neighbor_loader is None:
@@ -192,31 +180,40 @@ def assemble_context(
                     continue
                 expanded_candidate_count += 1
                 identity = chunk_identity(neighbor_chunk)
+                candidate = _Candidate(
+                    neighbor_chunk,
+                    _classify_origin(seed_chunk, neighbor_chunk),
+                    seed.rank,
+                    abs(offset),
+                )
                 if identity in included_identities:
                     deduplicated_count += 1
+                    existing_candidate = neighbor_by_identity.get(identity)
+                    if (
+                        existing_candidate is not None
+                        and _candidate_priority(candidate) < _candidate_priority(existing_candidate)
+                    ):
+                        existing_candidate.origin = candidate.origin
+                        existing_candidate.seed_rank = candidate.seed_rank
+                        existing_candidate.distance = candidate.distance
                     continue
                 if any(_is_contained(neighbor_chunk, existing) for existing in included_chunks):
                     deduplicated_count += 1
                     continue
                 included_identities.add(identity)
                 included_chunks.append(neighbor_chunk)
-                neighbor_pool.append(
-                    _Candidate(
-                        neighbor_chunk,
-                        _classify_origin(seed_chunk, neighbor_chunk),
-                        seed.rank,
-                        abs(offset),
-                    )
-                )
+                neighbor_by_identity[identity] = candidate
+                neighbor_pool.append(candidate)
 
-    neighbor_pool.sort(key=lambda c: (_ORIGIN_PRIORITY[c.origin], c.seed_rank, c.distance, c.identity))
+    neighbor_pool.sort(key=lambda candidate: (*_candidate_priority(candidate), candidate.identity))
     ordered_candidates = seed_candidates + neighbor_pool
 
     packed: list[AssembledContextChunk] = []
     estimated_tokens = 0
     dropped_for_budget_count = 0
-    for position, candidate in enumerate(ordered_candidates, start=1):
-        block = _format_block(candidate.chunk, f"S{position}")
+    for candidate in ordered_candidates:
+        source = ContextSource(source_id=f"S{len(packed) + 1}", chunk=candidate.chunk)
+        block = format_source_block(source)
         tokens = estimate_tokens(block)
         if packed and estimated_tokens + tokens > config.budget_tokens:
             dropped_for_budget_count += 1
