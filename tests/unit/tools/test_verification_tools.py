@@ -1,6 +1,7 @@
 """Tests for fixed, bounded pytest and Ruff verification tools."""
 
 import json
+import os
 import py_compile
 import subprocess
 from pathlib import Path
@@ -75,6 +76,52 @@ def test_run_tests_does_not_reuse_stale_same_size_module_bytecode(
     assert corrected.passed
 
 
+def test_run_tests_child_receives_only_allowlisted_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-parent-secret")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://parent-secret")
+    monkeypatch.setenv("REPOMIND_TEST_DATABASE_URL", "postgresql://test-secret")
+    monkeypatch.setenv("REDIS_URL", "redis://parent-secret")
+    monkeypatch.setenv("REDIS_TEST_URL", "redis://test-secret")
+    monkeypatch.setenv("REPOMIND_UNKNOWN_PARENT_SECRET", "unknown-secret")
+    monkeypatch.setenv("PYTHONIOENCODING", "utf-8")
+    assert os.environ.get("PATH")
+
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "conftest.py").write_text(
+        """import os
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_verifier_environment():
+    blocked = {
+        \"OPENAI_API_KEY\",
+        \"DATABASE_URL\",
+        \"REPOMIND_TEST_DATABASE_URL\",
+        \"REDIS_URL\",
+        \"REDIS_TEST_URL\",
+        \"REPOMIND_UNKNOWN_PARENT_SECRET\",
+    }
+    assert blocked.isdisjoint(os.environ)
+    assert os.environ[\"PYTHONIOENCODING\"] == \"utf-8\"
+    assert os.environ.get(\"PATH\")
+""",
+        encoding="utf-8",
+    )
+    _write_test(tmp_path, "def test_child_environment():\n    assert True\n")
+
+    output = run_tests(
+        ToolContext(repository_root=tmp_path),
+        RunTestsInput(paths=["tests/test_sample.py"]),
+    )
+
+    assert output.passed, output.stdout + output.stderr
+
+
 def test_run_tests_bounds_captured_output(tmp_path: Path) -> None:
     _write_test(
         tmp_path,
@@ -137,7 +184,7 @@ def test_run_tests_uses_argument_array_and_never_shell(
     _write_test(tmp_path, "def test_value():\n    assert True\n")
     inherited_cache = tmp_path / "inherited-cache"
     monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(inherited_cache))
-    monkeypatch.setenv("REPOMIND_TEST_ENVIRONMENT_SENTINEL", "preserved")
+    monkeypatch.setenv("REPOMIND_TEST_ENVIRONMENT_SENTINEL", "must-not-pass-through")
     captured: dict[str, object] = {}
 
     def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -160,9 +207,43 @@ def test_run_tests_uses_argument_array_and_never_shell(
     assert isinstance(environment, dict)
     isolated_cache = Path(environment["PYTHONPYCACHEPREFIX"])
     assert isolated_cache != inherited_cache
-    assert environment["REPOMIND_TEST_ENVIRONMENT_SENTINEL"] == "preserved"
+    assert "REPOMIND_TEST_ENVIRONMENT_SENTINEL" not in environment
     assert not isolated_cache.exists()
     assert output.passed
+
+
+def test_pytest_and_ruff_use_the_same_allowlisted_base_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_test(tmp_path, "def test_value():\n    assert True\n")
+    source = tmp_path / "clean.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-parent-secret")
+    monkeypatch.setenv("REPOMIND_ARBITRARY_SECRET", "private")
+    monkeypatch.setenv("PYTHONUTF8", "1")
+    captured_environments: list[dict[str, str]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        environment = kwargs.get("env")
+        assert isinstance(environment, dict)
+        captured_environments.append(environment.copy())
+        assert kwargs["shell"] is False
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr("repomind.tools.verification.subprocess.run", fake_run)
+    context = ToolContext(repository_root=tmp_path)
+
+    assert run_tests(context, RunTestsInput()).passed
+    assert run_ruff(context, RunRuffInput(paths=["clean.py"])).passed
+
+    pytest_environment, ruff_environment = captured_environments
+    pycache_prefix = pytest_environment.pop("PYTHONPYCACHEPREFIX")
+    assert pycache_prefix
+    assert pytest_environment == ruff_environment
+    assert pytest_environment["PYTHONUTF8"] == "1"
+    assert pytest_environment.get("PATH")
+    assert "OPENAI_API_KEY" not in pytest_environment
+    assert "REPOMIND_ARBITRARY_SECRET" not in pytest_environment
 
 
 def test_verifier_startup_failure_is_a_tool_error(

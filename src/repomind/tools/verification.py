@@ -22,6 +22,45 @@ from repomind.tools.models import (
 )
 from repomind.tools.registry import ToolExecutionError
 
+_VERIFICATION_ENVIRONMENT_ALLOWLIST = (
+    # Executable discovery and Windows process startup.
+    "PATH",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    # Writable temporary locations.
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    # Standard user/config locations used by Python and developer tooling.
+    "HOME",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "USERPROFILE",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "VIRTUAL_ENV",
+    # Explicit Python text and locale behavior.
+    "PYTHONUTF8",
+    "PYTHONIOENCODING",
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "LC_CTYPE",
+)
+
+
+def _verification_environment() -> dict[str, str]:
+    """Build the minimal non-secret environment shared by verifier children."""
+
+    return {
+        name: value
+        for name in _VERIFICATION_ENVIRONMENT_ALLOWLIST
+        if (value := os.environ.get(name)) is not None
+    }
+
 
 def _validated_paths(
     context: ToolContext,
@@ -136,7 +175,7 @@ def run_tests(
         f"--maxfail={max_failures}",
         "-q",
     ]
-    environment = os.environ.copy()
+    environment = _verification_environment()
     with tempfile.TemporaryDirectory(prefix="repomind-pycache-") as pycache_prefix:
         environment["PYTHONPYCACHEPREFIX"] = pycache_prefix
         output = _run_fixed_verifier(
@@ -177,5 +216,6 @@ def run_ruff(
         paths=paths,
         timeout_seconds=timeout,
         max_output_chars=resolved_config.max_verification_output_chars,
+        environment=_verification_environment(),
     )
     return RunRuffOutput.model_validate(output.model_dump())
