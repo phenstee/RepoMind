@@ -1415,8 +1415,10 @@ functions literally named `run` still returns at most
 
 **PostgreSQL**: `find_symbol_candidates` is one bounded, tier-ordered,
 repository-scoped SQL query (a `CASE` expression computes the tier, the join
-to `repository_files` enforces isolation, `LIMIT` bounds the row count) —
-never a full-repository chunk scan. Two plain B-tree indexes
+to `repository_files` enforces isolation, and a `row_number()` window selects
+the canonical first chunk per path/symbol before the outer `LIMIT` applies) —
+never a full-repository Python scan and never vulnerable to one fragmented
+symbol starving later distinct matches. Two plain B-tree indexes
 (`ix_code_chunks_symbol_name`, `ix_code_chunks_qualified_symbol_name`, added
 in migration `20260918_01`) support it; no pgvector, FTS, or trigram
 infrastructure was introduced for string identifiers. BM25 fusion still
@@ -2568,8 +2570,9 @@ uv run python scripts/inspect_repository.py . --chunks
   original query always reaches semantic and BM25 retrieval unmodified;
   detected identifiers are a parallel, additional signal.
 - **Symbol SQL lookup is bounded and repository-scoped by construction.** One
-  `CASE`-ordered, `LIMIT`-bounded query joined through `repository_files`,
-  never a full chunk scan and never cross-repository.
+  query joined through `repository_files` selects a canonical row per distinct
+  path/symbol with `row_number()`, then applies tier/path/chunk ordering and
+  `LIMIT`; it never scans repository chunks in Python or crosses repositories.
 - **RRF was generalized, not replaced.** Reusing the existing fusion mechanism
   for a third source avoids a second, parallel ranking algorithm and comes with
   a regression test proving historical two-source behavior is unchanged.

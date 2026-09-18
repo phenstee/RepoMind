@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import case, cast, distinct, false, or_, select, text, tuple_
+from sqlalchemy import case, cast, distinct, false, func, or_, select, text, tuple_
 from sqlalchemy.orm import Session
 
 from repomind.db.models import (
@@ -433,9 +433,6 @@ def load_neighbor_chunks(
     ]
 
 
-_SYMBOL_FRAGMENT_OVERFETCH = 4
-
-
 def find_symbol_candidates(
     session: Session,
     repository_id: int,
@@ -445,12 +442,10 @@ def find_symbol_candidates(
 ) -> list[SymbolSearchResult]:
     """Match persisted structural symbol metadata for one repository.
 
-    One bounded, tier-ordered SQL query, never a full-repository chunk scan:
-    the tier is computed in SQL with ``CASE`` and only the matching rows are
-    fetched, capped by ``LIMIT``. Multiple fragments of one symbol in one
-    file collapse to their first fragment in Python (over a result set
-    already bounded by the SQL ``LIMIT``, not the repository size) so one
-    oversized function cannot consume the whole candidate budget.
+    One bounded, tier-ordered SQL query, never a full-repository Python scan:
+    a window selects the canonical first chunk for each repository/path/symbol
+    identity before the outer ``LIMIT`` is applied. Thus oversized fragmented
+    symbols cannot starve later distinct matches from the candidate budget.
     """
 
     if (
@@ -480,37 +475,81 @@ def find_symbol_candidates(
         (CodeChunkRecord.symbol_name.in_(weak_texts), 2),
         else_=None,
     ).label("tier")
+    matched_identifier_expression = case(
+        (
+            CodeChunkRecord.qualified_symbol_name.in_(qualified_texts),
+            CodeChunkRecord.qualified_symbol_name,
+        ),
+        (CodeChunkRecord.symbol_name.in_(strong_texts), CodeChunkRecord.symbol_name),
+        (CodeChunkRecord.symbol_name.in_(weak_texts), CodeChunkRecord.symbol_name),
+        else_=None,
+    ).label("matched_identifier")
     match_condition = or_(
         CodeChunkRecord.qualified_symbol_name.in_(qualified_texts) if qualified_texts else false(),
         CodeChunkRecord.symbol_name.in_(strong_texts) if strong_texts else false(),
         CodeChunkRecord.symbol_name.in_(weak_texts) if weak_texts else false(),
     )
 
-    rows = session.execute(
+    canonical_rows = (
         select(
-            RepositoryFileRecord.relative_path,
-            RepositoryFileRecord.language,
-            CodeChunkRecord.chunk_index,
-            CodeChunkRecord.start_line,
-            CodeChunkRecord.end_line,
-            CodeChunkRecord.content,
-            CodeChunkRecord.chunking_strategy,
-            CodeChunkRecord.chunk_kind,
-            CodeChunkRecord.symbol_name,
-            CodeChunkRecord.qualified_symbol_name,
-            CodeChunkRecord.parent_symbol,
-            CodeChunkRecord.fragment_index,
-            CodeChunkRecord.fragment_count,
+            RepositoryFileRecord.relative_path.label("relative_path"),
+            RepositoryFileRecord.language.label("language"),
+            CodeChunkRecord.chunk_index.label("chunk_index"),
+            CodeChunkRecord.start_line.label("start_line"),
+            CodeChunkRecord.end_line.label("end_line"),
+            CodeChunkRecord.content.label("content"),
+            CodeChunkRecord.chunking_strategy.label("chunking_strategy"),
+            CodeChunkRecord.chunk_kind.label("chunk_kind"),
+            CodeChunkRecord.symbol_name.label("symbol_name"),
+            CodeChunkRecord.qualified_symbol_name.label("qualified_symbol_name"),
+            CodeChunkRecord.parent_symbol.label("parent_symbol"),
+            CodeChunkRecord.fragment_index.label("fragment_index"),
+            CodeChunkRecord.fragment_count.label("fragment_count"),
             tier_expression,
+            matched_identifier_expression,
+            func.row_number()
+            .over(
+                partition_by=(
+                    RepositoryFileRecord.repository_id,
+                    RepositoryFileRecord.relative_path,
+                    func.coalesce(
+                        CodeChunkRecord.qualified_symbol_name,
+                        CodeChunkRecord.symbol_name,
+                    ),
+                ),
+                order_by=(CodeChunkRecord.chunk_index, CodeChunkRecord.id),
+            )
+            .label("symbol_row_number"),
         )
         .join(RepositoryFileRecord)
         .where(RepositoryFileRecord.repository_id == repository_id, match_condition)
-        .order_by(
-            tier_expression,
-            RepositoryFileRecord.relative_path,
-            CodeChunkRecord.chunk_index,
+        .subquery()
+    )
+    rows = session.execute(
+        select(
+            canonical_rows.c.relative_path,
+            canonical_rows.c.language,
+            canonical_rows.c.chunk_index,
+            canonical_rows.c.start_line,
+            canonical_rows.c.end_line,
+            canonical_rows.c.content,
+            canonical_rows.c.chunking_strategy,
+            canonical_rows.c.chunk_kind,
+            canonical_rows.c.symbol_name,
+            canonical_rows.c.qualified_symbol_name,
+            canonical_rows.c.parent_symbol,
+            canonical_rows.c.fragment_index,
+            canonical_rows.c.fragment_count,
+            canonical_rows.c.tier,
+            canonical_rows.c.matched_identifier,
         )
-        .limit(limit * _SYMBOL_FRAGMENT_OVERFETCH)
+        .where(canonical_rows.c.symbol_row_number == 1)
+        .order_by(
+            canonical_rows.c.tier,
+            canonical_rows.c.relative_path,
+            canonical_rows.c.chunk_index,
+        )
+        .limit(limit)
     ).all()
 
     tiers = (
@@ -518,7 +557,6 @@ def find_symbol_candidates(
         SymbolMatchTier.SIMPLE_SYMBOL_STRONG,
         SymbolMatchTier.SIMPLE_SYMBOL_WEAK,
     )
-    seen_symbols: set[tuple[str, str]] = set()
     results: list[SymbolSearchResult] = []
     for row in rows:
         (
@@ -536,13 +574,10 @@ def find_symbol_candidates(
             fragment_index,
             fragment_count,
             tier_value,
+            matched_identifier,
         ) = row
-        if tier_value is None or len(results) >= limit:
+        if tier_value is None or matched_identifier is None:
             continue
-        dedup_key = (relative_path, qualified_symbol_name or symbol_name or "")
-        if dedup_key in seen_symbols:
-            continue
-        seen_symbols.add(dedup_key)
         results.append(
             SymbolSearchResult(
                 chunk=CodeChunk(
@@ -562,7 +597,7 @@ def find_symbol_candidates(
                 ),
                 rank=len(results) + 1,
                 match_tier=tiers[tier_value],
-                matched_identifier=qualified_symbol_name or symbol_name,
+                matched_identifier=matched_identifier,
             )
         )
     return results

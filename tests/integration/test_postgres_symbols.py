@@ -25,7 +25,12 @@ from repomind.ingestion import (
 )
 from repomind.rag import ContextAssemblyConfig, ContextStrategy, assemble_context
 from repomind.rag.assembly import InMemoryNeighborLoader
-from repomind.retrieval import EmbeddedChunk, EmbeddingVector, extract_identifier_candidates
+from repomind.retrieval import (
+    EmbeddedChunk,
+    EmbeddingVector,
+    extract_identifier_candidates,
+    symbol_search,
+)
 
 pytestmark = pytest.mark.postgres
 
@@ -78,6 +83,62 @@ def _structural_source() -> SourceFile:
     )
 
 
+def _persist_manual_chunks(
+    session: Session, prefix: str, chunks: list[CodeChunk]
+) -> int:
+    paths = sorted({chunk.relative_path for chunk in chunks}, key=lambda path: path.as_posix())
+    sources = [
+        SourceFile(
+            relative_path=path,
+            language="python",
+            content="fixture\n",
+            size_bytes=len(b"fixture\n"),
+            line_count=1,
+        )
+        for path in paths
+    ]
+    snapshot = RepositorySnapshot(
+        root=Path("C:/isolated/symbol-fixture"),
+        name=f"{prefix}-{uuid4().hex}",
+        files=sources,
+        skipped=[],
+        file_count=len(sources),
+        total_size_bytes=sum(source.size_bytes for source in sources),
+        languages={"python": len(sources)},
+    )
+    repository = persist_repository_snapshot(session, snapshot)
+    persist_chunks(session, repository.id, chunks)
+    return repository.id
+
+
+def _run_chunk(
+    index: int,
+    qualified_name: str,
+    *,
+    path: str = "src/runs.py",
+    fragment_index: int | None = None,
+    fragment_count: int | None = None,
+) -> CodeChunk:
+    return CodeChunk(
+        relative_path=path,
+        language="python",
+        start_line=index + 1,
+        end_line=index + 1,
+        content=f"# {qualified_name} chunk {index}\n",
+        chunk_index=index,
+        chunking_strategy=ChunkingStrategy.STRUCTURAL,
+        chunk_kind=(
+            ChunkKind.STRUCTURAL_FRAGMENT
+            if fragment_index is not None
+            else ChunkKind.METHOD
+        ),
+        symbol_name="run",
+        qualified_symbol_name=qualified_name,
+        fragment_index=fragment_index,
+        fragment_count=fragment_count,
+    )
+
+
 def test_qualified_symbol_lookup_finds_exact_chunk_over_real_postgres(db_session: Session) -> None:
     source = _structural_source()
     config = ChunkingConfig(strategy=ChunkingStrategy.STRUCTURAL, max_lines_per_chunk=20, overlap_lines=0)
@@ -101,6 +162,7 @@ def test_simple_symbol_lookup_finds_both_ambiguous_matches(db_session: Session) 
 
     qualified_names = {r.chunk.qualified_symbol_name for r in results}
     assert qualified_names == {"UserService.login", "AdminService.login"}
+    assert {result.matched_identifier for result in results} == {"login"}
 
 
 def test_symbol_lookup_is_isolated_by_repository(db_session: Session) -> None:
@@ -137,6 +199,108 @@ def test_symbol_candidate_count_is_bounded_over_many_matches(db_session: Session
     results = find_symbol_candidates(db_session, repository_id, candidates, limit=5)
 
     assert len(results) == 5
+
+
+def test_large_fragmented_symbol_cannot_starve_distinct_candidates(
+    db_session: Session,
+) -> None:
+    chunks = [
+        _run_chunk(
+            index,
+            "BigService.run",
+            fragment_index=index + 1,
+            fragment_count=50,
+        )
+        for index in range(50)
+    ]
+    chunks.extend(
+        _run_chunk(50 + index, f"Worker{index}.run") for index in range(10)
+    )
+    repository_id = _persist_manual_chunks(db_session, "fragment-starvation", chunks)
+    candidates = extract_identifier_candidates("run")
+
+    first = find_symbol_candidates(db_session, repository_id, candidates, limit=5)
+    second = find_symbol_candidates(db_session, repository_id, candidates, limit=5)
+
+    assert len(first) == 5
+    assert first == second
+    assert [result.chunk.qualified_symbol_name for result in first] == [
+        "BigService.run",
+        "Worker0.run",
+        "Worker1.run",
+        "Worker2.run",
+        "Worker3.run",
+    ]
+    assert first[0].chunk.fragment_index == 1
+
+
+def test_several_large_symbols_cannot_hide_later_distinct_candidates(
+    db_session: Session,
+) -> None:
+    chunks: list[CodeChunk] = []
+    for symbol_offset, qualified_name in enumerate(("BigA.run", "BigB.run")):
+        chunks.extend(
+            _run_chunk(
+                symbol_offset * 30 + fragment_offset,
+                qualified_name,
+                fragment_index=fragment_offset + 1,
+                fragment_count=30,
+            )
+            for fragment_offset in range(30)
+        )
+    chunks.extend(_run_chunk(60 + index, f"Later{index}.run") for index in range(10))
+    repository_id = _persist_manual_chunks(db_session, "multi-fragment-starvation", chunks)
+
+    results = find_symbol_candidates(
+        db_session,
+        repository_id,
+        extract_identifier_candidates("run"),
+        limit=5,
+    )
+
+    assert len(results) == 5
+    assert [result.chunk.qualified_symbol_name for result in results] == [
+        "BigA.run",
+        "BigB.run",
+        "Later0.run",
+        "Later1.run",
+        "Later2.run",
+    ]
+
+
+def test_persisted_lookup_matches_in_memory_identifier_contract(
+    db_session: Session,
+) -> None:
+    chunks = [
+        _run_chunk(0, "AdminService.login"),
+        _run_chunk(1, "UserService.login"),
+    ]
+    chunks = [
+        chunk.model_copy(update={"symbol_name": "login"})
+        for chunk in chunks
+    ]
+    repository_id = _persist_manual_chunks(db_session, "identifier-parity", chunks)
+
+    for query in ("login", "UserService.login"):
+        candidates = extract_identifier_candidates(query)
+        in_memory = symbol_search(candidates, chunks, limit=10)
+        persisted = find_symbol_candidates(
+            db_session, repository_id, candidates, limit=10
+        )
+
+        def projection(results):
+            return [
+                (
+                    result.chunk.relative_path,
+                    result.chunk.qualified_symbol_name,
+                    result.chunk.chunk_index,
+                    result.match_tier,
+                    result.matched_identifier,
+                )
+                for result in results
+            ]
+
+        assert projection(persisted) == projection(in_memory)
 
 
 def test_structural_fragments_collapse_to_first_fragment_over_real_postgres(
