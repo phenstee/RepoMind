@@ -133,7 +133,6 @@ def assemble_context(
 
     seed_list = list(seeds)
     included_identities: set[ChunkIdentity] = set()
-    included_chunks: list[CodeChunk] = []
     seed_candidates: list[_Candidate] = []
 
     for seed in seed_list:
@@ -141,7 +140,6 @@ def assemble_context(
         if identity in included_identities:
             continue
         included_identities.add(identity)
-        included_chunks.append(seed.chunk)
         seed_candidates.append(_Candidate(seed.chunk, ContextOrigin.SEED, seed.rank, 0))
 
     seed_count = len(seed_candidates)
@@ -197,11 +195,7 @@ def assemble_context(
                         existing_candidate.seed_rank = candidate.seed_rank
                         existing_candidate.distance = candidate.distance
                     continue
-                if any(_is_contained(neighbor_chunk, existing) for existing in included_chunks):
-                    deduplicated_count += 1
-                    continue
                 included_identities.add(identity)
-                included_chunks.append(neighbor_chunk)
                 neighbor_by_identity[identity] = candidate
                 neighbor_pool.append(candidate)
 
@@ -212,6 +206,11 @@ def assemble_context(
     estimated_tokens = 0
     dropped_for_budget_count = 0
     for candidate in ordered_candidates:
+        if candidate.origin is not ContextOrigin.SEED and any(
+            _is_contained(candidate.chunk, existing.chunk) for existing in packed
+        ):
+            deduplicated_count += 1
+            continue
         source = ContextSource(source_id=f"S{len(packed) + 1}", chunk=candidate.chunk)
         block = format_source_block(source)
         tokens = estimate_tokens(block)
