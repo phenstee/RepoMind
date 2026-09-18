@@ -45,7 +45,7 @@ export interface IndexResponse {
   embedding_model: string | null;
 }
 
-export type RetrievalStrategy = "semantic" | "hybrid" | "hybrid_rerank";
+export type RetrievalStrategy = "semantic" | "hybrid" | "hybrid_rerank" | "hybrid_symbol";
 
 export interface Citation {
   relative_path: string;

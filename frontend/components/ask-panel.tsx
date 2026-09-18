@@ -44,6 +44,7 @@ export function AskPanel({
             <option value="semantic">Semantic</option>
             <option value="hybrid">Hybrid</option>
             <option value="hybrid_rerank">Hybrid + rerank</option>
+            <option value="hybrid_symbol">Hybrid + symbol (experimental)</option>
           </select>
         </label>
         <button type="submit" disabled={disabled}>Ask repository</button>

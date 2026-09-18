@@ -1,4 +1,4 @@
-"""Semantic, lexical, and hybrid repository retrieval primitives."""
+"""Semantic, lexical, symbol, and hybrid repository retrieval primitives."""
 
 from repomind.retrieval.bm25 import BM25Error, BM25Index
 from repomind.retrieval.embeddings import (
@@ -12,8 +12,15 @@ from repomind.retrieval.hybrid import (
     ChunkIdentity,
     HybridSearchError,
     chunk_identity,
+    fuse_ranked_sources,
     hybrid_search,
+    hybrid_symbol_search,
     reciprocal_rank_fusion,
+)
+from repomind.retrieval.identifiers import (
+    IdentifierCandidate,
+    IdentifierConfidence,
+    extract_identifier_candidates,
 )
 from repomind.retrieval.models import (
     BM25Config,
@@ -24,12 +31,15 @@ from repomind.retrieval.models import (
     EmbeddingTextStrategy,
     EmbeddingUsage,
     EmbeddingVector,
+    FusedSearchResult,
     HybridSearchResult,
     RankedChunk,
     RerankedSearchResult,
     RerankingConfig,
     SemanticSearchMode,
     SemanticSearchResult,
+    SymbolMatchTier,
+    SymbolSearchResult,
 )
 from repomind.retrieval.reranking import (
     LLMReranker,
@@ -44,11 +54,19 @@ from repomind.retrieval.semantic_search import (
     semantic_search,
 )
 from repomind.retrieval.similarity import RetrievalError, SimilarityError, cosine_similarity
+from repomind.retrieval.symbols import (
+    DEFAULT_SYMBOL_CANDIDATE_LIMIT,
+    MAX_SYMBOL_CANDIDATE_LIMIT,
+    SymbolSearchError,
+    symbol_search,
+)
 from repomind.retrieval.tokenization import tokenize_code
 
 __all__ = [
     "DEFAULT_CANDIDATE_MULTIPLIER",
     "DEFAULT_RRF_K",
+    "DEFAULT_SYMBOL_CANDIDATE_LIMIT",
+    "MAX_SYMBOL_CANDIDATE_LIMIT",
     "BM25Config",
     "BM25Error",
     "BM25Index",
@@ -62,8 +80,11 @@ __all__ = [
     "EmbeddingTextStrategy",
     "EmbeddingUsage",
     "EmbeddingVector",
+    "FusedSearchResult",
     "HybridSearchError",
     "HybridSearchResult",
+    "IdentifierCandidate",
+    "IdentifierConfidence",
     "LLMReranker",
     "OpenAIEmbeddingClient",
     "RankedChunk",
@@ -76,13 +97,20 @@ __all__ = [
     "SemanticSearchMode",
     "SemanticSearchResult",
     "SimilarityError",
+    "SymbolMatchTier",
+    "SymbolSearchError",
+    "SymbolSearchResult",
     "chunk_identity",
     "cosine_similarity",
     "embedding_text_for_chunk",
+    "extract_identifier_candidates",
+    "fuse_ranked_sources",
     "hybrid_search",
     "hybrid_search_with_reranking",
+    "hybrid_symbol_search",
     "rank_by_similarity",
     "reciprocal_rank_fusion",
     "semantic_search",
+    "symbol_search",
     "tokenize_code",
 ]

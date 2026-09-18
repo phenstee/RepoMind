@@ -63,8 +63,8 @@ class MemoryRepositoryStore:
         self.snapshots[repository_id] = snapshot
         self.chunks[repository_id] = chunks
 
-    def search(self, repository_id, query, embedding, *, hybrid, top_k):
-        self.search_calls.append((repository_id, query, hybrid, top_k))
+    def search(self, repository_id, query, embedding, *, hybrid, top_k, include_symbols=False):
+        self.search_calls.append((repository_id, query, hybrid, top_k, include_symbols))
         return self.candidates[:top_k]
 
     def load_neighbors(self, repository_id, keys):

@@ -128,6 +128,18 @@ and greedily packs a deterministic token budget. The preserved baseline
 available per-request but is not the default. See
 [Context assembly](#context-assembly) below.
 
+**Milestone 24: symbol-aware retrieval fusion + realistic benchmark corpus**
+is complete. Persisted `symbol_name`/`qualified_symbol_name` metadata from
+Milestone 22 now feeds a third, bounded, separately-measurable RRF candidate
+source alongside semantic and BM25, reached through the new non-default
+`hybrid_symbol` strategy. It is deliberately not GraphRAG, a call graph, or a
+language server: it only performs bounded, tier-ordered exact-match lookup
+(one repository-scoped SQL query, two new B-tree indexes) over metadata that
+already existed. RRF itself was generalized to N named sources behind an
+unchanged two-source `reciprocal_rank_fusion` wrapper, so historical hybrid
+retrieval is byte-for-byte unaffected. See
+[Symbol-aware retrieval fusion](#symbol-aware-retrieval-fusion) below.
+
 ## Local HTTP API
 
 The API is for **trusted local development only**. It has **no authentication or
@@ -308,10 +320,12 @@ intact. Discovery and execution remain synchronous, not background jobs. Empty
 repositories can be indexed without a model call. Index responses contain counts
 and the embedding model, never source contents or vectors.
 
-RAG accepts `semantic` (default), `hybrid`, or `hybrid_rerank`, with `top_k` 1–20,
-and an independent `context_strategy` of `seeds_only` (default, unchanged
-Milestone 1–22 behavior) or `expanded` (Milestone 23 bounded neighbor expansion;
-see [Context assembly](#context-assembly)).
+RAG accepts `semantic` (default), `hybrid`, `hybrid_rerank`, or `hybrid_symbol`
+(Milestone 24 bounded symbol-metadata fusion, non-default; see
+[Symbol-aware retrieval fusion](#symbol-aware-retrieval-fusion)), with `top_k`
+1–20, and an independent `context_strategy` of `seeds_only` (default,
+unchanged Milestone 1–22 behavior) or `expanded` (Milestone 23 bounded
+neighbor expansion; see [Context assembly](#context-assembly)).
 The reranking option feeds up to 20 retrieved candidates into the existing bounded
 LLM reranker before the existing citation-validating RAG pipeline. Responses contain
 `answer`, `insufficient_evidence`, relative path/line citations, and optional
@@ -1109,6 +1123,14 @@ each retriever for `top_k × 4` candidates by default before fusion. That depth 
 a simple correctness baseline, not an empirically optimal setting. Stored
 chunks are never re-embedded.
 
+Milestone 24 generalized this to `fuse_ranked_sources`, which fuses any number
+of named ranked sources (`{"semantic": ..., "lexical": ..., "symbol": ...}`)
+with the identical score formula and tie-breaking; `reciprocal_rank_fusion`
+itself is now a behavior-preserving two-source wrapper over it, verified by
+regression tests that a two-source call and an empty third source both
+reproduce historical output exactly. See
+[Symbol-aware retrieval fusion](#symbol-aware-retrieval-fusion).
+
 For persisted repositories, `postgres_hybrid_search` combines the selected exact
 or ANN pgvector semantic results with `load_chunks` → an in-memory `BM25Index`
 → RRF. The query
@@ -1193,15 +1215,18 @@ Retrieval V2 made AST chunking and optional structural embedding context
 measurable strategies. Milestone 23 (see
 [Context assembly](#context-assembly)) implemented bounded neighbor-chunk
 expansion, overlap-aware deduplication, and token-aware budgeting as an
-explicit assembly stage after retrieval. The following ideas remain
-intentionally deferred:
+explicit assembly stage after retrieval. Milestone 24 (see
+[Symbol-aware retrieval fusion](#symbol-aware-retrieval-fusion)) added
+persisted-symbol-metadata matching as a third, separately-measurable RRF
+input. The following ideas remain intentionally deferred:
 
 - query rewriting or multi-query retrieval (an offline, deterministic
   experiment mode was considered for Milestone 23; current evaluation did not
   surface a query-language-mismatch failure class clear enough to justify it)
-- exact-symbol-aware retrieval fusion (beyond the same-symbol-fragment
-  preference already used inside context assembly)
 - GraphRAG, call-graph or import-graph traversal, and multi-agent retrieval
+- a fuzzy/edit-distance symbol resolver, cross-language structural parsing
+  beyond Python, and PostgreSQL FTS/trigram infrastructure (Milestone 24's
+  exact-match symbol lookup did not need any of these)
 
 These changes may improve some workloads, but they also change cost, latency,
 recall, or context composition. They should be measured rather than assumed to
@@ -1323,6 +1348,124 @@ duplicates removed), plus one RAG-level comparison showing that
 context-assembly gains are separate from retrieval-ranking gains: retrieval
 recall is identical between the two rows because the fixture holds the
 retrieved seed fixed, yet only the `expanded` row's answer passes.
+
+## Symbol-aware retrieval fusion
+
+Milestone 24 adds a third, independently measurable candidate source next to
+semantic and BM25:
+
+```text
+Query
+  |
+  +--> semantic retrieval
+  |
+  +--> BM25
+  |
+  `--> structural symbol metadata (bounded, persisted lookup)
+          |
+          v
+          RRF
+          |
+     optional reranker
+          |
+     ContextAssembler
+          |
+        RAG
+```
+
+Symbol retrieval is **persisted-metadata lookup, not query rewriting, not
+GraphRAG, not a call/reference/import graph, not a language server, and not
+another embedding query.** It reads `symbol_name`/`qualified_symbol_name`
+already produced by Milestone 22 chunking; it never reparses source or
+traverses an AST at query time.
+
+**Identifier detection** (`repomind.retrieval.identifiers.extract_identifier_candidates`)
+scans the *original, unmodified* query text for identifier-shaped substrings
+and never rewrites it — semantic and BM25 still receive the exact question the
+user asked. A qualified dotted form (`UserService.login`), snake_case
+(`load_neighbor_chunks`), camelCase, or PascalCase (`ContextAssembler`) is
+**strong** evidence; a plain lowercase word with no separator or case
+transition (`run`, `get`, `login`) is **weak** evidence, because it is equally
+likely to be ordinary English. Weak candidates are still looked up — a query
+of just `login` must still find both `UserService.login` and
+`AdminService.login` — but only ever at the lowest confidence tier, so a
+common word cannot dominate ordinary retrieval merely by matching a real
+symbol name somewhere in the repository.
+
+**Matching** (`repomind.retrieval.symbols.symbol_search` in memory,
+`repomind.db.repositories.find_symbol_candidates` over PostgreSQL) uses three
+deterministic, explainable tiers, strongest first: exact `qualified_symbol_name`,
+exact `symbol_name` from a strong candidate, exact `symbol_name` from a weak
+candidate. There is no fuzzy/edit-distance resolution and no fabricated
+cosine-style score — `SymbolSearchResult.match_tier` is the only ranking
+signal, kept explicit rather than rescaled into something that looks like
+semantic similarity.
+
+**Bounding**: candidate count is capped by `symbol_candidate_limit` (default
+10). Multiple structural fragments of one oversized method in one file
+collapse to their first fragment, so one large function cannot consume the
+whole candidate budget. During hybrid fusion, a natural-language query can
+project that one symbol vote onto the highest-ranked fragment of the same
+symbol already found by semantic+BM25 retrieval; this neither adds candidates
+nor scans more chunks. A query consisting solely of the matched identifier
+keeps the canonical first fragment. Milestone 23's `expanded` context strategy
+can still recover adjacent fragments afterward. A repository with 300
+functions literally named `run` still returns at most
+`symbol_candidate_limit` rows.
+
+**PostgreSQL**: `find_symbol_candidates` is one bounded, tier-ordered,
+repository-scoped SQL query (a `CASE` expression computes the tier, the join
+to `repository_files` enforces isolation, `LIMIT` bounds the row count) —
+never a full-repository chunk scan. Two plain B-tree indexes
+(`ix_code_chunks_symbol_name`, `ix_code_chunks_qualified_symbol_name`, added
+in migration `20260918_01`) support it; no pgvector, FTS, or trigram
+infrastructure was introduced for string identifiers. BM25 fusion still
+rebuilds from every persisted chunk exactly as it already did before this
+milestone (`postgres_hybrid_search`'s existing `load_chunks` call) — a real
+scalability limitation this milestone documents but does not fix.
+
+**Fusion**: `reciprocal_rank_fusion` (semantic + BM25 only) is now a thin,
+behavior-preserving wrapper over a new `fuse_ranked_sources(sources: Mapping[str,
+Sequence[RankedChunk]], ...)` that accepts any number of named ranked sources.
+Historical two-source callers, tie-breaking (`(-score, min_contributing_rank,
+chunk_identity)`), and error messages are unchanged and regression-tested;
+symbol candidates join the same fusion as a `"symbol"` source with no special
+weighting. For a natural-language query naming a multi-fragment symbol, the
+existing semantic+BM25 RRF order selects which already-retrieved fragment of
+that symbol receives its symbol rank; ties retain the historical RRF
+tie-breakers and absence of evidence retains the first fragment. The symbol
+still determines *which symbol* matched, while semantic/BM25 can determine
+*which fragment* best answers the question. No semantic score is fabricated
+and no hand-tuned constant was introduced. Fusing with an empty (or absent)
+symbol source reproduces the semantic+BM25 result identically, so `line_v1`
+repositories (which have no structural symbol metadata) and non-symbol queries
+degrade to existing hybrid behavior with no error and no reordering.
+
+**Compatibility**: symbol-fused candidates are ordinary `FusedSearchResult`
+objects satisfying the same `RankedChunk` contract as everything else, so they
+flow into the existing reranker and `ContextAssembler` unchanged — no
+symbol-specific prompt formatting, no bypassed budgeting, no fabricated
+reranker relevance score for a symbol match. They work identically with exact
+or ANN semantic search.
+
+`RAGRequest.strategy` gains one new, non-default value: `"hybrid_symbol"`.
+`symbol.matched` is a new safe observability event (`symbol_candidate_count`,
+`symbol_match_detected`, `fused_candidate_count` only — never source text,
+paths, or raw SQL).
+
+Run `uv run python -m benchmarks.repo_eval_v4` for the offline, deterministic,
+category-grouped comparison (exact qualified symbol, natural-language +
+symbol, ambiguous simple symbol, snake_case, PascalCase, camelCase, common
+English words, behavioral/non-symbol, duplicate-symbol-across-files) across
+semantic-only, BM25-only, hybrid, symbol-only, and symbol-fused strategies,
+plus one exact-symbol-hit@3 metric kept separate from Recall@k/MRR/nDCG@k.
+On the deterministic fixture, symbol fusion improves exact-qualified-symbol
+and duplicate-symbol MRR from 0.333 to 1.000, and improves the
+natural-language-plus-symbol case from the historical hybrid baseline of
+0.500 to 1.000. Ambiguous-symbol, snake/Pascal/camel, common-word, and
+behavioral/non-symbol categories remain at MRR 1.000. These fixture results do
+not establish real-repository or real-embedding quality, and `hybrid_symbol`
+therefore remains opt-in rather than becoming a default.
 
 ## Evaluation harness and benchmarks
 
@@ -2418,6 +2561,30 @@ uv run python scripts/inspect_repository.py . --chunks
   application opt-in and preserves baseline attribution.
 - **Planning is advisory.** A bounded plan improves task decomposition but cannot
   expand capabilities or require blind compliance from the executor.
+- **Symbol retrieval reuses persisted metadata instead of reparsing.** Milestone
+  22 already chunked and labeled every symbol; Milestone 24 only had to query
+  it, never rebuild it.
+- **Identifier extraction is metadata extraction, not query rewriting.** The
+  original query always reaches semantic and BM25 retrieval unmodified;
+  detected identifiers are a parallel, additional signal.
+- **Symbol SQL lookup is bounded and repository-scoped by construction.** One
+  `CASE`-ordered, `LIMIT`-bounded query joined through `repository_files`,
+  never a full chunk scan and never cross-repository.
+- **RRF was generalized, not replaced.** Reusing the existing fusion mechanism
+  for a third source avoids a second, parallel ranking algorithm and comes with
+  a regression test proving historical two-source behavior is unchanged.
+- **Symbol candidate counts are bounded, not weighted.** A default limit plus
+  tier-ordered rank position (not a hand-tuned symbol weight) keeps common-word
+  matches from dominating fusion.
+- **Common lowercase identifiers stay conservative.** `run`, `get`, `login`, and
+  similar words are still searched, but only ever at the lowest confidence
+  tier, because they are equally likely to be ordinary English.
+- **No GraphRAG.** A call graph, reference graph, or import graph is a
+  materially different (and materially larger) system than bounded exact
+  metadata lookup, and nothing in this milestone's evidence justified one.
+- **Historical baselines are print-verified, not just assumed.** `repo_eval_v2`
+  and `repo_eval_v3` are re-run and compared against their previously recorded
+  numbers every time retrieval or context-assembly code changes.
 - **Review is independent and revision-sensitive.** It evaluates current evidence,
   not the executor's completion claim, and an edit invalidates its older approval.
 - **Models cannot override deterministic gates.** Failed, missing, stale, or
@@ -2453,5 +2620,6 @@ The full project roadmap is described in the RepoMind engineering brief:
 20. Cooperative cancellation / job control (complete)
 21. Structured planner + independent reviewer (complete)
 22. Retrieval V2: structural chunking + pgvector HNSW ANN (complete)
-23. Retrieval quality + context assembly V2 (complete/current)
-24. Next capability milestone (next; not yet selected)
+23. Retrieval quality + context assembly V2 (complete)
+24. Symbol-aware retrieval fusion + realistic benchmark corpus (complete/current)
+25. Next capability milestone (next; not yet selected)

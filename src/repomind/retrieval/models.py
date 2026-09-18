@@ -170,6 +170,75 @@ class HybridSearchResult(BaseModel):
         return self
 
 
+class SymbolMatchTier(StrEnum):
+    """Deterministic, explainable confidence tiers for a persisted symbol match.
+
+    Ordered strongest first. A qualified match (``UserService.login``) is
+    always stronger evidence than a simple-name match; a simple-name match
+    reached through a strong-shaped candidate (snake_case/camelCase/
+    PascalCase) is stronger than one reached only through a weak, common-word
+    candidate.
+    """
+
+    QUALIFIED_SYMBOL = "qualified_symbol"
+    SIMPLE_SYMBOL_STRONG = "simple_symbol_strong"
+    SIMPLE_SYMBOL_WEAK = "simple_symbol_weak"
+
+
+class SymbolSearchResult(BaseModel):
+    """One chunk matched by persisted structural symbol metadata, not semantics.
+
+    There is no cosine similarity or lexical weight here: ``match_tier`` is
+    the only ranking signal, and it is never rescaled into a fabricated score.
+    """
+
+    chunk: CodeChunk
+    rank: int = Field(ge=1)
+    match_tier: SymbolMatchTier
+    matched_identifier: str = Field(min_length=1)
+
+
+class FusedSearchResult(BaseModel):
+    """One chunk fused from an arbitrary number of named ranked sources.
+
+    ``source_ranks`` records only the sources that actually contributed a
+    rank for this chunk; a source's absence does not imply irrelevance.
+    """
+
+    chunk: CodeChunk
+    rank: int = Field(ge=1)
+    fusion_score: float = Field(gt=0)
+    source_ranks: dict[str, int] = Field(default_factory=dict)
+
+    @field_validator("fusion_score")
+    @classmethod
+    def _validate_fusion_score_is_finite(cls, value: float) -> float:
+        if not isfinite(value):
+            raise ValueError("fusion score must be finite")
+        return value
+
+    @field_validator("source_ranks")
+    @classmethod
+    def _validate_source_ranks(cls, value: dict[str, int]) -> dict[str, int]:
+        if not value:
+            raise ValueError("fused result requires at least one contributing source")
+        if any(isinstance(rank, bool) or rank < 1 for rank in value.values()):
+            raise ValueError("source ranks must be positive integers")
+        return value
+
+    @property
+    def semantic_rank(self) -> int | None:
+        return self.source_ranks.get("semantic")
+
+    @property
+    def lexical_rank(self) -> int | None:
+        return self.source_ranks.get("lexical")
+
+    @property
+    def symbol_rank(self) -> int | None:
+        return self.source_ranks.get("symbol")
+
+
 class RerankingConfig(BaseModel):
     """Hard limits for the candidate set sent to an LLM reranker."""
 

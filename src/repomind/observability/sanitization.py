@@ -148,6 +148,9 @@ _KEYS = frozenset(
         "packed_count",
         "estimated_tokens",
         "budget_tokens",
+        "symbol_candidate_count",
+        "symbol_match_detected",
+        "fused_candidate_count",
     ]
 )
 _SECRET = re.compile(

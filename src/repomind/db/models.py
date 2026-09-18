@@ -141,6 +141,8 @@ class CodeChunkRecord(Base):
         ),
         Index("ix_code_chunks_repository_file_id", "repository_file_id"),
         Index("ix_code_chunks_embedding_model", "embedding_model"),
+        Index("ix_code_chunks_symbol_name", "symbol_name"),
+        Index("ix_code_chunks_qualified_symbol_name", "qualified_symbol_name"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

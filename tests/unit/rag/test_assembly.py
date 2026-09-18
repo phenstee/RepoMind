@@ -10,7 +10,7 @@ from repomind.rag.assembly import (
     assemble_context,
 )
 from repomind.rag.context import build_repository_context, format_source_block
-from repomind.rag.models import ContextAssemblyConfig
+from repomind.rag.models import ContextAssemblyConfig, ContextSource
 from repomind.rag.tokens import estimate_tokens
 from repomind.retrieval import SemanticSearchResult
 
@@ -211,6 +211,64 @@ def test_duplicate_neighbor_retains_best_same_symbol_provenance() -> None:
     assert result.deduplicated_count == 1
 
 
+def test_duplicate_neighbor_retains_lower_originating_seed_rank() -> None:
+    worse_seed = _line_chunk("src/z.py", 0, start_line=1, content="worse seed\n")
+    shared_neighbor = _line_chunk(
+        "src/z.py", 1, start_line=20, content="shared neighbor\n"
+    )
+    better_seed = _line_chunk("src/z.py", 2, start_line=40, content="better seed\n")
+    comparison_seed = _line_chunk(
+        "src/a.py", 0, start_line=1, content="comparison seed\n"
+    )
+    comparison_neighbor = _line_chunk(
+        "src/a.py", 1, start_line=20, content="comparison neighbor\n"
+    )
+
+    result = assemble_context(
+        [_seed(worse_seed, 3), _seed(better_seed, 1), _seed(comparison_seed, 2)],
+        InMemoryNeighborLoader(
+            [
+                worse_seed,
+                shared_neighbor,
+                better_seed,
+                comparison_seed,
+                comparison_neighbor,
+            ]
+        ),
+        ContextAssemblyConfig(strategy=ContextStrategy.EXPANDED, neighbor_radius=1),
+    )
+
+    neighbors = [chunk.chunk for chunk in result.chunks if chunk.origin is ContextOrigin.NEIGHBOR]
+    assert neighbors == [shared_neighbor, comparison_neighbor]
+    assert result.deduplicated_count == 1
+
+
+def test_duplicate_neighbor_retains_shorter_distance_after_other_ties() -> None:
+    far_seed = _line_chunk("src/z.py", 0, start_line=1, content="far seed\n")
+    shared_neighbor = _line_chunk(
+        "src/z.py", 2, start_line=20, content="shared neighbor\n"
+    )
+    near_seed = _line_chunk("src/z.py", 3, start_line=40, content="near seed\n")
+    comparison_seed = _line_chunk(
+        "src/a.py", 0, start_line=1, content="comparison seed\n"
+    )
+    comparison_neighbor = _line_chunk(
+        "src/a.py", 2, start_line=20, content="comparison neighbor\n"
+    )
+
+    result = assemble_context(
+        [_seed(far_seed, 1), _seed(near_seed, 1), _seed(comparison_seed, 1)],
+        InMemoryNeighborLoader(
+            [far_seed, shared_neighbor, near_seed, comparison_seed, comparison_neighbor]
+        ),
+        ContextAssemblyConfig(strategy=ContextStrategy.EXPANDED, neighbor_radius=2),
+    )
+
+    neighbors = [chunk.chunk for chunk in result.chunks if chunk.origin is ContextOrigin.NEIGHBOR]
+    assert neighbors == [shared_neighbor, comparison_neighbor]
+    assert result.deduplicated_count == 1
+
+
 def test_neighbor_equal_to_another_seed_is_kept_once_as_seed() -> None:
     chunks = _line_file("src/a.py", 3)
     seeds = [_seed(chunks[0], 1), _seed(chunks[1], 2)]
@@ -250,6 +308,140 @@ def test_fully_contained_overlap_is_suppressed_but_distinct_ranges_survive() -> 
     assert 1 not in packed_indexes  # fully contained in the seed's own range
     assert 2 in packed_indexes  # a distinct, non-overlapping range survives
     assert result.deduplicated_count == 1
+
+
+def test_contained_neighbor_remains_eligible_when_containing_seed_misses_budget() -> None:
+    higher_priority = _line_chunk(
+        "src/priority.py", 0, start_line=1, content="priority evidence\n" * 3
+    )
+    containing_seed = _line_chunk(
+        "src/service.py", 1, start_line=10, content="large containing evidence\n" * 20
+    )
+    contained_neighbor = CodeChunk(
+        relative_path="src/service.py",
+        language="python",
+        start_line=15,
+        end_line=16,
+        content="small evidence\nsmall detail\n",
+        chunk_index=2,
+        chunking_strategy=ChunkingStrategy.LINE,
+        chunk_kind=ChunkKind.LINE,
+    )
+    higher_tokens = estimate_tokens(
+        format_source_block(ContextSource(source_id="S1", chunk=higher_priority))
+    )
+    contained_tokens = estimate_tokens(
+        format_source_block(ContextSource(source_id="S2", chunk=contained_neighbor))
+    )
+    containing_tokens = estimate_tokens(
+        format_source_block(ContextSource(source_id="S2", chunk=containing_seed))
+    )
+    budget = higher_tokens + contained_tokens
+    assert containing_seed.start_line <= contained_neighbor.start_line
+    assert contained_neighbor.end_line <= containing_seed.end_line
+    assert higher_tokens + containing_tokens > budget
+
+    result = assemble_context(
+        [_seed(higher_priority, 1), _seed(containing_seed, 2)],
+        InMemoryNeighborLoader([higher_priority, containing_seed, contained_neighbor]),
+        ContextAssemblyConfig(
+            strategy=ContextStrategy.EXPANDED,
+            neighbor_radius=1,
+            budget_tokens=budget,
+        ),
+    )
+
+    packed = [chunk.chunk for chunk in result.chunks]
+    assert higher_priority in packed
+    assert containing_seed not in packed
+    assert contained_neighbor in packed
+    assert result.expanded_candidate_count == 1
+    assert result.deduplicated_count == 0
+    assert result.dropped_for_budget_count == 1
+
+
+def test_contained_neighbor_remains_eligible_when_containing_neighbor_misses_budget() -> None:
+    seed = _line_chunk("src/service.py", 0, start_line=1, content="seed evidence\n" * 3)
+    containing_neighbor = _line_chunk(
+        "src/service.py", 1, start_line=10, content="large containing evidence\n" * 20
+    )
+    contained_neighbor = CodeChunk(
+        relative_path="src/service.py",
+        language="python",
+        start_line=15,
+        end_line=16,
+        content="small evidence\nsmall detail\n",
+        chunk_index=2,
+        chunking_strategy=ChunkingStrategy.LINE,
+        chunk_kind=ChunkKind.LINE,
+    )
+    seed_tokens = estimate_tokens(
+        format_source_block(ContextSource(source_id="S1", chunk=seed))
+    )
+    contained_tokens = estimate_tokens(
+        format_source_block(ContextSource(source_id="S2", chunk=contained_neighbor))
+    )
+    containing_tokens = estimate_tokens(
+        format_source_block(ContextSource(source_id="S2", chunk=containing_neighbor))
+    )
+    budget = seed_tokens + contained_tokens
+    assert containing_neighbor.start_line <= contained_neighbor.start_line
+    assert contained_neighbor.end_line <= containing_neighbor.end_line
+    assert seed_tokens + containing_tokens > budget
+
+    result = assemble_context(
+        [_seed(seed, 1)],
+        InMemoryNeighborLoader([seed, containing_neighbor, contained_neighbor]),
+        ContextAssemblyConfig(
+            strategy=ContextStrategy.EXPANDED,
+            neighbor_radius=2,
+            budget_tokens=budget,
+        ),
+    )
+
+    packed = [chunk.chunk for chunk in result.chunks]
+    assert seed in packed
+    assert containing_neighbor not in packed
+    assert contained_neighbor in packed
+    assert result.expanded_candidate_count == 2
+    assert result.deduplicated_count == 0
+    assert result.dropped_for_budget_count == 1
+
+
+def test_contained_neighbor_is_suppressed_when_containing_evidence_is_packed() -> None:
+    seed = _line_chunk("src/service.py", 0, start_line=1, content="seed evidence\n" * 3)
+    containing_neighbor = _line_chunk(
+        "src/service.py", 1, start_line=10, content="large containing evidence\n" * 10
+    )
+    contained_neighbor = CodeChunk(
+        relative_path="src/service.py",
+        language="python",
+        start_line=15,
+        end_line=16,
+        content="small evidence\nsmall detail\n",
+        chunk_index=2,
+        chunking_strategy=ChunkingStrategy.LINE,
+        chunk_kind=ChunkKind.LINE,
+    )
+    budget = sum(
+        estimate_tokens(format_source_block(ContextSource(source_id=source_id, chunk=chunk)))
+        for source_id, chunk in (("S1", seed), ("S2", containing_neighbor))
+    )
+
+    result = assemble_context(
+        [_seed(seed, 1)],
+        InMemoryNeighborLoader([seed, containing_neighbor, contained_neighbor]),
+        ContextAssemblyConfig(
+            strategy=ContextStrategy.EXPANDED,
+            neighbor_radius=2,
+            budget_tokens=budget,
+        ),
+    )
+
+    assert [chunk.chunk for chunk in result.chunks] == [seed, containing_neighbor]
+    assert result.expanded_candidate_count == 2
+    assert result.deduplicated_count == 1
+    assert result.dropped_for_budget_count == 0
 
 
 def test_budget_keeps_higher_priority_evidence_first() -> None:

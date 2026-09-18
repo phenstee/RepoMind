@@ -24,7 +24,7 @@ from repomind.tools import RunRuffInput, RunTestsInput
 
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=10_000)]
 RelativePath = Annotated[str, StringConstraints(min_length=1, max_length=1024)]
-Strategy = Literal["semantic", "hybrid", "hybrid_rerank"]
+Strategy = Literal["semantic", "hybrid", "hybrid_rerank", "hybrid_symbol"]
 ContextStrategyLiteral = Literal["seeds_only", "expanded"]
 PublicRelativePath = Annotated[
     str, AfterValidator(lambda value: validate_repository_relative_path(Path(value)).as_posix())

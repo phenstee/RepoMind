@@ -171,6 +171,31 @@ def test_context_assembled_progress_exposes_counts_without_source_or_paths():
         assert private not in body
 
 
+def test_symbol_matched_progress_exposes_counts_without_source_or_paths():
+    event = TraceEvent(
+        event_type="symbol.matched",
+        sequence=6,
+        timestamp=datetime(2026, 9, 16, tzinfo=UTC),
+        metadata={
+            "symbol_candidate_count": 2,
+            "symbol_match_detected": True,
+            "fused_candidate_count": 5,
+            "path": r"C:\\Users\\private\\secret.py",
+            "content": "SECRET_SOURCE_CONTENT",
+            "sql": "SELECT * FROM code_chunks WHERE symbol_name = 'sk-test-secret'",
+        },
+    )
+    progress = safe_progress_event(UUID(int=6), event)
+    assert progress.data == {
+        "symbol_candidate_count": 2,
+        "symbol_match_detected": True,
+        "fused_candidate_count": 5,
+    }
+    body = encode_sse_event(progress.event, progress, event_id=progress.sequence)
+    for private in ("SECRET_SOURCE_CONTENT", "Users", "secret.py", "SELECT", "sk-test-secret"):
+        assert private not in body
+
+
 def test_review_progress_exposes_counts_and_verdict_without_review_text():
     event = TraceEvent(
         event_type="review.completed",

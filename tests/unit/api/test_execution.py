@@ -34,6 +34,7 @@ def candidates():
         ("semantic", False, 3, 1),
         ("hybrid", True, 3, 1),
         ("hybrid_rerank", True, 20, 2),
+        ("hybrid_symbol", True, 3, 1),
     ],
 )
 def test_rag_real_strategy_routing_and_repository_owned_citations(
@@ -53,13 +54,55 @@ def test_rag_real_strategy_routing_and_repository_owned_citations(
     assert response.json()["citations"] == [
         {"relative_path": "src/app.py", "start_line": 1, "end_line": 2}
     ]
-    assert api.store.search_calls == [(1, "What does value do?", hybrid, depth)]
+    assert api.store.search_calls == [
+        (1, "What does value do?", hybrid, depth, strategy == "hybrid_symbol")
+    ]
     assert api.embeddings.calls == ["What does value do?"]
     assert len(api.llm.calls) == model_calls
     run_id = response.json()["trace_run_id"]
     trace = api.client.get(f"/api/v1/runs/{run_id}").json()
     assert trace["run_type"] == "rag" and trace["status"] == "completed"
     assert trace["llm_calls"] == model_calls
+    assert "def value" not in str(trace)
+
+
+def test_rag_hybrid_symbol_strategy_emits_safe_symbol_matched_trace_event(api):
+    from repomind.retrieval import FusedSearchResult
+
+    fused_chunk = candidates()[0].chunk
+    api.store.candidates = [
+        FusedSearchResult(
+            chunk=fused_chunk,
+            rank=1,
+            fusion_score=0.5,
+            source_ranks={"semantic": 1, "symbol": 1},
+        )
+    ]
+    api.llm.responses.append(
+        {"answer": "value returns one", "source_ids": ["S1"], "insufficient_evidence": False}
+    )
+
+    response = api.client.post(
+        "/api/v1/repositories/1/rag",
+        json={
+            "question": "UserService.value",
+            "strategy": "hybrid_symbol",
+            "top_k": 3,
+            "trace": True,
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    run_id = response.json()["trace_run_id"]
+    trace = api.client.get(f"/api/v1/runs/{run_id}").json()
+    events = [e for e in trace["events"] if e["event_type"] == "symbol.matched"]
+    assert len(events) == 1
+    metadata = events[0]["metadata"]
+    assert metadata == {
+        "symbol_candidate_count": 1,
+        "symbol_match_detected": True,
+        "fused_candidate_count": 1,
+    }
     assert "def value" not in str(trace)
 
 

@@ -14,6 +14,7 @@ from repomind.retrieval import (
     HybridSearchResult,
     SemanticSearchResult,
     chunk_identity,
+    fuse_ranked_sources,
     hybrid_search,
     reciprocal_rank_fusion,
 )
@@ -258,6 +259,82 @@ def test_hybrid_search_rejects_blank_query_without_embedding(query: str) -> None
         )
 
     assert provider.calls == []
+
+
+def test_fuse_ranked_sources_two_source_matches_historical_rrf_exactly() -> None:
+    a = _chunk("a.py", "A")
+    b = _chunk("b.py", "B")
+    c = _chunk("c.py", "C")
+    d = _chunk("d.py", "D")
+    semantic = [_semantic(a, 1), _semantic(b, 2), _semantic(c, 3)]
+    lexical = [_lexical(c, 1), _lexical(a, 2), _lexical(d, 3)]
+
+    historical = reciprocal_rank_fusion(semantic, lexical, top_k=4, rrf_k=60)
+    generalized = fuse_ranked_sources(
+        {"semantic": semantic, "lexical": lexical}, top_k=4, rrf_k=60
+    )
+
+    assert [r.chunk for r in historical] == [r.chunk for r in generalized]
+    assert [r.fusion_score for r in historical] == [r.fusion_score for r in generalized]
+    assert [
+        (r.semantic_rank, r.lexical_rank) for r in historical
+    ] == [(r.semantic_rank, r.lexical_rank) for r in generalized]
+
+
+def test_fuse_ranked_sources_three_sources_is_deterministic() -> None:
+    a = _chunk("a.py", "A")
+    b = _chunk("b.py", "B")
+    c = _chunk("c.py", "C")
+    sources = {
+        "semantic": [_semantic(a, 1), _semantic(b, 2)],
+        "lexical": [_lexical(b, 1), _lexical(c, 2)],
+        "symbol": [_lexical(a, 1)],
+    }
+
+    first = fuse_ranked_sources(sources, top_k=3, rrf_k=60)
+    second = fuse_ranked_sources(sources, top_k=3, rrf_k=60)
+
+    assert first == second
+    a_result = next(r for r in first if r.chunk == a)
+    assert a_result.source_ranks == {"semantic": 1, "symbol": 1}
+
+
+def test_fuse_ranked_sources_merges_identity_duplicates_across_three_lists() -> None:
+    a = _chunk("a.py", "A")
+
+    fused = fuse_ranked_sources(
+        {
+            "semantic": [_semantic(a, 1)],
+            "lexical": [_lexical(a, 1)],
+            "symbol": [_lexical(a, 1)],
+        },
+        top_k=1,
+    )
+
+    assert len(fused) == 1
+    assert fused[0].source_ranks == {"semantic": 1, "lexical": 1, "symbol": 1}
+
+
+def test_fuse_ranked_sources_empty_third_source_does_not_reorder_two_source_result() -> None:
+    a = _chunk("a.py", "A")
+    b = _chunk("b.py", "B")
+    c = _chunk("c.py", "C")
+    semantic = [_semantic(a, 1), _semantic(b, 2)]
+    lexical = [_lexical(c, 1), _lexical(a, 2)]
+
+    without_third = fuse_ranked_sources({"semantic": semantic, "lexical": lexical}, top_k=3)
+    with_empty_third = fuse_ranked_sources(
+        {"semantic": semantic, "lexical": lexical, "symbol": []}, top_k=3
+    )
+
+    assert [r.chunk for r in without_third] == [r.chunk for r in with_empty_third]
+    assert [r.fusion_score for r in without_third] == [r.fusion_score for r in with_empty_third]
+    assert all("symbol" not in r.source_ranks for r in with_empty_third)
+
+
+def test_fuse_ranked_sources_rejects_no_sources() -> None:
+    with pytest.raises(HybridSearchError, match="at least one named source"):
+        fuse_ranked_sources({}, top_k=1)
 
 
 @pytest.mark.parametrize("candidate_name", ["semantic_candidates", "lexical_candidates"])

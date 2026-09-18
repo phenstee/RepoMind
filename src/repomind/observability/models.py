@@ -83,6 +83,7 @@ EventType = Literal[
     "rag.context",
     "rag.answer",
     "context.assembled",
+    "symbol.matched",
     "evaluation.case.started",
     "evaluation.case.completed",
     "evaluation.case.failed",

@@ -64,6 +64,8 @@ _NUMBERS = frozenset(
         "packed_count",
         "estimated_tokens",
         "budget_tokens",
+        "symbol_candidate_count",
+        "fused_candidate_count",
     }
 )
 _BOOLEANS = frozenset(
@@ -75,6 +77,7 @@ _BOOLEANS = frozenset(
         "timed_out",
         "truncated",
         "clean",
+        "symbol_match_detected",
     }
 )
 _LABELS = frozenset(
@@ -157,6 +160,9 @@ _EVENT_FIELDS: dict[str, frozenset[str]] = {
             "estimated_tokens",
             "budget_tokens",
         }
+    ),
+    "symbol.matched": frozenset(
+        {"symbol_candidate_count", "symbol_match_detected", "fused_candidate_count"}
     ),
     "agent.decision": frozenset({"iteration", "action", "tool", "answer_chars"}),
     "agent.stopped": frozenset({"iteration", "domain_status", "blocker_codes"}),

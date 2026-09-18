@@ -132,13 +132,26 @@ class ExecutionService:
 
                 def retrieve(query: str, *, top_k: int) -> list[RankedChunk]:
                     rerank = request.strategy == "hybrid_rerank"
+                    include_symbols = request.strategy == "hybrid_symbol"
                     candidates = self.repositories.store.search(
                         repository_id,
                         query,
                         embedder.embed_text(query),
                         hybrid=request.strategy != "semantic",
                         top_k=max(20, top_k) if rerank else top_k,
+                        include_symbols=include_symbols,
                     )
+                    if include_symbols:
+                        run_trace.emit(
+                            "symbol.matched",
+                            symbol_candidate_count=sum(
+                                1 for c in candidates if getattr(c, "symbol_rank", None) is not None
+                            ),
+                            symbol_match_detected=any(
+                                getattr(c, "symbol_rank", None) is not None for c in candidates
+                            ),
+                            fused_candidate_count=len(candidates),
+                        )
                     if rerank:
                         return LLMReranker(llm, trace=run_trace).rerank(
                             query, candidates, top_k=top_k

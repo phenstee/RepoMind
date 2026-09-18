@@ -16,12 +16,14 @@ from repomind.db import (
     persist_repository_snapshot,
     pgvector_semantic_search,
     postgres_hybrid_search,
+    postgres_hybrid_symbol_search,
     session_scope,
 )
 from repomind.db.models import RepositoryFileRecord, RepositoryRecord
 from repomind.db.repositories import RepositoryNotFoundError
 from repomind.ingestion import CodeChunk, RepositorySnapshot
 from repomind.retrieval import (
+    DEFAULT_SYMBOL_CANDIDATE_LIMIT,
     EmbeddedChunk,
     EmbeddingVector,
     RankedChunk,
@@ -58,6 +60,7 @@ class RepositoryStore(Protocol):
         hybrid: bool,
         top_k: int,
         semantic_mode: SemanticSearchMode = SemanticSearchMode.EXACT,
+        include_symbols: bool = False,
     ) -> Sequence[RankedChunk]: ...
     def load_neighbors(
         self, repository_id: int, keys: Sequence[tuple[str, int]]
@@ -144,8 +147,19 @@ class PostgresRepositoryStore:
         hybrid: bool,
         top_k: int,
         semantic_mode: SemanticSearchMode = SemanticSearchMode.EXACT,
+        include_symbols: bool = False,
     ) -> Sequence[RankedChunk]:
         with self.factory() as session:
+            if include_symbols:
+                return postgres_hybrid_symbol_search(
+                    session,
+                    repository_id,
+                    query,
+                    embedding,
+                    top_k=top_k,
+                    symbol_candidate_limit=DEFAULT_SYMBOL_CANDIDATE_LIMIT,
+                    semantic_mode=semantic_mode,
+                )
             if hybrid:
                 return postgres_hybrid_search(
                     session,
