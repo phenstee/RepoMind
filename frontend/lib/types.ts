@@ -60,6 +60,8 @@ export interface RAGResponse {
   trace_run_id: string | null;
 }
 
+export type AgentRetrievalMode = "filesystem" | "indexed";
+
 export interface AgentResponse {
   status: string;
   final_answer: string | null;

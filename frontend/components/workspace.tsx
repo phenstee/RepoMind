@@ -286,7 +286,7 @@ export function Workspace() {
           </nav>
           {selectedId === null ? <p className="emptyState">Register or select a repository to begin.</p> : null}
           {selectedId !== null && mode === "ask" ? <AskPanel disabled={running} onSubmit={(question, strategy) => runStream<RAGResponse>(`/repositories/${selectedId}/rag/stream`, { question, strategy })} /> : null}
-          {selectedId !== null && mode === "investigate" ? <InvestigatePanel disabled={running} onSubmit={(query) => runStream<AgentResponse>(`/repositories/${selectedId}/agent/runs/stream`, { query })} /> : null}
+          {selectedId !== null && mode === "investigate" ? <InvestigatePanel disabled={running} onSubmit={(query, retrievalMode) => runStream<AgentResponse>(`/repositories/${selectedId}/agent/runs/stream`, { query, retrieval_mode: retrievalMode })} /> : null}
           {selectedId !== null && mode === "code" ? <CodePanel disabled={running} onSubmit={(request) => runStream<CodingResponse>(`/repositories/${selectedId}/coding/runs/stream`, request)} /> : null}
           <section className="liveProgress">
             <div className="panelTitle"><div><p className="eyebrow">Live progress</p><h2>{operation?.kind ?? "No active operation"}</h2></div><span className={`status ${operation?.state ?? "idle"}`}>{operation?.state ?? "idle"}</span></div>

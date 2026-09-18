@@ -151,6 +151,7 @@ _KEYS = frozenset(
         "symbol_candidate_count",
         "symbol_match_detected",
         "fused_candidate_count",
+        "result_count",
     ]
 )
 _SECRET = re.compile(
@@ -210,6 +211,7 @@ _ARGUMENTS = {
     "find_symbol": ("path", "max_results"),
     "git_status": (),
     "git_diff": ("path", "staged", "max_chars"),
+    "indexed_code_search": ("max_results",),
 }
 _OUTPUTS = {
     "read_file": ("path", "start_line", "end_line", "total_lines", "sha256"),
@@ -229,6 +231,7 @@ _OUTPUTS = {
     "find_symbol": ("truncated",),
     "git_status": ("clean",),
     "git_diff": ("path", "staged", "truncated"),
+    "indexed_code_search": ("result_count",),
 }
 
 
@@ -267,6 +270,7 @@ def sanitize_tool_arguments(name: str, data: Mapping[str, Any]) -> dict[str, Any
         "create_file": ("content",),
         "search_code": ("query",),
         "find_symbol": ("symbol",),
+        "indexed_code_search": ("query",),
     }
     for key in fields.get(name, ()):
         if isinstance(data.get(key), str):

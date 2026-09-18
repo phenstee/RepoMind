@@ -111,9 +111,13 @@ class RAGResponse(BaseModel):
     trace_run_id: UUID | None = None
 
 
+AgentRetrievalMode = Literal["filesystem", "indexed"]
+
+
 class AgentRequest(RequestModel):
     query: NonBlank
     max_iterations: int = Field(default=8, ge=1, le=20, strict=True)
+    retrieval_mode: AgentRetrievalMode = "filesystem"
     trace: bool = False
 
 

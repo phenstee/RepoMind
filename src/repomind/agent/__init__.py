@@ -1,5 +1,6 @@
 """Handwritten read-only and controlled-editing repository agent loops."""
 
+from repomind.agent.indexed import run_indexed_read_only_agent
 from repomind.agent.loop import (
     AgentError,
     StructuredAgentLLM,
@@ -16,8 +17,14 @@ from repomind.agent.models import (
     ToolObservation,
     WorkflowFeedback,
 )
+from repomind.agent.prompts import (
+    INDEXED_READ_ONLY_AGENT_SYSTEM_PROMPT,
+    READ_ONLY_AGENT_SYSTEM_PROMPT,
+)
 
 __all__ = [
+    "INDEXED_READ_ONLY_AGENT_SYSTEM_PROMPT",
+    "READ_ONLY_AGENT_SYSTEM_PROMPT",
     "AgentConfig",
     "AgentDecision",
     "AgentError",
@@ -29,5 +36,6 @@ __all__ = [
     "ToolObservation",
     "WorkflowFeedback",
     "run_editing_agent",
+    "run_indexed_read_only_agent",
     "run_read_only_agent",
 ]

@@ -253,18 +253,52 @@ def run_read_only_agent(
     tool_registry: ToolRegistry,
     *,
     config: AgentConfig | None = None,
+    system_prompt: str | None = None,
     recorder: TraceRecorder | None = None,
     trace: TraceContext | None = None,
     cancellation: CooperativeCancellation | None = None,
 ) -> AgentRun:
-    """Run with caller-supplied capabilities under the read-only agent contract."""
+    """Run with caller-supplied capabilities under the read-only agent contract.
+
+    ``system_prompt`` defaults to the baseline filesystem-only instructions.
+    Callers composing a registry with additional tools (for example indexed
+    navigation) may supply a matching prompt; the loop itself never inspects
+    which tools are registered.
+    """
+
+    return _run_read_only_agent_controlled(
+        query,
+        llm_provider,
+        tool_registry,
+        config=config or AgentConfig(),
+        system_prompt=system_prompt or READ_ONLY_AGENT_SYSTEM_PROMPT,
+        trace=trace,
+        cancellation=cancellation,
+    )
+
+
+def _run_read_only_agent_controlled(
+    query: str,
+    llm_provider: StructuredAgentLLM,
+    tool_registry: ToolRegistry,
+    *,
+    config: AgentConfig,
+    system_prompt: str,
+    observation_handler: _ObservationHandler | None = None,
+    final_decision_handler: _FinalDecisionHandler | None = None,
+    trace: TraceContext | None = None,
+    cancellation: CooperativeCancellation | None = None,
+) -> AgentRun:
+    """Run read-only mechanics with private composition-policy hooks."""
 
     return _run_agent(
         query,
         llm_provider,
         tool_registry,
-        config=config or AgentConfig(),
-        system_prompt=READ_ONLY_AGENT_SYSTEM_PROMPT,
+        config=config,
+        system_prompt=system_prompt,
+        observation_handler=observation_handler,
+        final_decision_handler=final_decision_handler,
         trace=trace,
         cancellation=cancellation,
     )

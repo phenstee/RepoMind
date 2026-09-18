@@ -1,5 +1,6 @@
-"""Repeatable retrieval, RAG, context-assembly, and coding-workflow evaluation."""
+"""Repeatable retrieval, RAG, context-assembly, agent-navigation, and coding evaluation."""
 
+from repomind.evaluation.agent_navigation import evaluate_agent_navigation
 from repomind.evaluation.coding import (
     CodingTaskRunner,
     evaluate_coding_oracle,
@@ -15,6 +16,10 @@ from repomind.evaluation.metrics import (
 )
 from repomind.evaluation.models import (
     DEFAULT_BENCHMARK_VERSION,
+    AgentNavigationBenchmarkCase,
+    AgentNavigationBenchmarkSuite,
+    AgentNavigationCaseResult,
+    AgentNavigationEvaluationReport,
     ChunkIdentity,
     CodingBenchmarkCase,
     CodingBenchmarkCaseResult,
@@ -39,6 +44,7 @@ from repomind.evaluation.models import (
 )
 from repomind.evaluation.rag import evaluate_rag
 from repomind.evaluation.reporting import (
+    format_agent_navigation_comparison,
     format_coding_report,
     format_context_assembly_comparison,
     format_rag_comparison,
@@ -48,6 +54,10 @@ from repomind.evaluation.retrieval import RetrievalStrategy, evaluate_retrieval
 
 __all__ = [
     "DEFAULT_BENCHMARK_VERSION",
+    "AgentNavigationBenchmarkCase",
+    "AgentNavigationBenchmarkSuite",
+    "AgentNavigationCaseResult",
+    "AgentNavigationEvaluationReport",
     "ChunkIdentity",
     "CodingBenchmarkCase",
     "CodingBenchmarkCaseResult",
@@ -72,12 +82,14 @@ __all__ = [
     "RetrievalCaseResult",
     "RetrievalEvaluationReport",
     "RetrievalStrategy",
+    "evaluate_agent_navigation",
     "evaluate_coding_oracle",
     "evaluate_coding_suite",
     "evaluate_context_assembly",
     "evaluate_rag",
     "evaluate_retrieval",
     "first_relevant_rank",
+    "format_agent_navigation_comparison",
     "format_coding_report",
     "format_context_assembly_comparison",
     "format_rag_comparison",

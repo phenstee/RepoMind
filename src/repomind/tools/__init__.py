@@ -5,6 +5,7 @@ from functools import partial
 from repomind.tools.editing import create_file, replace_text
 from repomind.tools.filesystem import list_directory, read_file
 from repomind.tools.git import git_diff, git_status
+from repomind.tools.indexed_search import IndexedRetriever, indexed_code_search
 from repomind.tools.models import (
     CreateFileInput,
     CreateFileOutput,
@@ -16,6 +17,9 @@ from repomind.tools.models import (
     GitDiffOutput,
     GitStatusInput,
     GitStatusOutput,
+    IndexedCodeLocation,
+    IndexedCodeSearchInput,
+    IndexedCodeSearchOutput,
     ListDirectoryInput,
     ListDirectoryOutput,
     ReadFileInput,
@@ -111,6 +115,38 @@ def create_default_tool_registry(
     return registry
 
 
+def create_investigation_tool_registry(
+    context: ToolContext,
+    retriever: IndexedRetriever,
+    *,
+    config: ToolConfig | None = None,
+) -> ToolRegistry:
+    """Add bounded indexed navigation to the baseline read-only tool set.
+
+    Additive only: the baseline six read-only tools are unchanged and remain
+    available as a filesystem fallback. ``retriever`` is the only database or
+    embedding dependency in this composition; this module never constructs
+    one itself.
+    """
+
+    registry = create_default_tool_registry(context, config=config)
+    registry.register(
+        ToolDefinition(
+            name="indexed_code_search",
+            description=(
+                "Locate code relevant to a natural-language question using the "
+                "persisted repository index. Results are navigation hints, not "
+                "current file contents - read the current file before relying on "
+                "implementation details."
+            ),
+            input_model=IndexedCodeSearchInput,
+            output_model=IndexedCodeSearchOutput,
+            handler=partial(indexed_code_search, retriever),
+        )
+    )
+    return registry
+
+
 def create_editing_tool_registry(
     context: ToolContext,
     *,
@@ -173,6 +209,10 @@ __all__ = [
     "GitDiffOutput",
     "GitStatusInput",
     "GitStatusOutput",
+    "IndexedCodeLocation",
+    "IndexedCodeSearchInput",
+    "IndexedCodeSearchOutput",
+    "IndexedRetriever",
     "ListDirectoryInput",
     "ListDirectoryOutput",
     "ReadFileInput",
@@ -198,9 +238,11 @@ __all__ = [
     "create_default_tool_registry",
     "create_editing_tool_registry",
     "create_file",
+    "create_investigation_tool_registry",
     "find_symbol",
     "git_diff",
     "git_status",
+    "indexed_code_search",
     "list_directory",
     "read_file",
     "replace_text",

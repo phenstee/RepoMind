@@ -173,6 +173,149 @@ def test_trace_sink_failure_does_not_fail_answer(api):
     assert "password" not in response.text
 
 
+def test_agent_default_retrieval_mode_is_filesystem_without_indexed_tool(api):
+    api.llm.responses.extend(
+        [
+            {
+                "action": "tool",
+                "tool_name": "indexed_code_search",
+                "tool_arguments": {"query": "value function"},
+            },
+            {"action": "final", "final_answer": "No indexed tool was available."},
+        ]
+    )
+
+    response = api.client.post("/api/v1/repositories/1/agent/runs", json={"query": "inspect"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["tool_execution_attempts"] == 1
+    assert not api.store.search_calls
+
+
+def test_agent_indexed_mode_registers_indexed_tool_and_uses_symbol_fusion(api):
+    from repomind.retrieval import FusedSearchResult
+
+    (api.repo / "src").mkdir()
+    (api.repo / "src" / "app.py").write_text(
+        "def value():\n    return 1\n", encoding="utf-8"
+    )
+    api.store.candidates = [
+        FusedSearchResult(
+            chunk=candidates()[0].chunk,
+            rank=1,
+            fusion_score=0.5,
+            source_ranks={"semantic": 1, "symbol": 1},
+        )
+    ]
+    api.llm.responses.extend(
+        [
+            {
+                "action": "tool",
+                "tool_name": "indexed_code_search",
+                "tool_arguments": {"query": "where is value computed", "max_results": 5},
+            },
+            {
+                "action": "tool",
+                "tool_name": "read_file",
+                "tool_arguments": {"path": "src/app.py"},
+            },
+            {"action": "final", "final_answer": "Found a candidate location."},
+        ]
+    )
+
+    response = api.client.post(
+        "/api/v1/repositories/1/agent/runs",
+        json={"query": "inspect", "retrieval_mode": "indexed"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["tool_execution_attempts"] == 2
+    assert len(api.store.search_calls) == 1
+    _, query, hybrid, top_k, include_symbols = api.store.search_calls[0]
+    assert query == "where is value computed"
+    assert (hybrid, top_k, include_symbols) == (True, 5, True)
+    assert "def value" not in response.text
+    assert "app.py" not in response.text
+
+
+def test_agent_indexed_mode_rejects_final_until_returned_file_is_read(api):
+    (api.repo / "src").mkdir()
+    (api.repo / "src" / "app.py").write_text(
+        "def value():\n    return 1\n", encoding="utf-8"
+    )
+    api.store.candidates = candidates()
+    api.llm.responses.extend(
+        [
+            {
+                "action": "tool",
+                "tool_name": "indexed_code_search",
+                "tool_arguments": {"query": "where is value computed"},
+            },
+            {"action": "final", "final_answer": "The index says value returns 999."},
+            {
+                "action": "tool",
+                "tool_name": "read_file",
+                "tool_arguments": {"path": "src/app.py"},
+            },
+            {"action": "final", "final_answer": "The current file shows value returns 1."},
+        ]
+    )
+
+    response = api.client.post(
+        "/api/v1/repositories/1/agent/runs",
+        json={"query": "inspect", "retrieval_mode": "indexed", "max_iterations": 4},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "completed"
+    assert response.json()["final_answer"] == "The current file shows value returns 1."
+    assert response.json()["tool_execution_attempts"] == 2
+    assert "trusted-workflow-instruction" in api.llm.calls[2][0]
+
+
+def test_agent_indexed_mode_handles_empty_retrieval_gracefully(api):
+    api.store.candidates = []
+    api.llm.responses.extend(
+        [
+            {
+                "action": "tool",
+                "tool_name": "indexed_code_search",
+                "tool_arguments": {"query": "nothing matches this"},
+            },
+            {"action": "final", "final_answer": "No relevant location was found."},
+        ]
+    )
+
+    response = api.client.post(
+        "/api/v1/repositories/1/agent/runs",
+        json={"query": "inspect", "retrieval_mode": "indexed"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "completed"
+    assert response.json()["tool_execution_attempts"] == 1
+
+
+def test_agent_invalid_retrieval_mode_is_rejected(api):
+    response = api.client.post(
+        "/api/v1/repositories/1/agent/runs",
+        json={"query": "inspect", "retrieval_mode": "graph"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_agent_request_retrieval_mode_round_trips_through_job_payload_shape():
+    from repomind.api.models import AgentRequest
+
+    default_payload = {"query": "inspect the repository"}
+    assert AgentRequest.model_validate(default_payload).retrieval_mode == "filesystem"
+
+    original = AgentRequest(query="inspect", retrieval_mode="indexed", max_iterations=5)
+    round_tripped = AgentRequest.model_validate(original.model_dump(mode="json"))
+    assert round_tripped == original
+
+
 def test_read_only_agent_cannot_execute_mutation_or_verifiers(api):
     api.llm.responses.extend(
         [

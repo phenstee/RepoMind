@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from typing import Protocol
 
 from repomind.evaluation.models import (
+    AgentNavigationEvaluationReport,
     CodingEvaluationReport,
     ContextAssemblyEvaluationReport,
     RAGEvaluationReport,
@@ -160,6 +161,61 @@ def format_context_assembly_comparison(
                 "Mean Packed",
                 "Budget Util.",
                 "Mean Dedup",
+            ),
+            rows,
+        )
+        + "\n\nCase details\n"
+        + "\n".join(details)
+    )
+
+
+def format_agent_navigation_comparison(
+    reports: Sequence[AgentNavigationEvaluationReport],
+) -> str:
+    """Format filesystem-vs-indexed navigation orchestration metrics.
+
+    These are scripted-orchestration metrics, not live-model-quality
+    metrics: they show whether tool composition and safety plumbing behave
+    correctly, not whether a real model would choose these tools.
+    """
+
+    if not reports:
+        raise ValueError("at least one agent navigation report is required")
+    _validate_comparable(reports)
+    rows = [
+        (
+            report.retrieval_mode,
+            f"{report.task_success_rate:.3f}",
+            f"{report.mean_tool_calls:.3f}",
+            f"{report.mean_indexed_search_calls:.3f}",
+            f"{report.mean_read_file_calls:.3f}",
+            f"{report.mean_filesystem_search_calls:.3f}",
+            f"{report.verified_retrieval_followup_rate:.3f}",
+        )
+        for report in reports
+    ]
+    details = [
+        (
+            f"{report.retrieval_mode}/{result.case_id} [{result.category}]: "
+            f"task_success={result.task_success}, status={result.status}, "
+            f"tool_calls={result.tool_calls}, "
+            f"indexed_search_calls={result.indexed_search_calls}, "
+            f"read_file_calls={result.read_file_calls}, "
+            f"verified_retrieval_followup={result.verified_retrieval_followup}"
+        )
+        for report in reports
+        for result in report.case_results
+    ]
+    return (
+        _table(
+            (
+                "Retrieval Mode",
+                "Task Success",
+                "Mean Tool Calls",
+                "Mean Indexed Search",
+                "Mean read_file",
+                "Mean FS Search",
+                "Verified Followup",
             ),
             rows,
         )

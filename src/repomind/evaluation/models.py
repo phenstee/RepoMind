@@ -6,6 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from repomind.agent import AgentDecision, AgentRunStatus
 from repomind.coding import CodingTask, CodingTaskStatus, VerificationPolicy
 from repomind.ingestion import validate_repository_relative_path
 from repomind.rag import ContextStrategy
@@ -444,4 +445,92 @@ class CodingEvaluationReport(BaseModel):
     def _validate_report(self) -> "CodingEvaluationReport":
         if self.case_count != len(self.case_results):
             raise ValueError("coding case count must match case results")
+        return self
+
+
+class AgentNavigationBenchmarkCase(_NamedCase):
+    """One scripted read-only investigation task with fully deterministic decisions.
+
+    ``decisions`` fully controls the fake LLM's behavior; the harness never
+    feeds ``expected_facts``/``forbidden_facts`` back into the model or tools.
+    """
+
+    task: str = Field(min_length=1, max_length=10_000)
+    category: str = Field(min_length=1, max_length=64)
+    decisions: tuple[AgentDecision, ...] = Field(min_length=1)
+    expected_facts: tuple[str, ...] = Field(min_length=1, max_length=50)
+    forbidden_facts: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_case(self) -> "AgentNavigationBenchmarkCase":
+        if not self.task.strip():
+            raise ValueError("agent navigation task must not be blank")
+        if self.decisions[-1].action != "final":
+            raise ValueError("the last scripted decision must be a final answer")
+        if any(not fact.strip() for fact in (*self.expected_facts, *self.forbidden_facts)):
+            raise ValueError("expected/forbidden facts must not be blank")
+        return self
+
+
+class AgentNavigationBenchmarkSuite(BaseModel):
+    """A versioned set of scripted read-only investigation tasks."""
+
+    model_config = ConfigDict(frozen=True)
+
+    version: str = Field(default=DEFAULT_BENCHMARK_VERSION, min_length=1, max_length=200)
+    cases: tuple[AgentNavigationBenchmarkCase, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_suite(self) -> "AgentNavigationBenchmarkSuite":
+        if not self.version.strip():
+            raise ValueError("benchmark version must not be blank")
+        ids = [case.id for case in self.cases]
+        if len(ids) != len(set(ids)):
+            raise ValueError("agent navigation benchmark case IDs must be unique")
+        return self
+
+
+class AgentNavigationCaseResult(BaseModel):
+    """One case's orchestration evidence: tool usage, verification, grounding."""
+
+    model_config = ConfigDict(frozen=True)
+
+    case_id: str
+    category: str
+    retrieval_mode: str
+    trace_run_id: UUID | None = None
+    status: AgentRunStatus
+    task_success: bool
+    final_answer_grounded: bool
+    tool_calls: int = Field(ge=0)
+    indexed_search_calls: int = Field(ge=0)
+    read_file_calls: int = Field(ge=0)
+    filesystem_search_calls: int = Field(ge=0)
+    verified_retrieval_followup: bool
+    final_answer: str
+
+
+class AgentNavigationEvaluationReport(BaseModel):
+    """Aggregate navigation-orchestration metrics for one retrieval mode."""
+
+    model_config = ConfigDict(frozen=True)
+
+    benchmark_version: str
+    mode: EvaluationMode
+    retrieval_mode: str
+    case_results: tuple[AgentNavigationCaseResult, ...] = Field(min_length=1)
+    case_count: int = Field(gt=0)
+    task_success_rate: float = Field(ge=0, le=1)
+    mean_tool_calls: float = Field(ge=0)
+    mean_indexed_search_calls: float = Field(ge=0)
+    mean_read_file_calls: float = Field(ge=0)
+    mean_filesystem_search_calls: float = Field(ge=0)
+    verified_retrieval_followup_rate: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _validate_report(self) -> "AgentNavigationEvaluationReport":
+        if self.case_count != len(self.case_results):
+            raise ValueError("agent navigation case count must match case results")
+        if any(result.retrieval_mode != self.retrieval_mode for result in self.case_results):
+            raise ValueError("case retrieval modes must match the report retrieval mode")
         return self

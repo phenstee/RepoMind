@@ -5,7 +5,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Protocol
 
-from repomind.agent import AgentConfig, EditingAgentConfig, run_read_only_agent
+from repomind.agent import (
+    AgentConfig,
+    EditingAgentConfig,
+    run_indexed_read_only_agent,
+    run_read_only_agent,
+)
 from repomind.api.errors import APIError, public_error
 from repomind.api.models import (
     AgentRequest,
@@ -42,7 +47,12 @@ from repomind.rag import (
     answer_repository_question_with_retriever,
 )
 from repomind.retrieval import EmbeddingVector, LLMReranker, RankedChunk
-from repomind.tools import ToolContext, create_default_tool_registry, create_editing_tool_registry
+from repomind.tools import (
+    ToolContext,
+    create_default_tool_registry,
+    create_editing_tool_registry,
+    create_investigation_tool_registry,
+)
 
 
 class EmbeddingProvider(ChunkEmbedder, Protocol):
@@ -203,8 +213,30 @@ class ExecutionService:
             cancellation.checkpoint()
             _, root = self.repositories.locate(repository_id)
             with self.repositories.workspace.operation(root):
-                registry = create_default_tool_registry(ToolContext(repository_root=root))
-                result = run_read_only_agent(
+                context = ToolContext(repository_root=root)
+                if request.retrieval_mode == "indexed":
+                    embedder = self.embedding_factory(run_trace)
+
+                    def indexed_retriever(query: str, *, top_k: int) -> list[RankedChunk]:
+                        # M24's strongest fused strategy; navigation only, so
+                        # this never sees embeddings/SQL beyond one lazy call.
+                        return list(
+                            self.repositories.store.search(
+                                repository_id,
+                                query,
+                                embedder.embed_text(query),
+                                hybrid=True,
+                                top_k=top_k,
+                                include_symbols=True,
+                            )
+                        )
+
+                    registry = create_investigation_tool_registry(context, indexed_retriever)
+                    agent_runner = run_indexed_read_only_agent
+                else:
+                    registry = create_default_tool_registry(context)
+                    agent_runner = run_read_only_agent
+                result = agent_runner(
                     request.query,
                     self.llm_factory(run_trace),
                     registry,

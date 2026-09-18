@@ -17,6 +17,8 @@ DEFAULT_VERIFICATION_TIMEOUT_SECONDS = 120
 DEFAULT_MAX_VERIFICATION_OUTPUT_CHARS = 20_000
 DEFAULT_MAX_TEST_FAILURES = 10
 DEFAULT_MAX_VERIFICATION_PATHS = 32
+DEFAULT_MAX_INDEXED_RESULTS = 5
+MAX_INDEXED_RESULTS = 10
 
 
 def _validate_tool_path(path: Path, *, allow_root: bool) -> Path:
@@ -333,3 +335,54 @@ class GitDiffOutput(BaseModel):
     truncated: bool
     staged: bool
     path: Path | None
+
+
+class IndexedCodeSearchInput(ToolInput):
+    """Bounded intent only: no retrieval-internal knobs are exposed to the model."""
+
+    query: str = Field(min_length=1, max_length=1_000)
+    max_results: int = Field(
+        default=DEFAULT_MAX_INDEXED_RESULTS, gt=0, le=MAX_INDEXED_RESULTS, strict=True
+    )
+
+    @field_validator("query")
+    @classmethod
+    def _validate_query(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("query must not be empty or whitespace-only")
+        return value
+
+
+class IndexedCodeLocation(BaseModel):
+    """A navigation hint from the persisted index, never a content guarantee."""
+
+    relative_path: Path
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+    rank: int = Field(ge=1)
+    chunk_kind: str | None = None
+    qualified_symbol_name: str | None = Field(default=None, max_length=2048)
+    sources: tuple[str, ...] = Field(default_factory=tuple)
+
+    @field_validator("relative_path")
+    @classmethod
+    def _validate_path(cls, value: Path) -> Path:
+        return validate_repository_relative_path(value)
+
+    @model_validator(mode="after")
+    def _validate_range(self) -> "IndexedCodeLocation":
+        if self.end_line < self.start_line:
+            raise ValueError("end_line must be greater than or equal to start_line")
+        return self
+
+
+class IndexedCodeSearchOutput(BaseModel):
+    query: str
+    locations: list[IndexedCodeLocation]
+    result_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def _validate_count(self) -> "IndexedCodeSearchOutput":
+        if self.result_count != len(self.locations):
+            raise ValueError("result_count must match the number of locations")
+        return self

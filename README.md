@@ -140,6 +140,23 @@ unchanged two-source `reciprocal_rank_fusion` wrapper, so historical hybrid
 retrieval is byte-for-byte unaffected. See
 [Symbol-aware retrieval fusion](#symbol-aware-retrieval-fusion) below.
 
+**Milestone 25: retrieval-aware investigation agent + indexed navigation
+tool** is complete. The read-only agent gains one optional additional tool,
+`indexed_code_search`, that uses RepoMind's existing retrieval stack (the
+same `hybrid_symbol` fusion from Milestone 24) to suggest candidate
+locations for a natural-language question. The persisted index is a
+navigation hint, never authoritative evidence: the tool returns only
+`relative_path`/line ranges/provenance, never source content, so the agent
+must still call `read_file` to observe current source before making an
+implementation claim. A deterministic indexed-mode completion gate rejects a
+final action after a successful non-empty indexed search until `read_file`
+successfully verifies one returned path. The filesystem-only baseline (`search_code`,
+`find_symbol`, `list_directory`, `read_file`, `git_status`, `git_diff`)
+remains the default and is completely unaffected; indexed navigation is
+opt-in per request via `AgentRequest.retrieval_mode = "indexed"`. See
+[Retrieval-aware investigation agent](#retrieval-aware-investigation-agent)
+below.
+
 ## Local HTTP API
 
 The API is for **trusted local development only**. It has **no authentication or
@@ -333,6 +350,12 @@ LLM reranker before the existing citation-validating RAG pipeline. Responses con
 returns status, final answer, iteration/model/tool-attempt counts, and optional trace
 ID; raw history and tool observations are omitted.
 
+`AgentRequest.retrieval_mode` accepts `"filesystem"` (default, unchanged) or
+`"indexed"` (Milestone 25 bounded `indexed_code_search` navigation tool; see
+[Retrieval-aware investigation agent](#retrieval-aware-investigation-agent)).
+Low-level retrieval settings (candidate limits, RRF constants, embedding
+models) are never exposed through this field.
+
 Coding uses a separate request contract:
 
 ```json
@@ -507,7 +530,9 @@ only when another trusted local origin is necessary. It is deliberately not
 The workspace flow is: register a safe workspace-relative repository binding,
 select it, index it, then use **Ask**, **Investigate**, or **Code**. Ask keeps
 Q&A history only in browser state, so it clears on refresh. Investigate is visibly
-read-only. Code requires an explicit checkbox before it sends a controlled coding
+read-only and defaults to filesystem-only code search; a compact selector can opt
+one request into indexed navigation (Milestone 25), never exposing retrieval
+internals. Code requires an explicit checkbox before it sends a controlled coding
 request; it exposes only the existing relative pytest/Ruff path scopes, never
 shell commands, executables, environment variables, Git controls, or diffs. Completed
 coding results render the plan, criterion-to-step coverage, reviewer verdict, concise
@@ -1831,8 +1856,93 @@ Agent: question → decision → live tool → observation → decision → ... 
 RAG supplies a predetermined retrieved context. The agent can dynamically choose
 what live working-tree evidence to inspect next, recover from failed inspection,
 or answer immediately without tools. `run_read_only_agent` and the default
-registry remain strictly read-only and do not expose retrieval, databases, file
-mutation, tests, or arbitrary shell commands as tools.
+registry remain strictly read-only and never expose file mutation, tests, or
+arbitrary shell commands as tools. Milestone 25 optionally adds one bounded,
+read-only retrieval tool to this same loop without changing any of that; see
+below.
+
+## Retrieval-aware investigation agent
+
+Milestone 25 does not add a new retrieval algorithm. It gives the existing
+read-only agent an optional, explicit way to use the retrieval system
+Milestones 1–24 already built to *locate* relevant code, while keeping the
+current filesystem tools as an always-available baseline and fallback:
+
+```text
+Filesystem mode (default):
+  agent → search_code / find_symbol / list_directory / read_file → current files
+
+Indexed mode (opt-in):
+  agent → indexed_code_search → persisted semantic+BM25+symbol locations
+        → read_file → current files
+```
+
+**The critical distinction, preserved throughout:** indexed retrieval is a
+*navigation hint*; the current filesystem is the *only* authority. The
+persisted index can be older than the working tree it was built from, and
+this milestone does not add a freshness/staleness-detection subsystem to
+prove otherwise — inspection found no existing mechanism that could cheaply
+and deterministically prove index-to-working-tree freshness, and building
+one (hashing, file watching) was explicitly out of scope. Instead, the tool
+limits stale evidence exposure: `indexed_code_search` returns only
+`relative_path`, `start_line`/`end_line`, `rank`, and (when available)
+`chunk_kind`/`qualified_symbol_name`/contributing-source labels — **never
+chunk content**. Those location and symbol hints can themselves be stale, so
+indexed mode also has a deterministic runtime gate: after each successful
+non-empty indexed search, finalization is intercepted until a successful
+`read_file` observes one of that search's returned paths. Failed or unrelated
+reads do not satisfy the gate; empty results and failed searches do not create
+one. A later non-empty indexed search replaces the verified state and requires
+current-source confirmation again.
+
+`IndexedCodeSearchInput` takes only `query` (nonblank, ≤1,000 characters) and
+`max_results` (1–10, default 5); no RRF constant, HNSW parameter, symbol-tier
+weight, embedding model, or raw SQL option is exposed — the agent expresses
+intent, not retrieval tuning. The query embedding happens lazily, exactly
+once, only when the tool actually executes; no embedding call happens merely
+because a registry was constructed, and there is no query rewriting,
+multi-query fan-out, or HyDE.
+
+The tool is composed through one small injected protocol
+(`IndexedRetriever`, a callable `(query, *, top_k) -> Sequence[RankedChunk]`,
+mirroring the existing `rag.pipeline.Retriever` shape) so the generic
+`repomind.tools` package still owns no SQLAlchemy session, OpenAI client, or
+FastAPI state. `create_default_tool_registry` is completely unchanged;
+`create_investigation_tool_registry(context, retriever)` is a new, additive
+composition that layers exactly one extra tool on top of it. The application
+layer (`ExecutionService.agent`) is the only place that builds a real
+retriever, from the same `RepositoryStore.search(..., hybrid=True,
+include_symbols=True)` path Milestone 24's `hybrid_symbol` strategy already
+uses — no second retrieval implementation was written for the agent.
+
+`run_read_only_agent` gained one optional `system_prompt` parameter (default
+unchanged). Indexed mode uses a small `run_indexed_read_only_agent` composition
+around the same generic loop: an observation controller retains only returned
+relative-path identities, and the loop's existing final-decision hook emits
+trusted workflow feedback when confirmation is missing. The generic decision
+loop never special-cases `indexed_code_search` by name, and filesystem mode
+installs no new completion policy.
+
+`AgentRequest.retrieval_mode` (`"filesystem"` default, or `"indexed"`) is the
+only new public surface, and it round-trips through the existing durable
+`agent` job payload unchanged (it is a plain additional Pydantic field on a
+JSONB-stored request; no migration was needed). The coding/editing agent is
+**not** touched in this milestone — mutation plus a possibly-stale index
+raises different questions deliberately left to a future milestone.
+
+`repo-agent-eval-v1` (`uv run python -m benchmarks.agent_navigation_eval`) is
+a new, fully offline, fully scripted evaluation comparing filesystem-only and
+indexed-navigation orchestration on the same synthetic fixture repository:
+exact-symbol lookup, a natural-language query whose wording does not match
+the source literally, evidence spanning two files, an exact-error-string
+case literal search already handles well, an indexed-search miss with
+filesystem fallback, and source containing an embedded prompt-injection
+attempt. A separate stale-index safety demonstration (excluded from the main
+comparison so one deliberately-blocked case never distorts either mode's
+success rate) proves that the runtime workflow accepts a verified answer and
+intercepts an unverified stale-index final action. This is a
+scripted-orchestration benchmark: it validates tool composition, bounding,
+and safety plumbing, not whether a live model will choose tools well.
 
 ## Controlled editing and safe verification
 
@@ -2595,6 +2705,26 @@ uv run python scripts/inspect_repository.py . --chunks
   of planner, executor, or reviewer prose.
 - **This is not multi-agent architecture.** Planner and reviewer are single typed
   model calls inside one existing coding workflow, without tools or independent loops.
+- **Retrieval is navigation, current source is authority.** These are different
+  questions with different failure modes; collapsing them would let a stale
+  index silently masquerade as observed fact.
+- **The indexed tool returns locations, never chunk content.** This is the
+  first boundary against stale evidence exposure. Because locations and symbol
+  metadata can also be stale, an indexed-mode final-decision policy additionally
+  requires a successful `read_file` on a returned current-worktree path before
+  accepting finalization.
+- **Indexed navigation is one small injected protocol, not a new retrieval
+  path.** `IndexedRetriever` is a plain callable (mirroring the existing
+  `Retriever` shape already used by RAG); the tool package still owns no
+  database session or model client, and the application layer reuses
+  Milestone 24's `hybrid_symbol` fusion rather than writing a second one.
+- **No coding-agent integration yet.** A mutating agent plus a possibly-stale
+  index raises distinct freshness questions this milestone deliberately left
+  to a future one rather than answering by assumption.
+- **No new retrieval algorithm, no GraphRAG, no MCP, no multi-agent.** This
+  milestone is agent-side plumbing over Milestones 22–24's already-verified
+  retrieval; it does not touch AST chunking, HNSW, BM25, RRF, symbol tiers,
+  context assembly, or reranking.
 
 ## Roadmap
 
@@ -2624,5 +2754,17 @@ The full project roadmap is described in the RepoMind engineering brief:
 21. Structured planner + independent reviewer (complete)
 22. Retrieval V2: structural chunking + pgvector HNSW ANN (complete)
 23. Retrieval quality + context assembly V2 (complete)
-24. Symbol-aware retrieval fusion + realistic benchmark corpus (complete/current)
-25. Next capability milestone (next; not yet selected)
+24. Symbol-aware retrieval fusion + realistic benchmark corpus (complete)
+25. Retrieval-aware investigation agent + indexed navigation tool (complete/current)
+26. Next capability milestone (next; not yet selected)
+
+Potential future directions for Milestone 26 (not yet selected or implemented):
+
+- safe retrieval assistance for the coding agent, with explicit mutation and
+  index-freshness rules
+- broader controlled editing operations
+- persistent lexical retrieval scaling (BM25 still rebuilds from persisted
+  chunks per hybrid query; see [BM25 and hybrid retrieval](#bm25-and-hybrid-retrieval))
+- CI
+- MCP
+- deeper agent capabilities

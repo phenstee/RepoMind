@@ -2,23 +2,24 @@
 
 import { useState } from "react";
 
-import type { AgentResponse } from "../lib/types";
+import type { AgentResponse, AgentRetrievalMode } from "../lib/types";
 
 export function InvestigatePanel({
   disabled,
   onSubmit,
 }: {
   disabled: boolean;
-  onSubmit: (query: string) => Promise<AgentResponse | undefined>;
+  onSubmit: (query: string, retrievalMode: AgentRetrievalMode) => Promise<AgentResponse | undefined>;
 }) {
   const [query, setQuery] = useState("");
+  const [retrievalMode, setRetrievalMode] = useState<AgentRetrievalMode>("filesystem");
   const [result, setResult] = useState<AgentResponse | null>(null);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const requestedQuery = query.trim();
     if (requestedQuery.length === 0) return;
-    const response = await onSubmit(requestedQuery);
+    const response = await onSubmit(requestedQuery, retrievalMode);
     if (response !== undefined) {
       setResult(response);
     }
@@ -35,6 +36,16 @@ export function InvestigatePanel({
         <label>
           Investigation task
           <textarea value={query} onChange={(event) => setQuery(event.target.value)} required maxLength={10_000} />
+        </label>
+        <label className="inlineControl">
+          Code search
+          <select
+            value={retrievalMode}
+            onChange={(event) => setRetrievalMode(event.target.value as AgentRetrievalMode)}
+          >
+            <option value="filesystem">Filesystem</option>
+            <option value="indexed">Indexed (experimental)</option>
+          </select>
         </label>
         <button type="submit" disabled={disabled}>Run read-only investigation</button>
       </form>
