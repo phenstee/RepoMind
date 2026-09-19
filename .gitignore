@@ -35,3 +35,7 @@ node_modules/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local demo workspace bind-mounted into the api/worker containers by docker-compose.yml
+workspace/*
+!workspace/.gitkeep

@@ -1,0 +1,45 @@
+# Backend Docker build context exclusions. The backend Dockerfile only ever
+# COPYs specific paths it needs (pyproject.toml, uv.lock, src/, alembic/,
+# alembic.ini, README.md); this file keeps the upload context small and is
+# defense in depth against ever accidentally COPYing secrets or local state.
+
+.git/
+.github/
+.claude/
+
+# Secrets - never sent to the Docker build context.
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.pytest-cache/
+.pytest-cache-*/
+.pytest-tmp/
+.pytest-tmp-*/
+.pytest-temp/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+.uv-cache/
+
+# Frontend (irrelevant to the backend image; frontend has its own .dockerignore)
+frontend/
+
+# Local demo workspace (bind-mounted at runtime, not baked into the image)
+workspace/
+
+# OS/editor
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+Dockerfile
+docker-compose.yml

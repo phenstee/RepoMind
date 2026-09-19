@@ -1,0 +1,18 @@
+# Frontend Docker build context exclusions.
+
+node_modules/
+.next/
+.uv-cache/
+.npm-cache/
+
+# Secrets/local overrides - never sent to the Docker build context.
+.env.local
+.env.local.*
+!.env.local.example
+
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+Dockerfile
