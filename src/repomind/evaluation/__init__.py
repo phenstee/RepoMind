@@ -1,6 +1,20 @@
 """Repeatable retrieval, RAG, context-assembly, agent-navigation, and coding evaluation."""
 
-from repomind.evaluation.agent_navigation import evaluate_agent_navigation
+from repomind.evaluation.agent_navigation import (
+    DEFAULT_LIVE_MAX_ITERATIONS,
+    evaluate_agent_navigation,
+    merge_agent_navigation_reports,
+)
+from repomind.evaluation.agent_navigation_live import (
+    HARNESS_SCHEMA_VERSION,
+    LiveAgentNavigationHarnessResult,
+    LiveAgentNavigationRun,
+    LiveAgentNavigationRunMetrics,
+    LiveEvaluationAuthorizationError,
+    build_live_navigation_harness_result,
+    git_commit_sha,
+    require_live_authorization,
+)
 from repomind.evaluation.coding import (
     CodingTaskRunner,
     evaluate_coding_oracle,
@@ -54,6 +68,8 @@ from repomind.evaluation.retrieval import RetrievalStrategy, evaluate_retrieval
 
 __all__ = [
     "DEFAULT_BENCHMARK_VERSION",
+    "DEFAULT_LIVE_MAX_ITERATIONS",
+    "HARNESS_SCHEMA_VERSION",
     "AgentNavigationBenchmarkCase",
     "AgentNavigationBenchmarkSuite",
     "AgentNavigationCaseResult",
@@ -72,6 +88,10 @@ __all__ = [
     "ContextRetrievalStrategy",
     "EvaluationMode",
     "FileTextExpectation",
+    "LiveAgentNavigationHarnessResult",
+    "LiveAgentNavigationRun",
+    "LiveAgentNavigationRunMetrics",
+    "LiveEvaluationAuthorizationError",
     "OracleCheckResult",
     "RAGBenchmarkCase",
     "RAGBenchmarkSuite",
@@ -82,6 +102,7 @@ __all__ = [
     "RetrievalCaseResult",
     "RetrievalEvaluationReport",
     "RetrievalStrategy",
+    "build_live_navigation_harness_result",
     "evaluate_agent_navigation",
     "evaluate_coding_oracle",
     "evaluate_coding_suite",
@@ -94,8 +115,11 @@ __all__ = [
     "format_context_assembly_comparison",
     "format_rag_comparison",
     "format_retrieval_comparison",
+    "git_commit_sha",
     "mean_reciprocal_rank",
+    "merge_agent_navigation_reports",
     "ndcg_at_k",
     "recall_at_k",
     "reciprocal_rank",
+    "require_live_authorization",
 ]

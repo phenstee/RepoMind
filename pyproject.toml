@@ -24,6 +24,7 @@ dependencies = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 asyncio_mode = "auto"
 markers = [
     "postgres: requires a real PostgreSQL database with the pgvector extension",

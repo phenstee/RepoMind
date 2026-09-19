@@ -19,6 +19,7 @@ from repomind.agent import (
     AgentDecision,
     AgentRunStatus,
     AgentStep,
+    StructuredAgentLLM,
     run_indexed_read_only_agent,
     run_read_only_agent,
 )
@@ -112,8 +113,21 @@ def _run_case(
     retrieval_mode: str,
     indexed_retriever: IndexedRetriever | None,
     trace: TraceContext,
+    mode: EvaluationMode,
+    llm_provider: StructuredAgentLLM | None,
+    live_max_iterations: int,
 ) -> AgentNavigationCaseResult:
-    llm = _ScriptedAgentLLM(case.decisions)
+    if mode is EvaluationMode.LIVE_MODEL:
+        # Live mode never sees case.decisions - a real model chooses its own
+        # actions, and the run is bounded by an explicit live iteration
+        # budget instead of the scripted decision count.
+        if llm_provider is None:
+            raise ValueError("live_model mode requires an llm_provider")
+        llm = llm_provider
+        max_iterations = live_max_iterations
+    else:
+        llm = _ScriptedAgentLLM(case.decisions)
+        max_iterations = len(case.decisions)
     context = ToolContext(repository_root=workspace)
     if retrieval_mode == "indexed":
         if indexed_retriever is None:
@@ -128,7 +142,7 @@ def _run_case(
         case.task,
         llm,
         registry,
-        config=AgentConfig(max_iterations=len(case.decisions)),
+        config=AgentConfig(max_iterations=max_iterations),
         trace=trace,
     )
     counts = _tool_call_counts(run.steps)
@@ -154,56 +168,17 @@ def _mean(values: Sequence[int]) -> float:
     return sum(values) / len(values)
 
 
-@traced_run("evaluation")
-def evaluate_agent_navigation(
-    suite: AgentNavigationBenchmarkSuite,
-    workspace: Path,
+def _aggregate_report(
     *,
+    benchmark_version: str,
+    mode: EvaluationMode,
     retrieval_mode: str,
-    indexed_retriever: IndexedRetriever | None = None,
-    mode: EvaluationMode = EvaluationMode.OFFLINE_SCRIPTED,
-    recorder: TraceRecorder | None = None,
-    trace: TraceContext | None = None,
+    case_results: tuple[AgentNavigationCaseResult, ...],
 ) -> AgentNavigationEvaluationReport:
-    """Run every case through one real agent-loop/registry composition.
-
-    ``workspace`` is a directory of real files the fixture cases read from;
-    ``indexed_retriever`` (required when ``retrieval_mode == "indexed"``) is
-    a deterministic fake standing in for persisted retrieval.
-    """
-
-    trace = trace if trace is not None else TraceContext()
-    resolved_mode = EvaluationMode(mode)
-    if resolved_mode is EvaluationMode.OFFLINE_FIXTURE:
-        raise ValueError(
-            "agent navigation evaluation mode must be offline_scripted or live_model"
-        )
-    if retrieval_mode not in {"filesystem", "indexed"}:
-        raise ValueError("retrieval_mode must be 'filesystem' or 'indexed'")
-
-    results: list[AgentNavigationCaseResult] = []
-    for case in suite.cases:
-        with trace.operation(
-            "evaluation.case",
-            case_id=case.id,
-            suite_version=suite.version,
-            mode=resolved_mode,
-        ) as metadata:
-            result = _run_case(
-                case,
-                workspace,
-                retrieval_mode=retrieval_mode,
-                indexed_retriever=indexed_retriever,
-                trace=trace,
-            )
-            results.append(result)
-            metadata.update(case_id=case.id, task_success=result.task_success)
-
-    case_results = tuple(results)
     count = len(case_results)
     return AgentNavigationEvaluationReport(
-        benchmark_version=suite.version,
-        mode=resolved_mode,
+        benchmark_version=benchmark_version,
+        mode=mode,
         retrieval_mode=retrieval_mode,
         case_results=case_results,
         case_count=count,
@@ -220,4 +195,114 @@ def evaluate_agent_navigation(
             result.verified_retrieval_followup for result in case_results
         )
         / count,
+    )
+
+
+def merge_agent_navigation_reports(
+    reports: Sequence[AgentNavigationEvaluationReport],
+) -> AgentNavigationEvaluationReport:
+    """Combine several same-mode, same-retrieval-mode reports into one.
+
+    Used when cases were graded through separate ``evaluate_agent_navigation``
+    calls - for example, live indexed mode evaluates one case per call so
+    each case can receive its own case-scoped deterministic retriever - but
+    should still be reported as a single aggregate result for that retrieval
+    mode, using the exact same aggregation formulas as a single-call
+    evaluation over all of those cases together.
+    """
+
+    if not reports:
+        raise ValueError("at least one report is required")
+    first = reports[0]
+    if any(
+        report.mode != first.mode
+        or report.retrieval_mode != first.retrieval_mode
+        or report.benchmark_version != first.benchmark_version
+        for report in reports
+    ):
+        raise ValueError(
+            "all reports must share the same benchmark_version, mode, and retrieval_mode"
+        )
+
+    case_results = tuple(result for report in reports for result in report.case_results)
+    if len({result.case_id for result in case_results}) != len(case_results):
+        raise ValueError("merged reports must not contain duplicate case IDs")
+    return _aggregate_report(
+        benchmark_version=first.benchmark_version,
+        mode=first.mode,
+        retrieval_mode=first.retrieval_mode,
+        case_results=case_results,
+    )
+
+
+# Live runs are bounded independently of any scripted decision count; see
+# repomind.evaluation.agent_navigation_live for the confirmation-gated harness
+# that supplies a real StructuredAgentLLM here.
+DEFAULT_LIVE_MAX_ITERATIONS = 8
+
+
+@traced_run("evaluation")
+def evaluate_agent_navigation(
+    suite: AgentNavigationBenchmarkSuite,
+    workspace: Path,
+    *,
+    retrieval_mode: str,
+    indexed_retriever: IndexedRetriever | None = None,
+    mode: EvaluationMode = EvaluationMode.OFFLINE_SCRIPTED,
+    llm_provider: StructuredAgentLLM | None = None,
+    live_max_iterations: int = DEFAULT_LIVE_MAX_ITERATIONS,
+    recorder: TraceRecorder | None = None,
+    trace: TraceContext | None = None,
+) -> AgentNavigationEvaluationReport:
+    """Run every case through one real agent-loop/registry composition.
+
+    ``workspace`` is a directory of real files the fixture cases read from;
+    ``indexed_retriever`` (required when ``retrieval_mode == "indexed"``) is
+    a deterministic fake standing in for persisted retrieval.
+
+    In ``mode=EvaluationMode.LIVE_MODEL``, ``llm_provider`` (typically a real
+    ``OpenAILLMClient``) makes every decision instead of the case's scripted
+    ``decisions``, and each run is bounded by ``live_max_iterations`` rather
+    than ``len(case.decisions)``.
+    """
+
+    trace = trace if trace is not None else TraceContext()
+    resolved_mode = EvaluationMode(mode)
+    if resolved_mode is EvaluationMode.OFFLINE_FIXTURE:
+        raise ValueError(
+            "agent navigation evaluation mode must be offline_scripted or live_model"
+        )
+    if retrieval_mode not in {"filesystem", "indexed"}:
+        raise ValueError("retrieval_mode must be 'filesystem' or 'indexed'")
+    if resolved_mode is EvaluationMode.LIVE_MODEL and llm_provider is None:
+        raise ValueError("mode='live_model' requires an llm_provider")
+    if live_max_iterations <= 0:
+        raise ValueError("live_max_iterations must be positive")
+
+    results: list[AgentNavigationCaseResult] = []
+    for case in suite.cases:
+        with trace.operation(
+            "evaluation.case",
+            case_id=case.id,
+            suite_version=suite.version,
+            mode=resolved_mode,
+        ) as metadata:
+            result = _run_case(
+                case,
+                workspace,
+                retrieval_mode=retrieval_mode,
+                indexed_retriever=indexed_retriever,
+                trace=trace,
+                mode=resolved_mode,
+                llm_provider=llm_provider,
+                live_max_iterations=live_max_iterations,
+            )
+            results.append(result)
+            metadata.update(case_id=case.id, task_success=result.task_success)
+
+    return _aggregate_report(
+        benchmark_version=suite.version,
+        mode=resolved_mode,
+        retrieval_mode=retrieval_mode,
+        case_results=tuple(results),
     )
