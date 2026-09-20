@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from repomind.agent import (
     AgentConfig,
     AgentDecision,
+    AgentDecisionResponse,
     AgentError,
     AgentRunStatus,
     run_read_only_agent,
@@ -118,6 +119,168 @@ def test_multi_tool_run_executes_exact_sequential_order(tmp_path: Path) -> None:
     ]
     assert run.iterations == 4 and run.tool_calls == 3
     assert run.steps[2].observation.output["content"].startswith("class OpenAILLMClient")
+
+
+class _EnvelopeLLM:
+    """Fake speaking the provider-facing wire format a live model must use."""
+
+    def __init__(self, responses: list[dict[str, Any]]) -> None:
+        self.responses = responses
+        self.calls: list[dict[str, Any]] = []
+
+    def generate_structured(
+        self,
+        prompt: str,
+        response_model: type[BaseModel],
+        *,
+        system_prompt: str | None = None,
+        temperature: float | None = None,
+    ) -> BaseModel:
+        self.calls.append({"prompt": prompt, "response_model": response_model})
+        return response_model.model_validate(self.responses.pop(0))
+
+
+def test_provider_facing_tool_action_decodes_json_arguments_and_executes(
+    tmp_path: Path,
+) -> None:
+    # The live wire format carries tool arguments as a serialized JSON object,
+    # because a strict response schema cannot express an open dict. The loop
+    # must decode it and hand the registry a normal mapping.
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    llm = _EnvelopeLLM(
+        [
+            {
+                "action": "tool",
+                "tool_name": "search_code",
+                "tool_arguments_json": '{"query":"VALUE"}',
+                "final_answer": None,
+            },
+            {
+                "action": "final",
+                "tool_name": None,
+                "tool_arguments_json": None,
+                "final_answer": "VALUE is defined in app.py:1.",
+            },
+        ]
+    )
+
+    run = run_read_only_agent("Find VALUE", llm, _registry(tmp_path))
+
+    # The loop requests the provider-facing envelope, never the open internal model.
+    assert llm.calls[0]["response_model"] is AgentDecisionResponse
+    # Internally the decision is still the ordinary domain model with a dict.
+    decision = run.steps[0].decision
+    assert isinstance(decision, AgentDecision)
+    assert decision.tool_arguments == {"query": "VALUE"}
+    assert not hasattr(decision, "tool_arguments_json")
+    # The registry validated those arguments and the tool really ran.
+    assert run.steps[0].observation.success
+    assert run.steps[0].observation.output["matches"][0]["path"] == "app.py"
+    assert run.status is AgentRunStatus.COMPLETED
+    assert run.final_answer == "VALUE is defined in app.py:1."
+    assert (run.iterations, run.llm_calls, run.tool_calls) == (2, 2, 1)
+
+
+def test_provider_facing_final_action_converts_to_the_internal_decision(
+    tmp_path: Path,
+) -> None:
+    llm = _EnvelopeLLM(
+        [
+            {
+                "action": "final",
+                "tool_name": None,
+                "tool_arguments_json": None,
+                "final_answer": "Nothing to inspect.",
+            }
+        ]
+    )
+
+    run = run_read_only_agent("Answer directly", llm, _registry(tmp_path))
+
+    assert run.status is AgentRunStatus.COMPLETED
+    assert run.final_answer == "Nothing to inspect."
+    assert run.steps[0].decision == AgentDecision(
+        action="final", final_answer="Nothing to inspect."
+    )
+    assert run.tool_calls == 0
+
+
+def test_malformed_tool_arguments_json_is_a_bounded_agent_contract_failure(
+    tmp_path: Path,
+) -> None:
+    llm = _EnvelopeLLM(
+        [
+            {
+                "action": "tool",
+                "tool_name": "search_code",
+                "tool_arguments_json": "{not valid json",
+                "final_answer": None,
+            }
+        ]
+    )
+
+    with pytest.raises(AgentError, match="Structured agent decision failed") as raised:
+        run_read_only_agent("Find VALUE", llm, _registry(tmp_path))
+
+    # A bounded contract failure, not a leaked json decoder traceback.
+    assert "JSONDecodeError" not in str(raised.value)
+    assert "{not valid json" not in str(raised.value)
+
+
+@pytest.mark.parametrize("encoded", ["[]", '"hello"', "42", "null", "true"])
+def test_non_object_tool_arguments_json_is_rejected(tmp_path: Path, encoded: str) -> None:
+    # Valid JSON is not enough: tool arguments must decode to an object.
+    llm = _EnvelopeLLM(
+        [
+            {
+                "action": "tool",
+                "tool_name": "search_code",
+                "tool_arguments_json": encoded,
+                "final_answer": None,
+            }
+        ]
+    )
+
+    with pytest.raises(AgentError, match="Structured agent decision failed"):
+        run_read_only_agent("Find VALUE", llm, _registry(tmp_path))
+
+
+def test_tool_registry_validation_stays_authoritative_over_decoded_arguments(
+    tmp_path: Path,
+) -> None:
+    # Syntactically valid JSON object, but wrong for read_file's input model.
+    # The envelope must NOT pre-validate tool schemas; the registry must still
+    # reject this the normal recoverable way.
+    (tmp_path / "valid.py").write_text("answer\n", encoding="utf-8")
+    llm = _EnvelopeLLM(
+        [
+            {
+                "action": "tool",
+                "tool_name": "read_file",
+                "tool_arguments_json": '{"path":123,"imaginary_argument":"bad"}',
+                "final_answer": None,
+            },
+            {
+                "action": "tool",
+                "tool_name": "read_file",
+                "tool_arguments_json": '{"path":"valid.py"}',
+                "final_answer": None,
+            },
+            {
+                "action": "final",
+                "tool_name": None,
+                "tool_arguments_json": None,
+                "final_answer": "Read valid.py.",
+            },
+        ]
+    )
+
+    run = run_read_only_agent("Recover from bad reads", llm, _registry(tmp_path))
+
+    assert not run.steps[0].observation.success
+    assert "Invalid arguments" in run.steps[0].observation.error
+    assert run.steps[1].observation.success
+    assert run.status is AgentRunStatus.COMPLETED
 
 
 def test_tool_failure_and_invalid_arguments_become_recoverable_observations(

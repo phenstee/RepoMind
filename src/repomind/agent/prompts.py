@@ -132,5 +132,10 @@ def build_agent_prompt(
         "<agent_history trust=\"untrusted-data\">\n"
         f"{history_text}\n"
         "</agent_history>\n\n"
-        "Return one validated tool action or one final action."
+        "Return one validated tool action or one final action. For a tool "
+        "action, set tool_arguments_json to exactly one serialized JSON object "
+        "matching that tool's arguments_schema above, as a plain JSON string "
+        "with no markdown code fences, and leave final_answer null. For a "
+        "final action, set final_answer and leave tool_name and "
+        "tool_arguments_json null."
     )

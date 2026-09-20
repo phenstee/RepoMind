@@ -720,7 +720,12 @@ def test_indexed_search_queries_persist_for_index_miss_case_despite_zero_results
 
 
 def _tool(name: str, **arguments: object) -> dict:
-    return {"action": "tool", "tool_name": name, "tool_arguments": arguments}
+    # Provider-facing wire format: tool arguments arrive as one JSON string.
+    return {
+        "action": "tool",
+        "tool_name": name,
+        "tool_arguments_json": json.dumps(arguments),
+    }
 
 
 def _final(answer: str) -> dict:

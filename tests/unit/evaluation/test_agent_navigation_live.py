@@ -7,6 +7,7 @@ grading, registry selection) is correct independent of any actual model
 quality.
 """
 
+import json
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -25,10 +26,24 @@ from repomind.retrieval import SemanticSearchResult
 
 
 def _tool(name: str, **arguments: object) -> dict:
+    # The provider-facing wire format: a real model serializes tool arguments
+    # into one JSON object string, because a strict response schema cannot
+    # express an open dict. The loop decodes it back into the internal model.
+    return {
+        "action": "tool",
+        "tool_name": name,
+        "tool_arguments_json": json.dumps(arguments),
+    }
+
+
+def _scripted_tool(name: str, **arguments: object) -> dict:
+    # Scripted benchmark decisions are internal AgentDecision values, not
+    # provider output, so they keep the ordinary tool_arguments mapping.
     return {"action": "tool", "tool_name": name, "tool_arguments": arguments}
 
 
 def _final(answer: str) -> dict:
+    # Valid in both shapes: a final action carries no tool arguments.
     return {"action": "final", "final_answer": answer}
 
 
@@ -418,7 +433,7 @@ def test_offline_scripted_mode_is_unaffected_by_live_parameters(tmp_path: Path) 
         category="literal_friendly",
         task="What does value() return?",
         decisions=(
-            _tool("read_file", path="src/app.py"),
+            _scripted_tool("read_file", path="src/app.py"),
             _final("value() returns 1."),
         ),
         expected_facts=("returns 1",),

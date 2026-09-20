@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from repomind.agent import AgentDecisionResponse
 from repomind.api import create_app
 from repomind.api.errors import APIError
 from repomind.api.models import RepositoryFileResponse
@@ -112,6 +113,23 @@ class FakeEmbeddings:
         return [EmbeddedChunk(chunk=c, embedding=self.vector) for c in chunks]
 
 
+def _as_provider_decision(payload: dict) -> dict:
+    """Re-encode an internal-shaped decision into the provider wire format.
+
+    API tests author decisions in the readable internal shape, but a real
+    provider must send tool arguments as one serialized JSON object string
+    because the strict response schema cannot express an open dict. Encoding
+    here keeps the fake faithful to the wire format without rewriting every
+    scripted payload.
+    """
+
+    if "tool_arguments" not in payload:
+        return payload
+    encoded = dict(payload)
+    encoded["tool_arguments_json"] = json.dumps(encoded.pop("tool_arguments"))
+    return encoded
+
+
 class ScriptedLLM:
     def __init__(self):
         self.responses = []
@@ -178,6 +196,8 @@ class ScriptedLLM:
         response = self.responses.pop(0)
         if isinstance(response, Exception):
             raise response
+        if response_model is AgentDecisionResponse and isinstance(response, dict):
+            response = _as_provider_decision(response)
         return response_model.model_validate(response)
 
 

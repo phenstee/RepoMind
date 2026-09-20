@@ -9,6 +9,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    WithJsonSchema,
     field_validator,
     model_validator,
 )
@@ -29,6 +30,14 @@ ConciseText = Annotated[
     StringConstraints(strip_whitespace=True, min_length=1, max_length=500),
 ]
 
+# A repository-relative path that stays a ``pathlib.Path`` internally while
+# describing itself to providers as a plain JSON string. Pydantic renders a
+# bare ``Path`` as ``{"type": "string", "format": "path"}``, and strict
+# Structured Outputs reject that format. This annotation changes only the
+# generated schema: parsing, the repository-relative validation below, and
+# JSON serialization are unaffected.
+RepositoryPath = Annotated[Path, WithJsonSchema({"type": "string"})]
+
 
 class CodingPlanStep(BaseModel):
     """One bounded advisory action; it never executes capabilities directly."""
@@ -37,7 +46,7 @@ class CodingPlanStep(BaseModel):
 
     step_id: int = Field(ge=1, le=12, strict=True)
     action: ConciseText
-    likely_paths: tuple[Path, ...] = Field(default=(), max_length=8)
+    likely_paths: tuple[RepositoryPath, ...] = Field(default=(), max_length=8)
     criterion_indices: tuple[int, ...] = Field(default=(), max_length=50)
     verification: tuple[Literal["pytest", "ruff"], ...] = Field(default=(), max_length=2)
 

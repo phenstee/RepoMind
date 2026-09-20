@@ -258,7 +258,9 @@ def test_indexed_mode_run_uses_case_scoped_retrieval_for_an_arbitrary_query(
                     {
                         "action": "tool",
                         "tool_name": "indexed_code_search",
-                        "tool_arguments": {"query": "an arbitrary phrasing of the model's own choosing"},
+                        "tool_arguments_json": json.dumps(
+                            {"query": "an arbitrary phrasing of the model's own choosing"}
+                        ),
                     }
                 )
             if self._calls == 2:
@@ -266,7 +268,7 @@ def test_indexed_mode_run_uses_case_scoped_retrieval_for_an_arbitrary_query(
                     {
                         "action": "tool",
                         "tool_name": "read_file",
-                        "tool_arguments": {"path": "src/jobs/store.py"},
+                        "tool_arguments_json": json.dumps({"path": "src/jobs/store.py"}),
                     }
                 )
             return response_model.model_validate(
@@ -327,7 +329,9 @@ def test_indexed_mode_index_miss_case_still_returns_zero_indexed_results(
                     {
                         "action": "tool",
                         "tool_name": "indexed_code_search",
-                        "tool_arguments": {"query": "retry backoff multiplier configuration"},
+                        "tool_arguments_json": json.dumps(
+                            {"query": "retry backoff multiplier configuration"}
+                        ),
                     }
                 )
             if self._calls == 2:
@@ -335,7 +339,7 @@ def test_indexed_mode_index_miss_case_still_returns_zero_indexed_results(
                     {
                         "action": "tool",
                         "tool_name": "read_file",
-                        "tool_arguments": {"path": "src/config/retry.py"},
+                        "tool_arguments_json": json.dumps({"path": "src/config/retry.py"}),
                     }
                 )
             return response_model.model_validate(
@@ -400,12 +404,12 @@ def test_indexed_mode_multi_case_run_aggregates_metrics_and_queries_for_both_cas
                 {
                     "action": "tool",
                     "tool_name": "indexed_code_search",
-                    "tool_arguments": {"query": "atomic job claiming"},
+                    "tool_arguments_json": json.dumps({"query": "atomic job claiming"}),
                 },
                 {
                     "action": "tool",
                     "tool_name": "read_file",
-                    "tool_arguments": {"path": "src/jobs/store.py"},
+                    "tool_arguments_json": json.dumps({"path": "src/jobs/store.py"}),
                 },
                 {
                     "action": "final",
@@ -417,12 +421,12 @@ def test_indexed_mode_multi_case_run_aggregates_metrics_and_queries_for_both_cas
                 {
                     "action": "tool",
                     "tool_name": "indexed_code_search",
-                    "tool_arguments": {"query": "rate limit error constant"},
+                    "tool_arguments_json": json.dumps({"query": "rate limit error constant"}),
                 },
                 {
                     "action": "tool",
                     "tool_name": "read_file",
-                    "tool_arguments": {"path": "src/errors.py"},
+                    "tool_arguments_json": json.dumps({"path": "src/errors.py"}),
                 },
                 {
                     "action": "final",

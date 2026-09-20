@@ -10,6 +10,7 @@ from pydantic import BaseModel, ValidationError
 from repomind.agent.models import (
     AgentConfig,
     AgentDecision,
+    AgentDecisionResponse,
     AgentRun,
     AgentRunStatus,
     AgentStep,
@@ -63,6 +64,23 @@ class StructuredAgentLLM(Protocol):
         temperature: float | None = None,
     ) -> StructuredModelT:
         """Generate and validate one structured decision."""
+
+
+def _coerce_decision(response: object) -> AgentDecision:
+    """Normalize a provider response into the internal decision model.
+
+    Live providers answer with the strict-schema-compatible
+    :class:`AgentDecisionResponse` envelope, whose serialized tool arguments
+    are decoded here. Providers that already speak the internal domain model
+    (scripted evaluation doubles and test fakes) are used as-is; those
+    instances have already passed the same :class:`AgentDecision` validation.
+    """
+
+    if isinstance(response, AgentDecisionResponse):
+        return response.to_decision()
+    if isinstance(response, AgentDecision):
+        return response
+    raise AgentError("LLM returned an unexpected agent decision model")
 
 
 def _tool_call_identity(tool_name: str, arguments: Mapping[str, Any]) -> str:
@@ -140,17 +158,16 @@ def _run_agent(
             # any StructuredAgentLLM, and some models reject an explicit
             # temperature. Providers apply their own default - OpenAILLMClient
             # omits the request field entirely when the value is None.
-            decision = generate_structured(
+            response = generate_structured(
                 llm_provider,
                 prompt,
-                AgentDecision,
+                AgentDecisionResponse,
                 system_prompt=system_prompt,
                 trace=trace,
             )
         except (LLMError, ValidationError) as exc:
             raise AgentError("Structured agent decision failed") from exc
-        if not isinstance(decision, AgentDecision):
-            raise AgentError("LLM returned an unexpected agent decision model")
+        decision = _coerce_decision(response)
         cancellation.checkpoint()
 
         trace.emit(

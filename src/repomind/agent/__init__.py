@@ -10,6 +10,7 @@ from repomind.agent.loop import (
 from repomind.agent.models import (
     AgentConfig,
     AgentDecision,
+    AgentDecisionResponse,
     AgentRun,
     AgentRunStatus,
     AgentStep,
@@ -27,6 +28,7 @@ __all__ = [
     "READ_ONLY_AGENT_SYSTEM_PROMPT",
     "AgentConfig",
     "AgentDecision",
+    "AgentDecisionResponse",
     "AgentError",
     "AgentRun",
     "AgentRunStatus",
