@@ -129,7 +129,26 @@ def test_basic_rerank_follows_llm_order_and_preserves_original_ranks() -> None:
     assert [result.rank for result in results] == [1, 2, 3]
     assert [result.original_rank for result in results] == [3, 2, 1]
     assert len(llm.calls) == 1
-    assert llm.calls[0]["temperature"] == 0.0
+    assert llm.calls[0]["temperature"] is None
+
+
+def test_reranker_does_not_force_a_provider_specific_temperature() -> None:
+    # Reranking is provider-agnostic orchestration: some configured models
+    # reject an explicit temperature, so the provider must see its own default.
+    candidates = [
+        _semantic(_chunk("README.md", "Retry documentation", index=0), 1),
+        _semantic(_chunk("llm/client.py", "Actual retry implementation", index=1), 2),
+    ]
+    llm = _FakeStructuredLLM(["C2", "C1"])
+
+    results = LLMReranker(llm).rerank("Where is retry implemented?", candidates, top_k=2)
+
+    assert [call["temperature"] for call in llm.calls] == [None]
+    assert [result.chunk.relative_path.as_posix() for result in results] == [
+        "llm/client.py",
+        "README.md",
+    ]
+    assert [result.rank for result in results] == [1, 2]
 
 
 @pytest.mark.parametrize(

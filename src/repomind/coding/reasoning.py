@@ -94,7 +94,6 @@ def generate_coding_plan(
             json.dumps(payload, ensure_ascii=False, sort_keys=True),
             CodingPlan,
             system_prompt=PLANNER_SYSTEM_PROMPT,
-            temperature=0.0,
             trace=trace,
         )
         if not isinstance(result, CodingPlan):
@@ -156,7 +155,6 @@ def generate_coding_review(
             json.dumps(payload, ensure_ascii=False, sort_keys=True),
             CodingReview,
             system_prompt=REVIEWER_SYSTEM_PROMPT,
-            temperature=0.0,
             trace=trace,
         )
         if not isinstance(result, CodingReview):

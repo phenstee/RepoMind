@@ -195,7 +195,6 @@ def _answer_from_ranked_chunks(
         _build_generation_prompt(question, context),
         GroundedLLMResponse,
         system_prompt=RAG_SYSTEM_PROMPT,
-        temperature=0.0,
         trace=trace,
     )
     cancellation.checkpoint()

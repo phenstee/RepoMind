@@ -13,9 +13,11 @@ from repomind.coding import (
     FinalChangeReview,
     PlanningError,
     VerificationPolicy,
+    VerificationReport,
     WorkspaceBaseline,
     bounded_review_diff,
     generate_coding_plan,
+    generate_coding_review,
 )
 from repomind.observability import TraceContext
 from repomind.tools import GitDiffOutput, GitStatusOutput
@@ -91,6 +93,91 @@ def test_planner_uses_structured_output_and_compact_repository_metadata() -> Non
     assert payload["task"]["acceptance_criteria"] == ["Tests pass."]
     assert "repository_diff" not in payload
     assert "scratchpad" in kwargs["system_prompt"]
+
+
+class _ExplicitSignatureProvider:
+    """Fake whose signature mirrors the real client's ``temperature=None`` default."""
+
+    def __init__(self, response: object) -> None:
+        self.response = response
+        self.calls: list[dict[str, object]] = []
+
+    def generate_structured(
+        self,
+        prompt: str,
+        response_model: type[BaseModel],
+        *,
+        system_prompt: str | None = None,
+        temperature: float | None = None,
+    ) -> BaseModel:
+        self.calls.append({"prompt": prompt, "temperature": temperature})
+        return response_model.model_validate(self.response)
+
+
+def test_planner_does_not_force_a_provider_specific_temperature() -> None:
+    # The planner is provider-agnostic orchestration: some configured models
+    # reject an explicit temperature, so the provider must see its own default.
+    provider = _ExplicitSignatureProvider(_plan())
+    task = CodingTask(objective="Change app.", acceptance_criteria=("Tests pass.",))
+
+    result = generate_coding_plan(
+        task,
+        WorkspaceBaseline(
+            git_status=GitStatusOutput(branch="main", changed_files=[], clean=True),
+            changed_files=(),
+            clean=True,
+        ),
+        VerificationPolicy(),
+        provider,
+        trace=TraceContext(),
+    )
+
+    assert [call["temperature"] for call in provider.calls] == [None]
+    assert result.steps[0].step_id == 1
+    assert result.verification_plan == ("pytest", "ruff")
+
+
+def test_reviewer_does_not_force_a_provider_specific_temperature() -> None:
+    provider = _ExplicitSignatureProvider(
+        {
+            "verdict": "approve",
+            "workspace_revision": 1,
+            "acceptance_results": [
+                {"criterion_index": 0, "status": "satisfied", "evidence": "Tests pass."}
+            ],
+        }
+    )
+    task = CodingTask(objective="Change app.", acceptance_criteria=("Tests pass.",))
+
+    result = generate_coding_review(
+        task,
+        CodingPlan.model_validate(_plan()).validate_for_task(task),
+        VerificationReport(
+            tests_required=False,
+            ruff_required=False,
+            current_workspace_revision=1,
+        ),
+        FinalChangeReview(
+            workspace_revision=1,
+            git_status=GitStatusOutput(
+                branch="main",
+                changed_files=[{"path": Path("app.py"), "status": "M"}],
+                clean=False,
+            ),
+            changed_files=(Path("app.py"),),
+            baseline_changed_files=(),
+            workflow_changed_files=(Path("app.py"),),
+            unexpected_changed_files=(),
+            diff_truncated=False,
+        ),
+        "diff --git a/app.py b/app.py",
+        provider,
+        workspace_revision=1,
+        trace=TraceContext(),
+    )
+
+    assert [call["temperature"] for call in provider.calls] == [None]
+    assert result.verdict == "approve"
 
 
 def test_planner_failure_is_wrapped_without_model_text() -> None:

@@ -116,8 +116,28 @@ def test_pipeline_integrates_retrieval_context_and_structured_generation() -> No
     assert "src/auth.py" in prompt
     assert "src/token.py" in prompt
     assert "src/styles.py" not in prompt
-    assert llm.calls[0]["temperature"] == 0.0
+    assert llm.calls[0]["temperature"] is None
     assert answer.answer == "Authentication is handled in the token module."
+    assert answer.citations[0].relative_path == Path("src/auth.py")
+
+
+def test_rag_generation_does_not_force_a_provider_specific_temperature() -> None:
+    # Grounded generation is provider-agnostic orchestration: some configured
+    # models reject an explicit temperature, so the provider must see its own
+    # default while the grounded answer is still produced normally.
+    llm = _FakeStructuredLLM(source_ids=["S1"])
+
+    answer = answer_repository_question(
+        "Where is authentication handled?",
+        _corpus(),
+        _FakeEmbeddingProvider(),
+        llm,
+        config=RAGConfig(top_k=2),
+    )
+
+    assert [call["temperature"] for call in llm.calls] == [None]
+    assert answer.answer == "Authentication is handled in the token module."
+    assert answer.insufficient_evidence is False
     assert answer.citations[0].relative_path == Path("src/auth.py")
 
 

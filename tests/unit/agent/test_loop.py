@@ -78,7 +78,22 @@ def test_basic_one_tool_run_records_observation_and_completes(tmp_path: Path) ->
     assert run.steps[0].observation.success
     assert run.steps[0].observation.output["matches"][0]["path"] == "app.py"
     assert "RepositoryIngestionError" in llm.calls[1]["prompt"]
-    assert llm.calls[0]["temperature"] == 0.0
+    assert llm.calls[0]["temperature"] is None
+
+
+def test_agent_decisions_do_not_force_a_provider_specific_temperature(tmp_path: Path) -> None:
+    # The loop must not impose an OpenAI/model-specific sampling assumption:
+    # some configured models reject an explicit temperature entirely, so the
+    # provider has to receive its own default at the abstraction boundary.
+    (tmp_path / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    llm = _ScriptedLLM([_tool("search_code", query="VALUE"), _final("VALUE is 1.")])
+
+    run = run_read_only_agent("Find VALUE", llm, _registry(tmp_path))
+
+    assert [call["temperature"] for call in llm.calls] == [None, None]
+    assert run.status is AgentRunStatus.COMPLETED
+    assert run.final_answer == "VALUE is 1."
+    assert (run.iterations, run.llm_calls, run.tool_calls) == (2, 2, 1)
 
 
 def test_multi_tool_run_executes_exact_sequential_order(tmp_path: Path) -> None:

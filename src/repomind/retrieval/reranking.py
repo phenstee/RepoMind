@@ -205,7 +205,6 @@ class LLMReranker:
                 prompt,
                 RerankLLMResponse,
                 system_prompt=RERANKER_SYSTEM_PROMPT,
-                temperature=0.0,
                 trace=self.trace,
             )
         except (LLMError, ValidationError) as exc:

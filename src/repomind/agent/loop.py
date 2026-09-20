@@ -136,12 +136,15 @@ def _run_agent(
             max_history_chars=config.max_history_chars,
         )
         try:
+            # No sampling temperature is imposed here: the loop must work with
+            # any StructuredAgentLLM, and some models reject an explicit
+            # temperature. Providers apply their own default - OpenAILLMClient
+            # omits the request field entirely when the value is None.
             decision = generate_structured(
                 llm_provider,
                 prompt,
                 AgentDecision,
                 system_prompt=system_prompt,
-                temperature=0.0,
                 trace=trace,
             )
         except (LLMError, ValidationError) as exc:

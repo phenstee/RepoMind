@@ -158,6 +158,24 @@ def test_generate_structured_returns_pydantic_model() -> None:
     assert result.confidence == pytest.approx(0.94)
 
 
+def test_generate_structured_omits_temperature_when_none() -> None:
+    # Callers that impose no sampling temperature must not send the field at
+    # all - some models only accept their default and reject an explicit one.
+    parsed = Sentiment(label="positive", confidence=0.94)
+    sync_client = FakeBetaClient(parsed)
+    client = OpenAILLMClient(
+        _settings(),
+        client=sync_client,
+        async_client=FakeAsyncBetaClient(parsed),
+    )
+
+    client.generate_structured("Classify the text.", Sentiment, temperature=None)
+
+    request = sync_client.beta.chat.completions.calls[0]
+    assert "temperature" not in request
+    assert request["model"] == "fake-model"
+
+
 def test_generate_retries_then_succeeds(monkeypatch) -> None:
     connection_error = openai.APIConnectionError(request=MagicMock())
     sync_client = FakeClient()
