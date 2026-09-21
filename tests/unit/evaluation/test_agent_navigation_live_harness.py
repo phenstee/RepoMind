@@ -901,11 +901,11 @@ def test_merge_agent_navigation_reports_recomputes_aggregates_over_all_cases() -
 
 def test_harness_schema_version_is_unchanged_by_the_dataset_bump() -> None:
     assert HARNESS_SCHEMA_VERSION == "agent-live-eval-v1"
-    assert VERSION == "repo-agent-eval-v2"
+    assert VERSION == "repo-agent-eval-v3"
     assert HARNESS_SCHEMA_VERSION != VERSION
 
 
-def test_live_harness_result_carries_v2_benchmark_and_v1_schema(tmp_path: Path) -> None:
+def test_live_harness_result_carries_v3_benchmark_and_v1_schema(tmp_path: Path) -> None:
     report, run_trace = _live_report(tmp_path)
 
     result = build_live_navigation_harness_result(
@@ -918,18 +918,18 @@ def test_live_harness_result_carries_v2_benchmark_and_v1_schema(tmp_path: Path) 
     )
     payload = result.model_dump(mode="json")
 
-    assert payload["benchmark_version"] == "repo-agent-eval-v2"
+    assert payload["benchmark_version"] == "repo-agent-eval-v3"
     assert payload["harness_schema_version"] == "agent-live-eval-v1"
-    assert payload["runs"][0]["report"]["benchmark_version"] == "repo-agent-eval-v2"
+    assert payload["runs"][0]["report"]["benchmark_version"] == "repo-agent-eval-v3"
 
 
-def test_offline_report_carries_the_v2_benchmark_version(tmp_path: Path) -> None:
+def test_offline_report_carries_the_v3_benchmark_version(tmp_path: Path) -> None:
     write_fixture_repository(tmp_path)
     suite = AgentNavigationBenchmarkSuite(version=VERSION, cases=benchmark_cases(indexed=False))
 
     report = evaluate_agent_navigation(suite, tmp_path, retrieval_mode="filesystem")
 
-    assert report.benchmark_version == "repo-agent-eval-v2"
+    assert report.benchmark_version == "repo-agent-eval-v3"
 
 
 def test_provenance_still_requires_matching_benchmark_versions(tmp_path: Path) -> None:

@@ -1930,7 +1930,7 @@ JSONB-stored request; no migration was needed). The coding/editing agent is
 **not** touched in this milestone — mutation plus a possibly-stale index
 raises different questions deliberately left to a future milestone.
 
-`repo-agent-eval-v2` (`uv run python -m benchmarks.agent_navigation_eval`) is
+`repo-agent-eval-v3` (`uv run python -m benchmarks.agent_navigation_eval`) is
 a new, fully offline, fully scripted evaluation comparing filesystem-only and
 indexed-navigation orchestration on the same synthetic fixture repository:
 exact-symbol lookup, a natural-language query whose wording does not match
