@@ -5,9 +5,12 @@ node_modules/
 .uv-cache/
 .npm-cache/
 
-# Secrets/local overrides - never sent to the Docker build context.
-.env.local
-.env.local.*
+# Secrets/local overrides - never sent to the Docker build context. Next.js
+# reads several generic env filenames (.env, .env.production, .env.development,
+# .env.test, .env.local, .env.*.local); excluding .env/.env.* covers all of
+# them, matching the root backend .dockerignore's policy.
+.env
+.env.*
 !.env.local.example
 
 .vscode/

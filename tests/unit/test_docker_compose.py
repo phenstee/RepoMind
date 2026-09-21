@@ -1,5 +1,6 @@
 """Security and wiring assertions for the rendered local Docker Compose configuration."""
 
+import fnmatch
 import json
 import shutil
 import subprocess
@@ -8,6 +9,29 @@ from pathlib import Path
 import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _dockerignore_excludes(dockerignore_path: Path, candidate: str) -> bool:
+    """Replay one `.dockerignore` file's rules against a candidate path.
+
+    Implements the minimal subset of dockerignore syntax this repository's
+    ignore files actually use: blank/comment lines are skipped, each
+    remaining line is a shell-style glob matched with `fnmatch`, and a
+    leading `!` re-includes a path an earlier rule excluded. Rules are
+    applied strictly in file order, matching Docker's own last-match-wins
+    behavior, so this validates the real policy rather than grepping for one
+    literal pattern.
+    """
+    excluded = False
+    for raw_line in dockerignore_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        negate = line.startswith("!")
+        pattern = line[1:] if negate else line
+        if fnmatch.fnmatch(candidate, pattern):
+            excluded = not negate
+    return excluded
 
 
 @pytest.fixture(scope="module")
@@ -117,3 +141,28 @@ def test_compose_source_does_not_hardcode_secrets() -> None:
     source = (REPOSITORY_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     assert "${OPENAI_API_KEY" in source
     assert "sk-" not in source
+
+
+def test_frontend_dockerignore_excludes_generic_env_files() -> None:
+    # The frontend Dockerfile does `COPY . .`, so any generic Next.js env
+    # file left in the build context would be sent to the Docker daemon.
+    # frontend/.dockerignore must exclude them the same way the backend's
+    # root .dockerignore excludes .env/.env.* for the API/worker images.
+    dockerignore_path = REPOSITORY_ROOT / "frontend" / ".dockerignore"
+
+    for excluded_name in (
+        ".env",
+        ".env.production",
+        ".env.development",
+        ".env.test",
+        ".env.local",
+        ".env.production.local",
+    ):
+        assert _dockerignore_excludes(dockerignore_path, excluded_name), (
+            f"frontend/.dockerignore must exclude {excluded_name}"
+        )
+
+    # The checked-in example must remain usable/inspectable in the build
+    # context - it holds no real secret.
+    assert (REPOSITORY_ROOT / "frontend" / ".env.local.example").exists()
+    assert not _dockerignore_excludes(dockerignore_path, ".env.local.example")
