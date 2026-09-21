@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from repomind.agent import AgentRunStatus
 from repomind.config import Settings
 from repomind.evaluation import (
+    HARNESS_SCHEMA_VERSION,
     EvaluationMode,
     LiveEvaluationAuthorizationError,
     build_live_navigation_harness_result,
@@ -158,7 +159,7 @@ def _live_report(tmp_path: Path):
 def test_build_live_navigation_harness_result_rejects_empty_runs() -> None:
     with pytest.raises(ValueError, match="at least one"):
         build_live_navigation_harness_result(
-            benchmark_version="repo-agent-eval-v1",
+            benchmark_version=VERSION,
             model="fake-model",
             git_commit_sha=None,
             generated_at=datetime.now(UTC),
@@ -218,7 +219,7 @@ def test_build_live_navigation_harness_result_maps_trace_metrics() -> None:
         final_answer="VALUE is 1.",
     )
     live_report = AgentNavigationEvaluationReport(
-        benchmark_version="repo-agent-eval-v1",
+        benchmark_version=VERSION,
         mode=EvaluationMode.LIVE_MODEL,
         retrieval_mode="filesystem",
         case_results=(case_result,),
@@ -232,7 +233,7 @@ def test_build_live_navigation_harness_result_maps_trace_metrics() -> None:
     )
 
     result = build_live_navigation_harness_result(
-        benchmark_version="repo-agent-eval-v1",
+        benchmark_version=VERSION,
         model="fake-model",
         git_commit_sha="abc123",
         generated_at=datetime.now(UTC),
@@ -305,7 +306,7 @@ def test_token_totals_require_complete_usage_coverage_across_every_trace() -> No
     )
 
     result = build_live_navigation_harness_result(
-        benchmark_version="repo-agent-eval-v1",
+        benchmark_version=VERSION,
         model="fake-model",
         git_commit_sha=None,
         generated_at=datetime.now(UTC),
@@ -344,7 +345,7 @@ def test_token_totals_are_summed_when_every_trace_has_complete_coverage() -> Non
     )
 
     result = build_live_navigation_harness_result(
-        benchmark_version="repo-agent-eval-v1",
+        benchmark_version=VERSION,
         model="fake-model",
         git_commit_sha=None,
         generated_at=datetime.now(UTC),
@@ -364,7 +365,7 @@ def test_token_totals_are_none_when_no_llm_calls_are_represented() -> None:
     empty = _run_trace(llm_calls=0, tool_calls=0, usage=None)
 
     result = build_live_navigation_harness_result(
-        benchmark_version="repo-agent-eval-v1",
+        benchmark_version=VERSION,
         model="fake-model",
         git_commit_sha=None,
         generated_at=datetime.now(UTC),
@@ -386,7 +387,7 @@ def test_build_live_navigation_harness_result_rejects_mismatched_benchmark_versi
 
     with pytest.raises(ValueError, match="benchmark_version"):
         build_live_navigation_harness_result(
-            benchmark_version="repo-agent-eval-v2",
+            benchmark_version=f"{VERSION}-mismatch",
             model="fake-model",
             git_commit_sha=None,
             generated_at=datetime.now(UTC),
@@ -401,7 +402,7 @@ def test_build_live_navigation_harness_result_rejects_unknown_query_map_cases() 
 
     with pytest.raises(ValueError, match="wrong-case"):
         build_live_navigation_harness_result(
-            benchmark_version="repo-agent-eval-v1",
+            benchmark_version=VERSION,
             model="fake-model",
             git_commit_sha=None,
             generated_at=datetime.now(UTC),
@@ -425,7 +426,7 @@ def test_build_live_navigation_harness_result_rejects_duplicate_retrieval_modes(
 
     with pytest.raises(ValueError, match="duplicate run for retrieval_mode"):
         build_live_navigation_harness_result(
-            benchmark_version="repo-agent-eval-v1",
+            benchmark_version=VERSION,
             model="fake-model",
             git_commit_sha=None,
             generated_at=datetime.now(UTC),
@@ -451,7 +452,7 @@ def test_build_live_navigation_harness_result_rejects_an_omitted_expected_trace(
 
     with pytest.raises(ValueError, match="trace set does not match its report"):
         build_live_navigation_harness_result(
-            benchmark_version="repo-agent-eval-v1",
+            benchmark_version=VERSION,
             model="fake-model",
             git_commit_sha=None,
             generated_at=datetime.now(UTC),
@@ -467,7 +468,7 @@ def test_build_live_navigation_harness_result_rejects_an_unrelated_trace() -> No
 
     with pytest.raises(ValueError, match="unexpected"):
         build_live_navigation_harness_result(
-            benchmark_version="repo-agent-eval-v1",
+            benchmark_version=VERSION,
             model="fake-model",
             git_commit_sha=None,
             generated_at=datetime.now(UTC),
@@ -483,7 +484,7 @@ def test_build_live_navigation_harness_result_rejects_a_duplicated_trace() -> No
 
     with pytest.raises(ValueError, match="same trace more than once"):
         build_live_navigation_harness_result(
-            benchmark_version="repo-agent-eval-v1",
+            benchmark_version=VERSION,
             model="fake-model",
             git_commit_sha=None,
             generated_at=datetime.now(UTC),
@@ -500,7 +501,7 @@ def test_build_live_navigation_harness_result_rejects_a_case_without_trace_prove
 
     with pytest.raises(ValueError, match="no trace_run_id"):
         build_live_navigation_harness_result(
-            benchmark_version="repo-agent-eval-v1",
+            benchmark_version=VERSION,
             model="fake-model",
             git_commit_sha=None,
             generated_at=datetime.now(UTC),
@@ -520,7 +521,7 @@ def test_per_case_indexed_traces_are_accepted_when_every_expected_trace_is_suppl
     )
 
     result = build_live_navigation_harness_result(
-        benchmark_version="repo-agent-eval-v1",
+        benchmark_version=VERSION,
         model="fake-model",
         git_commit_sha=None,
         generated_at=datetime.now(UTC),
@@ -599,7 +600,7 @@ def test_json_serialization_is_deterministic_and_contains_no_secrets(tmp_path: P
     report, run_trace = _live_report(tmp_path)
     generated_at = datetime(2026, 1, 1, tzinfo=UTC)
     result = build_live_navigation_harness_result(
-        benchmark_version="repo-agent-eval-v1",
+        benchmark_version=VERSION,
         model="fake-model",
         git_commit_sha="deadbeef",
         generated_at=generated_at,
@@ -617,7 +618,7 @@ def test_json_serialization_is_deterministic_and_contains_no_secrets(tmp_path: P
 
     payload = json.loads(first)
     assert payload["harness_schema_version"] == "agent-live-eval-v1"
-    assert payload["benchmark_version"] == "repo-agent-eval-v1"
+    assert payload["benchmark_version"] == VERSION
     assert payload["model"] == "fake-model"
     assert payload["git_commit_sha"] == "deadbeef"
     assert payload["max_iterations"] == 8
@@ -644,7 +645,7 @@ def _bare_live_report(
         final_answer="done",
     )
     return AgentNavigationEvaluationReport(
-        benchmark_version="repo-agent-eval-v1",
+        benchmark_version=VERSION,
         mode=EvaluationMode.LIVE_MODEL,
         retrieval_mode="indexed",
         case_results=(case_result,),
@@ -669,7 +670,7 @@ def test_indexed_search_queries_are_persisted_per_case_with_order_preserved() ->
     )
 
     result = build_live_navigation_harness_result(
-        benchmark_version="repo-agent-eval-v1",
+        benchmark_version=VERSION,
         model="fake-model",
         git_commit_sha=None,
         generated_at=datetime.now(UTC),
@@ -700,7 +701,7 @@ def test_indexed_search_queries_persist_for_index_miss_case_despite_zero_results
     trace = _run_trace(llm_calls=1, tool_calls=1, usage=None)
     report = _bare_live_report("index-miss-filesystem-fallback", trace_run_id=trace.run_id)
     result = build_live_navigation_harness_result(
-        benchmark_version="repo-agent-eval-v1",
+        benchmark_version=VERSION,
         model="fake-model",
         git_commit_sha=None,
         generated_at=datetime.now(UTC),
@@ -802,7 +803,7 @@ def test_multi_case_indexed_metrics_aggregate_the_sum_of_every_case_trace(
 
     merged_report = merge_agent_navigation_reports(reports)
     result = build_live_navigation_harness_result(
-        benchmark_version="repo-agent-eval-v1",
+        benchmark_version=VERSION,
         model="fake-model",
         git_commit_sha=None,
         generated_at=datetime.now(UTC),
@@ -883,3 +884,74 @@ def test_merge_agent_navigation_reports_recomputes_aggregates_over_all_cases() -
     assert merged.case_count == 2
     assert merged.task_success_rate == 0.5
     assert merged.mean_tool_calls == 2.0
+
+
+# --------------------------------------------------------------------------
+# Benchmark version vs. harness schema version.
+#
+# These are two independent identifiers and the v2 correction changes exactly
+# one of them. `benchmark_version` names the graded DATASET (tasks, expected
+# and forbidden facts); it moved v1 -> v2 because the grading contract
+# changed. `harness_schema_version` names the SHAPE of this JSON result
+# document; nothing about that shape changed, so it must stay
+# agent-live-eval-v1 - bumping it would falsely signal to a reader that the
+# result format is incompatible with previously written artifacts.
+# --------------------------------------------------------------------------
+
+
+def test_harness_schema_version_is_unchanged_by_the_dataset_bump() -> None:
+    assert HARNESS_SCHEMA_VERSION == "agent-live-eval-v1"
+    assert VERSION == "repo-agent-eval-v2"
+    assert HARNESS_SCHEMA_VERSION != VERSION
+
+
+def test_live_harness_result_carries_v2_benchmark_and_v1_schema(tmp_path: Path) -> None:
+    report, run_trace = _live_report(tmp_path)
+
+    result = build_live_navigation_harness_result(
+        benchmark_version=VERSION,
+        model="fake-model",
+        git_commit_sha="deadbeef",
+        generated_at=datetime.now(UTC),
+        max_iterations=8,
+        runs=[(report, [run_trace], {})],
+    )
+    payload = result.model_dump(mode="json")
+
+    assert payload["benchmark_version"] == "repo-agent-eval-v2"
+    assert payload["harness_schema_version"] == "agent-live-eval-v1"
+    assert payload["runs"][0]["report"]["benchmark_version"] == "repo-agent-eval-v2"
+
+
+def test_offline_report_carries_the_v2_benchmark_version(tmp_path: Path) -> None:
+    write_fixture_repository(tmp_path)
+    suite = AgentNavigationBenchmarkSuite(version=VERSION, cases=benchmark_cases(indexed=False))
+
+    report = evaluate_agent_navigation(suite, tmp_path, retrieval_mode="filesystem")
+
+    assert report.benchmark_version == "repo-agent-eval-v2"
+
+
+def test_provenance_still_requires_matching_benchmark_versions(tmp_path: Path) -> None:
+    # The dataset bump must not weaken the agreement check between a run's
+    # report and the harness-level benchmark_version.
+    report, run_trace = _live_report(tmp_path)
+
+    with pytest.raises(ValueError, match="benchmark_version"):
+        build_live_navigation_harness_result(
+            benchmark_version="repo-agent-eval-v1",
+            model="fake-model",
+            git_commit_sha=None,
+            generated_at=datetime.now(UTC),
+            max_iterations=8,
+            runs=[(report, [run_trace], {})],
+        )
+
+
+def test_merge_still_rejects_reports_from_different_benchmark_versions() -> None:
+    stale = _bare_live_report("case-b").model_copy(
+        update={"benchmark_version": "repo-agent-eval-v1"}
+    )
+
+    with pytest.raises(ValueError, match="benchmark_version"):
+        merge_agent_navigation_reports([_bare_live_report("case-a"), stale])

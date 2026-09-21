@@ -1,4 +1,4 @@
-"""Run the deterministic offline ``repo-agent-eval-v1`` navigation benchmark.
+"""Run the deterministic offline ``repo-agent-eval-v2`` navigation benchmark.
 
 Milestone 25 adds an optional indexed navigation tool to the read-only
 investigation agent. This benchmark answers a narrow question: does indexed

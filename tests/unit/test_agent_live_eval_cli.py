@@ -14,6 +14,7 @@ import pytest
 
 from benchmarks import agent_live_eval
 from repomind.config import Settings
+from repomind.evaluation.agent_navigation_fixtures import VERSION
 
 
 class _ClientConstructedError(AssertionError):
@@ -187,7 +188,7 @@ def test_existing_offline_scripted_benchmark_remains_valid(
     agent_navigation_eval.main()
 
     out = capsys.readouterr().out
-    assert "REPO-AGENT-EVAL-V1 AGENT NAVIGATION COMPARISON" in out
+    assert f"{VERSION.upper()} AGENT NAVIGATION COMPARISON" in out
     assert "STALE-INDEX SAFETY DEMONSTRATION" in out
     assert "task_success=True" in out
 
@@ -223,7 +224,7 @@ def test_full_run_with_fake_client_writes_expected_json_schema(
 
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["harness_schema_version"] == "agent-live-eval-v1"
-    assert payload["benchmark_version"] == "repo-agent-eval-v1"
+    assert payload["benchmark_version"] == VERSION
     assert payload["model"] == "fake-model"
     assert payload["case_ids"] == ["literal-error-string"]
     assert len(payload["runs"]) == 1

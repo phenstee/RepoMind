@@ -1,4 +1,4 @@
-"""Bounded, reproducible live-model run of the repo-agent-eval-v1 tasks.
+"""Bounded, reproducible live-model run of the repo-agent-eval-v2 tasks.
 
 The scripted ``benchmarks/agent_navigation_eval.py`` benchmark validates
 agent orchestration, tool contracts, and safety plumbing with a fully
