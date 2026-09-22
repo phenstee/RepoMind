@@ -82,6 +82,13 @@ Every number below is read directly from that file, not recomputed.
 | Filesystem | 5 | 1.000 | 2.600 | 0.000 | 1.000 | 26,256 |
 | Indexed | 6 | 1.000 | 2.333 | 1.000 | 1.000 | 33,754 |
 
+Per-mode aggregate totals (not per-case means), also read directly from the committed JSON:
+
+| Retrieval mode | LLM calls | Tool calls | Prompt tokens | Completion tokens | Duration |
+| --- | --- | --- | --- | --- | --- |
+| Filesystem | 18 | 13 | 25,217 | 1,039 | ~35.5s |
+| Indexed | 20 | 14 | 32,590 | 1,164 | ~33.6s |
+
 RepoMind passed all applicable cases in this controlled live navigation run.
 
 **Why 5 vs. 6 cases:** the indexed-miss-fallback case only exists in indexed
