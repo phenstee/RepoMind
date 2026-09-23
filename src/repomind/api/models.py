@@ -12,9 +12,10 @@ from pydantic import (
     Field,
     StringConstraints,
     field_validator,
+    model_validator,
 )
 
-from repomind.agent import AgentRunStatus
+from repomind.agent import AgentRunStatus, ObservedVia
 from repomind.coding import CodingPlan, CodingReview, CodingTaskStatus
 from repomind.ingestion import validate_repository_relative_path
 from repomind.jobs import CancellationState, JobStatus, JobType
@@ -29,6 +30,9 @@ ContextStrategyLiteral = Literal["seeds_only", "expanded"]
 PublicRelativePath = Annotated[
     str, AfterValidator(lambda value: validate_repository_relative_path(Path(value)).as_posix())
 ]
+# Bound to the domain literal so the public contract cannot drift from the
+# filesystem observations that are actually allowed to become evidence.
+AgentObservedVia = ObservedVia
 
 
 class RequestModel(BaseModel):
@@ -121,12 +125,33 @@ class AgentRequest(RequestModel):
     trace: bool = False
 
 
+class ObservedLocationResponse(BaseModel):
+    """One current-source location the run actually observed, metadata only.
+
+    Like RAG citations, this carries no source text: it names where RepoMind
+    looked, not what the file said.
+    """
+
+    relative_path: PublicRelativePath
+    start_line: int = Field(ge=1, strict=True)
+    end_line: int = Field(ge=1, strict=True)
+    observed_via: AgentObservedVia
+
+    @model_validator(mode="after")
+    def _validate_range(self) -> "ObservedLocationResponse":
+        if self.end_line < self.start_line:
+            raise ValueError("end_line must be greater than or equal to start_line")
+        return self
+
+
 class AgentResponse(BaseModel):
     status: AgentRunStatus
     final_answer: str | None
     iterations: int
     llm_calls: int
     tool_execution_attempts: int
+    evidence: list[ObservedLocationResponse] = Field(default_factory=list)
+    evidence_truncated: bool = False
     trace_run_id: UUID | None = None
 
 

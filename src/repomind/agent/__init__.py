@@ -1,5 +1,12 @@
 """Handwritten read-only and controlled-editing repository agent loops."""
 
+from repomind.agent.evidence import (
+    DEFAULT_MAX_OBSERVED_LOCATIONS,
+    ObservedSourceEvidence,
+    ObservedSourceLocation,
+    ObservedVia,
+    extract_observed_source_evidence,
+)
 from repomind.agent.indexed import run_indexed_read_only_agent
 from repomind.agent.loop import (
     AgentError,
@@ -24,6 +31,7 @@ from repomind.agent.prompts import (
 )
 
 __all__ = [
+    "DEFAULT_MAX_OBSERVED_LOCATIONS",
     "INDEXED_READ_ONLY_AGENT_SYSTEM_PROMPT",
     "READ_ONLY_AGENT_SYSTEM_PROMPT",
     "AgentConfig",
@@ -34,9 +42,13 @@ __all__ = [
     "AgentRunStatus",
     "AgentStep",
     "EditingAgentConfig",
+    "ObservedSourceEvidence",
+    "ObservedSourceLocation",
+    "ObservedVia",
     "StructuredAgentLLM",
     "ToolObservation",
     "WorkflowFeedback",
+    "extract_observed_source_evidence",
     "run_editing_agent",
     "run_indexed_read_only_agent",
     "run_read_only_agent",

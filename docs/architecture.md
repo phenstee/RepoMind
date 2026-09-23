@@ -132,6 +132,35 @@ The coding (editing) agent does not currently use indexed navigation —
 filesystem baseline. A mutating agent plus a possibly-stale index raises
 distinct freshness questions not yet addressed.
 
+### Observed-source evidence
+
+Investigation responses additionally carry a bounded list of the current
+source locations the run actually observed (`evidence`, plus an explicit
+`evidence_truncated` flag). `agent/evidence.py` derives these
+deterministically from the finished run's successful `ToolObservation`s — it
+is a pure function over `AgentRun.steps` with no model call, filesystem read,
+or database access, and malformed observation payloads are ignored rather
+than failing the investigation.
+
+Only tools that directly observed current working-tree content qualify:
+`read_file` (its actual returned line range), `search_code`, and
+`find_symbol` (each match's line). Failed calls, `list_directory`,
+`git_status`, `git_diff`, and model-written path references in the answer
+text never become evidence.
+
+`indexed_code_search` results are explicitly excluded: a persisted index hit
+is a navigation hint that may be stale, so it never becomes evidence on its
+own. If indexed navigation leads to a successful `read_file`, that current
+read becomes evidence in the ordinary way. Whether indexed finalization is
+*safe* remains `_IndexedGroundingPolicy`'s responsibility; the extractor only
+reports what was observed.
+
+The contract is deliberately run-level, not claim-level: it reports where
+RepoMind looked during this run, and does **not** assert that every statement
+in `final_answer` is proved by every listed location. Like RAG citations, the
+payload is metadata only — repository-relative path and line range, never
+source text.
+
 ## Coding workflow and completion gates
 
 ```text

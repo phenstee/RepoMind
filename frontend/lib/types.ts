@@ -62,12 +62,24 @@ export interface RAGResponse {
 
 export type AgentRetrievalMode = "filesystem" | "indexed";
 
+export type ObservedVia = "read_file" | "search_code" | "find_symbol";
+
+/** A current-source location the run actually observed. Metadata only. */
+export interface ObservedLocation {
+  relative_path: string;
+  start_line: number;
+  end_line: number;
+  observed_via: ObservedVia;
+}
+
 export interface AgentResponse {
   status: string;
   final_answer: string | null;
   iterations: number;
   llm_calls: number;
   tool_execution_attempts: number;
+  evidence: ObservedLocation[];
+  evidence_truncated: boolean;
   trace_run_id: string | null;
 }
 

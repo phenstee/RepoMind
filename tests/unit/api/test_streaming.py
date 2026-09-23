@@ -339,6 +339,33 @@ def test_read_only_agent_streams_actions_without_editing_capability(api):
         assert private not in body
 
 
+def test_agent_sse_terminal_result_carries_observed_evidence(api):
+    """SSE reuses the shared AgentResponse rather than a special-case payload."""
+
+    api.llm.responses.extend(
+        [
+            {"action": "tool", "tool_name": "read_file", "tool_arguments": {"path": "app.py"}},
+            {"action": "final", "final_answer": "Inspected app.py."},
+        ]
+    )
+
+    events = _stream(api, "/repositories/1/agent/runs/stream", {"query": "inspect"})
+
+    result = events[-1]["data"]["result"]
+    assert result["evidence"] == [
+        {
+            "relative_path": "app.py",
+            "start_line": 1,
+            "end_line": 2,
+            "observed_via": "read_file",
+        }
+    ]
+    assert result["evidence_truncated"] is False
+    # Progress frames stay a narrow projection; evidence rides the result only.
+    assert "observed_via" not in json.dumps(events[:-1])
+    assert "return 1" not in json.dumps(events)
+
+
 def test_coding_recovery_streams_failure_then_correction_and_completion(coding_project):
     api = coding_project
     before = (api.repo / "app.py").read_bytes()

@@ -8,6 +8,7 @@ from typing import Protocol
 from repomind.agent import (
     AgentConfig,
     EditingAgentConfig,
+    extract_observed_source_evidence,
     run_indexed_read_only_agent,
     run_read_only_agent,
 )
@@ -19,6 +20,7 @@ from repomind.api.models import (
     CodingRequest,
     CodingResponse,
     IndexResponse,
+    ObservedLocationResponse,
     RAGRequest,
     RAGResponse,
     VerificationSummary,
@@ -245,12 +247,23 @@ class ExecutionService:
                     cancellation=cancellation,
                 )
                 run_trace.finish(result.status.value)
+                evidence = extract_observed_source_evidence(result.steps)
                 return AgentResponse(
                     status=result.status.value,
                     final_answer=public_text(result.final_answer),
                     iterations=result.iterations,
                     llm_calls=result.llm_calls,
                     tool_execution_attempts=result.tool_calls,
+                    evidence=[
+                        ObservedLocationResponse(
+                            relative_path=location.relative_path.as_posix(),
+                            start_line=location.start_line,
+                            end_line=location.end_line,
+                            observed_via=location.observed_via,
+                        )
+                        for location in evidence.locations
+                    ],
+                    evidence_truncated=evidence.truncated,
                     trace_run_id=run_trace.run_id,
                 )
 

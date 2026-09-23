@@ -235,7 +235,16 @@ def test_agent_indexed_mode_registers_indexed_tool_and_uses_symbol_fusion(api):
     assert query == "where is value computed"
     assert (hybrid, top_k, include_symbols) == (True, 5, True)
     assert "def value" not in response.text
-    assert "app.py" not in response.text
+    # The path is public only because a successful current read_file observed
+    # it; the indexed hit alone would not have produced evidence.
+    assert response.json()["evidence"] == [
+        {
+            "relative_path": "src/app.py",
+            "start_line": 1,
+            "end_line": 2,
+            "observed_via": "read_file",
+        }
+    ]
 
 
 def test_agent_indexed_mode_rejects_final_until_returned_file_is_read(api):
@@ -294,6 +303,162 @@ def test_agent_indexed_mode_handles_empty_retrieval_gracefully(api):
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "completed"
     assert response.json()["tool_execution_attempts"] == 1
+
+
+def test_agent_response_exposes_observed_source_evidence(api):
+    (api.repo / "src").mkdir()
+    (api.repo / "src" / "app.py").write_text(
+        "def value():\n    return 1\n", encoding="utf-8"
+    )
+    api.llm.responses.extend(
+        [
+            {
+                "action": "tool",
+                "tool_name": "search_code",
+                "tool_arguments": {"query": "value"},
+            },
+            {
+                "action": "tool",
+                "tool_name": "read_file",
+                "tool_arguments": {"path": "src/app.py"},
+            },
+            {"action": "final", "final_answer": "value returns 1."},
+        ]
+    )
+
+    response = api.client.post("/api/v1/repositories/1/agent/runs", json={"query": "inspect"})
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["evidence_truncated"] is False
+    # The fixture repository also has a root app.py matching "value", so the
+    # search contributes both files; the read contributes the file it opened.
+    assert {item["observed_via"] for item in body["evidence"]} == {"search_code", "read_file"}
+    assert {
+        "relative_path": "src/app.py",
+        "start_line": 1,
+        "end_line": 2,
+        "observed_via": "read_file",
+    } in body["evidence"]
+    for item in body["evidence"]:
+        assert set(item) == {"relative_path", "start_line", "end_line", "observed_via"}
+        assert item["relative_path"] in {"app.py", "src/app.py"}
+        assert not item["relative_path"].startswith("/")
+    # Locations are public; the source text behind them is not.
+    assert "def value" not in response.text
+    assert "return 1" not in response.text
+
+
+def test_agent_evidence_is_empty_without_source_observations(api):
+    api.llm.responses.append({"action": "final", "final_answer": "Nothing was inspected."})
+
+    response = api.client.post("/api/v1/repositories/1/agent/runs", json={"query": "inspect"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["evidence"] == []
+    assert response.json()["evidence_truncated"] is False
+
+
+def test_agent_bare_indexed_hit_produces_no_evidence(api):
+    """A stale-capable index hit is navigation, never observed-source evidence."""
+
+    api.store.candidates = candidates()
+    api.llm.responses.extend(
+        [
+            {
+                "action": "tool",
+                "tool_name": "indexed_code_search",
+                "tool_arguments": {"query": "where is value computed"},
+            },
+            # The grounding policy blocks this final until a current read;
+            # the run ends on iteration limits with no confirming read_file.
+            {"action": "final", "final_answer": "The index says so."},
+        ]
+    )
+
+    response = api.client.post(
+        "/api/v1/repositories/1/agent/runs",
+        json={"query": "inspect", "retrieval_mode": "indexed", "max_iterations": 2},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["evidence"] == []
+    assert "app.py" not in response.text
+
+
+def test_agent_evidence_survives_durable_job_result_serialization(api):
+    from repomind.api.models import AgentResponse, JobDetailResponse
+
+    original = AgentResponse(
+        status="completed",
+        final_answer="done",
+        iterations=1,
+        llm_calls=1,
+        tool_execution_attempts=1,
+        evidence=[
+            {
+                "relative_path": "src/app.py",
+                "start_line": 3,
+                "end_line": 9,
+                "observed_via": "read_file",
+            }
+        ],
+        evidence_truncated=True,
+    )
+
+    detail = JobDetailResponse.model_validate(
+        {
+            "job_id": "11111111-1111-1111-1111-111111111111",
+            "job_type": "agent",
+            "status": "succeeded",
+            "repository_id": 1,
+            "attempt_count": 1,
+            "created_at": "2026-09-22T00:00:00Z",
+            "started_at": None,
+            "finished_at": None,
+            "trace_run_id": None,
+            "cancel_requested": False,
+            "cancel_requested_at": None,
+            "cancelled_at": None,
+            "cancellation_control": "unavailable",
+            "result": original.model_dump(mode="json"),
+        }
+    )
+
+    assert isinstance(detail.result, AgentResponse)
+    assert detail.result.evidence == original.evidence
+    assert detail.result.evidence_truncated is True
+
+
+def test_agent_response_evidence_rejects_unsafe_locations():
+    from pydantic import ValidationError
+
+    from repomind.api.models import ObservedLocationResponse
+
+    for unsafe in ["/etc/passwd", "../outside.py", "C:\\\\windows\\\\system32"]:
+        with pytest.raises(ValidationError):
+            ObservedLocationResponse(
+                relative_path=unsafe, start_line=1, end_line=2, observed_via="read_file"
+            )
+
+    with pytest.raises(ValidationError):
+        ObservedLocationResponse(
+            relative_path="src/app.py", start_line=0, end_line=2, observed_via="read_file"
+        )
+
+    with pytest.raises(ValidationError):
+        ObservedLocationResponse(
+            relative_path="src/app.py", start_line=1, end_line=2, observed_via="indexed_code_search"
+        )
+
+    # The public contract independently guards the range invariant: this must
+    # be rejected even though the internal extractor already prevents it,
+    # because persisted job results are re-validated through this model.
+    with pytest.raises(ValidationError):
+        ObservedLocationResponse(
+            relative_path="src/app.py", start_line=9, end_line=4, observed_via="read_file"
+        )
 
 
 def test_agent_invalid_retrieval_mode_is_rejected(api):

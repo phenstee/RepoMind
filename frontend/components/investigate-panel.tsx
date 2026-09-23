@@ -2,7 +2,13 @@
 
 import { useState } from "react";
 
-import type { AgentResponse, AgentRetrievalMode } from "../lib/types";
+import type { AgentResponse, AgentRetrievalMode, ObservedLocation } from "../lib/types";
+
+function locationLabel(location: ObservedLocation) {
+  return location.start_line === location.end_line
+    ? `${location.relative_path}:${location.start_line}`
+    : `${location.relative_path}:${location.start_line}-${location.end_line}`;
+}
 
 export function InvestigatePanel({
   disabled,
@@ -49,16 +55,36 @@ export function InvestigatePanel({
         </label>
         <button type="submit" disabled={disabled}>Run read-only investigation</button>
       </form>
-      {result ? (
-        <article className="answer">
-          <h3>{result.status}</h3>
-          <p>{result.final_answer ?? "The agent did not return a final answer."}</p>
-          <small>
-            {result.iterations} iterations · {result.tool_execution_attempts} tool calls · {result.llm_calls} model calls
-          </small>
-          {result.trace_run_id ? <small>Trace {result.trace_run_id}</small> : null}
-        </article>
-      ) : null}
+      {result ? <InvestigationResult result={result} /> : null}
     </section>
+  );
+}
+
+export function InvestigationResult({ result }: { result: AgentResponse }) {
+  return (
+    <article className="answer">
+      <h3>{result.status}</h3>
+      <p>{result.final_answer ?? "The agent did not return a final answer."}</p>
+      <small>
+        {result.iterations} iterations · {result.tool_execution_attempts} tool calls · {result.llm_calls} model calls
+      </small>
+      {result.evidence.length > 0 ? (
+        <section className="evidence" aria-label="Evidence">
+          <h4>Evidence</h4>
+          <p className="muted">Locations the agent observed in the current repository.</p>
+          <ul className="citations">
+            {result.evidence.map((location) => (
+              <li key={`${location.relative_path}:${location.start_line}-${location.end_line}`}>
+                <code>{locationLabel(location)}</code>
+              </li>
+            ))}
+          </ul>
+          {result.evidence_truncated ? (
+            <small>Additional observed locations were omitted.</small>
+          ) : null}
+        </section>
+      ) : null}
+      {result.trace_run_id ? <small>Trace {result.trace_run_id}</small> : null}
+    </article>
   );
 }

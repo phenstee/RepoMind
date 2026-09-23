@@ -2,7 +2,7 @@ from threading import Event, Thread
 from types import SimpleNamespace
 from uuid import uuid4
 
-from repomind.api.models import CodingResponse, RAGResponse, VerificationSummary
+from repomind.api.models import AgentResponse, CodingResponse, RAGResponse, VerificationSummary
 from repomind.coding import CodingPlan, CodingReview, CodingTaskStatus
 from repomind.jobs.models import Job, JobStatus, JobType
 from repomind.jobs.worker import JobWorker
@@ -90,6 +90,20 @@ def _job():
     )
 
 
+def _agent_job():
+    from datetime import UTC, datetime
+
+    return Job(
+        id=uuid4(),
+        job_type=JobType.AGENT,
+        repository_id=1,
+        status=JobStatus.QUEUED,
+        request_payload={"query": "Where is the entry point?"},
+        attempt_count=0,
+        created_at=datetime.now(UTC),
+    )
+
+
 def _coding_job():
     from datetime import UTC, datetime
 
@@ -113,6 +127,56 @@ def test_worker_reuses_rag_service_persists_safe_result_and_forwards_progress():
     assert [event.event for event in broker.events] == [
         "run.started",
         "retrieval.started",
+        "run.completed",
+    ]
+
+
+def test_durable_agent_job_persists_evidence_and_truncation_through_real_serialization():
+    """Prove the production path: ExecutionService.agent -> JobWorker ->
+    result.model_dump(mode="json") -> store.mark_succeeded, not a hand-built
+    dict that only exercises Pydantic in isolation."""
+
+    class AgentExecution(FakeExecution):
+        def agent(self, repository_id, request, *, trace, cancellation):
+            del repository_id, request
+            cancellation.checkpoint()
+            trace.emit("tool.started", tool="read_file")
+            trace.finish("completed")
+            return AgentResponse(
+                status="completed",
+                final_answer="The worker claims jobs with SKIP LOCKED.",
+                iterations=1,
+                llm_calls=1,
+                tool_execution_attempts=1,
+                evidence=[
+                    {
+                        "relative_path": "src/repomind/jobs/store.py",
+                        "start_line": 5,
+                        "end_line": 6,
+                        "observed_via": "read_file",
+                    }
+                ],
+                evidence_truncated=True,
+                trace_run_id=trace.run_id,
+            )
+
+    store, broker = FakeStore(_agent_job()), FakeBroker()
+    worker = JobWorker(store, broker, AgentExecution(), worker_id="test", lease_seconds=30)
+
+    assert worker.run_once()
+    assert store.error is None
+    assert store.result["evidence"] == [
+        {
+            "relative_path": "src/repomind/jobs/store.py",
+            "start_line": 5,
+            "end_line": 6,
+            "observed_via": "read_file",
+        }
+    ]
+    assert store.result["evidence_truncated"] is True
+    assert [event.event for event in broker.events] == [
+        "run.started",
+        "tool.started",
         "run.completed",
     ]
 
