@@ -16,10 +16,19 @@ from repomind.api.models import (
     RepositoryResponse,
 )
 from repomind.api.store import RepositoryBinding, RepositoryStore
+from repomind.db import content_sha256
+from repomind.indexing import (
+    FileClassification,
+    IndexSummary,
+    IndexUpdate,
+    classify_files,
+    index_fingerprint,
+)
 from repomind.ingestion import (
     ChunkingConfig,
     CodeChunk,
-    chunk_repository,
+    RepositorySnapshot,
+    chunk_source_file,
     find_source_files,
     ingest_repository,
     resolve_repository_path,
@@ -27,11 +36,17 @@ from repomind.ingestion import (
 from repomind.jobs.control import CooperativeCancellation, NoCancellation
 from repomind.jobs.locks import NullRepositoryExecutionLock, RepositoryExecutionLock
 from repomind.observability import TraceContext
-from repomind.retrieval import EmbeddedChunk
+from repomind.retrieval import EmbeddedChunk, EmbeddingTextStrategy
 
 
 class ChunkEmbedder(Protocol):
     def embed_chunks(self, chunks: Sequence[CodeChunk]) -> list[EmbeddedChunk]: ...
+
+    @property
+    def embedding_model(self) -> str: ...
+
+    @property
+    def embedding_text_strategy(self) -> EmbeddingTextStrategy: ...
 
 
 class WorkspacePolicy:
@@ -194,9 +209,28 @@ class RepositoryService:
                     file_count=snapshot.file_count,
                     total_size_bytes=snapshot.total_size_bytes,
                 )
-            chunks = chunk_repository(snapshot, self.chunking_config)
+            fingerprint = index_fingerprint(
+                chunking=self.chunking_config,
+                embedding_model=embedder.embedding_model,
+                embedding_text_strategy=embedder.embedding_text_strategy,
+            )
+            manifest = self.store.index_manifest(repository_id)
+            plan = classify_files(
+                current={
+                    source.relative_path.as_posix(): content_sha256(source.content)
+                    for source in snapshot.files
+                },
+                manifest=manifest,
+                compatible=manifest.is_compatible_with(fingerprint),
+            )
+            # Only changed/new files are chunked; unchanged files keep the
+            # chunks and vectors already persisted for them.
+            chunks = self._chunk_selected(snapshot, plan.reindexed)
             cancellation.checkpoint()
-            if len(chunks) > self.MAX_CHUNKS:
+            reused_chunks = sum(
+                manifest.files[path].chunk_count for path in plan.unchanged
+            )
+            if reused_chunks + len(chunks) > self.MAX_CHUNKS:
                 raise APIError(
                     413, "repository_too_large", "Repository exceeds synchronous index limits."
                 )
@@ -204,35 +238,120 @@ class RepositoryService:
                 trace.emit(
                     "chunking.completed",
                     repository_id=repository_id,
-                    chunk_count=len(chunks),
+                    chunk_count=reused_chunks + len(chunks),
                     chunking_strategy=self.chunking_config.strategy.value,
                 )
                 trace.emit(
                     "embedding.started", repository_id=repository_id, chunk_count=len(chunks)
                 )
             embedded = embedder.embed_chunks(chunks) if chunks else []
+            self._verify_embedder_output(chunks, embedded, embedder.embedding_model)
             cancellation.checkpoint()
             if trace is not None:
                 trace.emit(
                     "embedding.completed",
                     repository_id=repository_id,
                     chunk_count=len(embedded),
-                    embedding_model=embedded[0].embedding.model if embedded else None,
+                    embedding_model=embedder.embedding_model if embedded else None,
                 )
             self.workspace.resolve(binding.workspace_relative_path)
             cancellation.checkpoint()
-            self.store.replace_index(repository_id, snapshot, embedded)
+            summary = self.store.apply_index_update(
+                repository_id,
+                IndexUpdate(
+                    fingerprint=fingerprint,
+                    snapshot=snapshot,
+                    upserted=plan.reindexed,
+                    deleted=plan.deleted,
+                    chunks=embedded,
+                    full_rebuild=plan.full_rebuild,
+                ),
+            )
             if trace is not None:
-                trace.emit(
-                    "persistence.completed",
-                    repository_id=repository_id,
-                    file_count=snapshot.file_count,
-                    chunk_count=len(embedded),
-                )
+                self._emit_index_completed(trace, repository_id, plan, summary, len(embedded))
             cancellation.checkpoint()
             return IndexResponse(
                 repository_id=repository_id,
-                files_indexed=snapshot.file_count,
-                chunks_indexed=len(embedded),
-                embedding_model=embedded[0].embedding.model if embedded else None,
+                files_indexed=summary.file_count,
+                chunks_indexed=summary.chunk_count,
+                embedding_model=summary.embedding_model,
             )
+
+    @staticmethod
+    def _verify_embedder_output(
+        requested: Sequence[CodeChunk],
+        embedded: Sequence[EmbeddedChunk],
+        embedding_model: str,
+    ) -> None:
+        """Fail closed unless the provider returned exactly what we asked for.
+
+        The caller knows the precise chunk sequence it submitted, so a missing,
+        reordered, substituted, or foreign result is detectable here - before
+        anything is persisted under a fingerprint that claims this model. The
+        messages name only chunk identity, never source text.
+        """
+
+        if len(embedded) != len(requested):
+            raise APIError(
+                502,
+                "embedding_contract_violation",
+                "The embedding provider returned an unexpected number of results.",
+            )
+        for chunk, result in zip(requested, embedded, strict=True):
+            if result.chunk is not chunk and result.chunk != chunk:
+                raise APIError(
+                    502,
+                    "embedding_contract_violation",
+                    "The embedding provider returned results for unexpected chunks.",
+                )
+            if result.embedding.model != embedding_model:
+                # The fingerprint authorizing future reuse records
+                # embedder.embedding_model; storing a vector from a different
+                # model would make that claim false.
+                raise APIError(
+                    502,
+                    "embedding_contract_violation",
+                    "The embedding provider returned an unexpected model identity.",
+                )
+
+    def _chunk_selected(
+        self, snapshot: RepositorySnapshot, paths: Sequence[str]
+    ) -> Sequence[CodeChunk]:
+        """Chunk only the selected files with the same per-file chunker.
+
+        ``chunk_repository`` is simply this loop over every file, so chunking a
+        subset produces byte-identical chunks for those files: ``chunk_index``
+        already restarts per file and never depends on other files.
+        """
+
+        if not paths:
+            return []
+        selected = set(paths)
+        chunks: list[CodeChunk] = []
+        for source in snapshot.files:
+            if source.relative_path.as_posix() in selected:
+                chunks.extend(chunk_source_file(source, self.chunking_config))
+        return chunks
+
+    @staticmethod
+    def _emit_index_completed(
+        trace: TraceContext,
+        repository_id: int,
+        plan: FileClassification,
+        summary: IndexSummary,
+        embedded_chunks: int,
+    ) -> None:
+        """Report aggregate index work only: never paths, source text, or vectors."""
+
+        trace.emit(
+            "persistence.completed",
+            repository_id=repository_id,
+            file_count=summary.file_count,
+            chunk_count=summary.chunk_count,
+            full_rebuild=plan.full_rebuild,
+            files_added=len(plan.added),
+            files_changed=len(plan.changed),
+            files_unchanged=len(plan.unchanged),
+            files_deleted=len(plan.deleted),
+            chunks_embedded=embedded_chunks,
+        )

@@ -201,6 +201,10 @@ def test_index_service_can_select_structural_chunking_without_api_redesign(api):
 def test_failed_embedding_preserves_index_and_size_limits_prevent_calls(api, monkeypatch):
     assert api.client.post("/api/v1/repositories/1/index").status_code == 200
     old = api.store.snapshots[1]
+    old_chunks = api.store.chunks[1]
+    # Incremental indexing only embeds changed files, so the source must
+    # actually change for the failing embedder to be reached at all.
+    (api.repo / "app.py").write_bytes(b"def value():\r\n    return 2\r\n")
 
     def fail(chunks):
         raise RuntimeError("sk-secret")
@@ -208,6 +212,7 @@ def test_failed_embedding_preserves_index_and_size_limits_prevent_calls(api, mon
     monkeypatch.setattr(api.embeddings, "embed_chunks", fail)
     assert api.client.post("/api/v1/repositories/1/index").status_code == 500
     assert api.store.snapshots[1] is old
+    assert api.store.chunks[1] is old_chunks
     service = api.app.state.container.get().repositories
     monkeypatch.setattr(service, "MAX_SOURCE_BYTES", 1)
     assert api.client.post("/api/v1/repositories/1/index").status_code == 413

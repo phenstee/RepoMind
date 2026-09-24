@@ -35,11 +35,18 @@ class RepositoryRecord(Base):
     __table_args__ = (
         UniqueConstraint("name", name="uq_repositories_name"),
         CheckConstraint("char_length(name) > 0", name="ck_repositories_name_nonempty"),
+        CheckConstraint(
+            "index_fingerprint IS NULL OR char_length(index_fingerprint) = 64",
+            name="ck_repositories_index_fingerprint_length",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     workspace_relative_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # NULL means "indexed before fingerprints existed": provenance was never
+    # recorded, so the index must be rebuilt once rather than reused.
+    index_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

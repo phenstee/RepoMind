@@ -7,6 +7,7 @@ historical development intent.
 ## Contents
 
 - [Retrieval](#retrieval)
+- [Incremental indexing](#incremental-indexing)
 - [Agent and tool boundaries](#agent-and-tool-boundaries)
 - [Indexed navigation and current-source authority](#indexed-navigation-and-current-source-authority)
 - [Coding workflow and completion gates](#coding-workflow-and-completion-gates)
@@ -73,6 +74,49 @@ Four retrieval strategies are selectable per request (`semantic`, `hybrid`,
   fragments, deduplicates by stable chunk identity
   (`relative_path, chunk_index, start_line, end_line`), and greedily packs a
   deterministic character budget.
+
+## Incremental indexing
+
+Re-indexing a repository is incremental **at file granularity**, but only when
+RepoMind can prove the stored index is configuration-compatible with the
+current run.
+
+`indexing.index_fingerprint` derives a SHA-256 digest over every setting that
+changes what a stored chunk or vector *means*: the chunking strategy and its
+boundary parameters, the embedding model, the embedding text strategy, and a
+version marker for the digest format itself. Operational settings that do not
+change stored semantics — embedding batch size, for example — are deliberately
+excluded, so tuning throughput never forces a rebuild. The fingerprint is
+persisted on the repository row and written in the same transaction as the
+index it describes.
+
+Given a compatible fingerprint, each current file is classified by comparing
+its content hash against the persisted `repository_files.content_hash`:
+
+- **unchanged** — its existing file row, chunks, and vectors are reused
+  untouched, keeping stable database identity
+- **changed** / **new** — re-chunked and re-embedded
+- **deleted** — removed from the persisted index through the existing cascades
+
+Only changed and new files are sent to the embedding provider, so re-indexing
+an unchanged repository makes zero embedding requests. Reuse is per file:
+editing one line re-chunks and re-embeds that whole file, and there is no
+partial-chunk diffing inside a modified file.
+
+If the fingerprint does not match — a different model, a different chunking
+configuration, or a legacy repository that never persisted one — the run
+safely falls back to a full rebuild rather than mixing incompatible chunks.
+Safe rebuild is always preferred over unsafe reuse.
+
+The whole delta (file rows, chunk rows, vectors, deletions, and the
+fingerprint) is applied in one store transaction, so an embedding failure
+during preparation or a persistence failure mid-apply leaves the previous
+index intact. `MAX_CHUNKS` is enforced against the complete resulting index,
+counting reused chunks, not just newly embedded ones.
+
+Indexing remains explicit: there is no filesystem watcher and no automatic
+reindex, so the persisted index reflects the working tree only as of the last
+indexing run.
 
 ## Agent and tool boundaries
 

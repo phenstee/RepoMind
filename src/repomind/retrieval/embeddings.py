@@ -167,6 +167,18 @@ class OpenAIEmbeddingClient:
         self._async_client = async_client
         self.trace = trace
 
+    @property
+    def embedding_model(self) -> str:
+        """Model identity contributing to the persisted index fingerprint."""
+
+        return self.model
+
+    @property
+    def embedding_text_strategy(self) -> EmbeddingTextStrategy:
+        """Input representation; changing it changes what a stored vector means."""
+
+        return self.config.text_strategy
+
     def _client_kwargs(self) -> dict[str, Any]:
         secret = self.settings.openai_api_key
         api_key = secret.get_secret_value() if secret is not None else ""

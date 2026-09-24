@@ -14,16 +14,38 @@ from repomind.api.models import RepositoryFileResponse
 from repomind.api.store import RepositoryBinding
 from repomind.coding import CodingPlan, CodingReview
 from repomind.config import Settings
-from repomind.db.repositories import RepositoryNotFoundError
+from repomind.db.repositories import RepositoryNotFoundError, content_sha256
+from repomind.indexing import (
+    IndexedFileState,
+    IndexManifest,
+    IndexSummary,
+    validate_index_update,
+)
 from repomind.llm import OpenAILLMClient
-from repomind.retrieval import EmbeddedChunk, EmbeddingVector, OpenAIEmbeddingClient
+from repomind.retrieval import (
+    EmbeddedChunk,
+    EmbeddingTextStrategy,
+    EmbeddingVector,
+    OpenAIEmbeddingClient,
+)
 
 
 class MemoryRepositoryStore:
+    """Models per-file persisted index state so incremental bugs are visible.
+
+    A fake that simply replaced the whole index would hide classification,
+    reuse, and deletion mistakes, so this one keeps the same per-path state the
+    real store keeps: content hash, chunk list, and the index fingerprint.
+    Reused files keep their original ``EmbeddedChunk`` objects, which lets a
+    test assert reuse by identity.
+    """
+
     def __init__(self):
         self.bindings = {}
         self.snapshots = {}
         self.chunks = {}
+        self.indexes = {}
+        self.fingerprints = {}
         self.search_calls = []
         self.candidates = []
         self.neighbor_corpus = []
@@ -49,7 +71,8 @@ class MemoryRepositoryStore:
         return list(reversed(list(self.bindings.values())))[:limit]
 
     def files(self, repository_id, limit, offset):
-        snapshot = self.snapshots.get(repository_id)
+        index = self.indexes.get(repository_id, {})
+        sources = [index[path]["source"] for path in sorted(index)]
         return [
             RepositoryFileResponse(
                 relative_path=f.relative_path.as_posix(),
@@ -57,12 +80,54 @@ class MemoryRepositoryStore:
                 size_bytes=f.size_bytes,
                 line_count=f.line_count,
             )
-            for f in (snapshot.files if snapshot else [])[offset : offset + limit]
+            for f in sources[offset : offset + limit]
         ]
 
-    def replace_index(self, repository_id, snapshot, chunks):
-        self.snapshots[repository_id] = snapshot
-        self.chunks[repository_id] = chunks
+    def index_manifest(self, repository_id):
+        index = self.indexes.get(repository_id)
+        if index is None:
+            return IndexManifest()
+        return IndexManifest(
+            fingerprint=self.fingerprints.get(repository_id),
+            files={
+                path: IndexedFileState(
+                    content_hash=entry["content_hash"], chunk_count=len(entry["chunks"])
+                )
+                for path, entry in index.items()
+            },
+        )
+
+    def apply_index_update(self, repository_id, update):
+        # Share the real store's reconciliation invariants so unit tests
+        # cannot pass against a fake that tolerates a malformed delta.
+        validate_index_update(update, manifest=self.index_manifest(repository_id))
+        index = self.indexes.setdefault(repository_id, {})
+        if update.full_rebuild:
+            index.clear()
+        sources = {s.relative_path.as_posix(): s for s in update.snapshot.files}
+        for path in update.deleted:
+            index.pop(path, None)
+        for path in update.upserted:
+            source = sources[path]
+            index[path] = {
+                "source": source,
+                "content_hash": content_sha256(source.content),
+                "chunks": [],
+            }
+        for embedded in update.chunks:
+            index[embedded.chunk.relative_path.as_posix()]["chunks"].append(embedded)
+
+        self.fingerprints[repository_id] = update.fingerprint
+        self.snapshots[repository_id] = update.snapshot
+        self.chunks[repository_id] = [
+            chunk for path in sorted(index) for chunk in index[path]["chunks"]
+        ]
+        models = [c.embedding.model for c in self.chunks[repository_id]]
+        return IndexSummary(
+            file_count=len(index),
+            chunk_count=len(self.chunks[repository_id]),
+            embedding_model=min(models) if models else None,
+        )
 
     def search(self, repository_id, query, embedding, *, hybrid, top_k, include_symbols=False):
         self.search_calls.append((repository_id, query, hybrid, top_k, include_symbols))
@@ -100,9 +165,43 @@ class MemoryTraces:
 
 
 class FakeEmbeddings:
+    """Counts exactly which chunks were sent for embedding.
+
+    ``embedded_paths`` makes it obvious which files a run actually paid to
+    embed, so a test can prove an unchanged file was never re-embedded.
+    """
+
     def __init__(self):
         self.calls = []
-        self.vector = EmbeddingVector(values=(1.0, 0.0), model="offline-model")
+        self.embedded_batches = []
+        self.values = (1.0, 0.0)
+        self.model = "offline-model"
+        self.text_strategy = EmbeddingTextStrategy.RAW_SOURCE
+
+    @property
+    def vector(self):
+        """Always carries the model currently advertised for the fingerprint.
+
+        A fake whose advertised ``embedding_model`` could drift from the model
+        stamped on its vectors would let a test "pass" while production stored
+        a vector contradicting its own fingerprint.
+        """
+
+        return EmbeddingVector(values=self.values, model=self.model)
+
+    @property
+    def embedding_model(self):
+        return self.model
+
+    @property
+    def embedding_text_strategy(self):
+        return self.text_strategy
+
+    @property
+    def embedded_paths(self):
+        return [
+            chunk.relative_path.as_posix() for batch in self.embedded_batches for chunk in batch
+        ]
 
     def embed_text(self, text):
         self.calls.append(text)
@@ -110,6 +209,7 @@ class FakeEmbeddings:
 
     def embed_chunks(self, chunks):
         self.calls.append(chunks)
+        self.embedded_batches.append(list(chunks))
         return [EmbeddedChunk(chunk=c, embedding=self.vector) for c in chunks]
 
 

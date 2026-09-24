@@ -2,7 +2,6 @@
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from hashlib import sha256
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import case, cast, distinct, false, func, or_, select, text, tuple_
@@ -13,6 +12,14 @@ from repomind.db.models import (
     CodeChunkRecord,
     RepositoryFileRecord,
     RepositoryRecord,
+)
+from repomind.indexing import (
+    IndexedFileState,
+    IndexManifest,
+    IndexSummary,
+    IndexUpdate,
+    content_digest,
+    validate_index_update,
 )
 from repomind.ingestion import CodeChunk, RepositorySnapshot
 from repomind.retrieval import (
@@ -43,7 +50,7 @@ class RepositoryNotFoundError(PersistenceError):
 def content_sha256(content: str) -> str:
     """Return a deterministic SHA-256 digest of exact UTF-8 source text."""
 
-    return sha256(content.encode("utf-8")).hexdigest()
+    return content_digest(content)
 
 
 def _repository_or_raise(session: Session, repository_id: int) -> RepositoryRecord:
@@ -51,6 +58,20 @@ def _repository_or_raise(session: Session, repository_id: int) -> RepositoryReco
     if repository is None:
         raise RepositoryNotFoundError(f"Repository {repository_id} does not exist")
     return repository
+
+
+def _invalidate_index_fingerprint(repository: RepositoryRecord) -> None:
+    """Revoke incremental-reuse authorization for an unproven mutation.
+
+    The legacy full-replacement helpers rewrite files/chunks/vectors without
+    establishing which indexing configuration produced them. Leaving a stale
+    fingerprint behind would let a later run reuse rows it cannot vouch for, so
+    provenance is cleared in the same transaction as the mutation. A
+    replacement fingerprint is deliberately not fabricated here: only
+    :func:`apply_index_update` knows a proven one.
+    """
+
+    repository.index_fingerprint = None
 
 
 def persist_repository_snapshot(
@@ -86,6 +107,7 @@ def persist_repository_snapshot(
         )
         for source_file in snapshot.files
     )
+    _invalidate_index_fingerprint(repository)
     session.flush()
     return repository
 
@@ -131,6 +153,9 @@ def _replace_chunks(
     files_by_path = _files_by_path(session, repository_id)
     _validate_chunk_inputs(files_by_path, chunks)
 
+    # One invalidation point covers both persist_chunks and
+    # persist_embedded_chunks, which share this replacement helper.
+    _invalidate_index_fingerprint(_repository_or_raise(session, repository_id))
     for repository_file in files_by_path.values():
         repository_file.chunks.clear()
     session.flush()
@@ -138,24 +163,7 @@ def _replace_chunks(
     records: list[CodeChunkRecord] = []
     for chunk in chunks:
         path = chunk.relative_path.as_posix()
-        embedding = embeddings.get((path, chunk.chunk_index))
-        record = CodeChunkRecord(
-            chunk_index=chunk.chunk_index,
-            start_line=chunk.start_line,
-            end_line=chunk.end_line,
-            content=chunk.content,
-            content_hash=content_sha256(chunk.content),
-            chunking_strategy=chunk.chunking_strategy.value,
-            chunk_kind=chunk.chunk_kind.value,
-            symbol_name=chunk.symbol_name,
-            qualified_symbol_name=chunk.qualified_symbol_name,
-            parent_symbol=chunk.parent_symbol,
-            fragment_index=chunk.fragment_index,
-            fragment_count=chunk.fragment_count,
-            embedding=list(embedding.values) if embedding is not None else None,
-            embedding_model=embedding.model if embedding is not None else None,
-            embedding_dimensions=embedding.dimensions if embedding is not None else None,
-        )
+        record = _chunk_record(chunk, embeddings.get((path, chunk.chunk_index)))
         files_by_path[path].chunks.append(record)
         records.append(record)
 
@@ -163,26 +171,33 @@ def _replace_chunks(
     return records
 
 
-def persist_chunks(
-    session: Session,
-    repository_id: int,
-    chunks: Sequence[CodeChunk],
-) -> list[CodeChunkRecord]:
-    """Replace all chunks for a repository without generating embeddings or committing."""
+def _chunk_record(chunk: CodeChunk, embedding: EmbeddingVector | None) -> CodeChunkRecord:
+    return CodeChunkRecord(
+        chunk_index=chunk.chunk_index,
+        start_line=chunk.start_line,
+        end_line=chunk.end_line,
+        content=chunk.content,
+        content_hash=content_sha256(chunk.content),
+        chunking_strategy=chunk.chunking_strategy.value,
+        chunk_kind=chunk.chunk_kind.value,
+        symbol_name=chunk.symbol_name,
+        qualified_symbol_name=chunk.qualified_symbol_name,
+        parent_symbol=chunk.parent_symbol,
+        fragment_index=chunk.fragment_index,
+        fragment_count=chunk.fragment_count,
+        embedding=list(embedding.values) if embedding is not None else None,
+        embedding_model=embedding.model if embedding is not None else None,
+        embedding_dimensions=embedding.dimensions if embedding is not None else None,
+    )
 
-    return _replace_chunks(session, repository_id, chunks, {})
 
-
-def persist_embedded_chunks(
-    session: Session,
-    repository_id: int,
+def _validated_embeddings(
     embedded_chunks: Sequence[EmbeddedChunk],
-) -> list[CodeChunkRecord]:
-    """Replace all chunks and pgvector embeddings for a repository without committing."""
+) -> dict[tuple[str, int], EmbeddingVector]:
+    """Reject inconsistent dimensions, unusable vectors, and duplicate identities."""
 
     model_dimensions: dict[str, int] = {}
     embeddings: dict[tuple[str, int], EmbeddingVector] = {}
-    chunks: list[CodeChunk] = []
     for embedded_chunk in embedded_chunks:
         chunk = embedded_chunk.chunk
         embedding = embedded_chunk.embedding
@@ -208,9 +223,145 @@ def persist_embedded_chunks(
                 f"Duplicate embedded chunk index {chunk.chunk_index} for "
                 f"repository file {identity[0]!r}"
             )
-        chunks.append(chunk)
         embeddings[identity] = embedding
+    return embeddings
 
+
+def read_index_manifest(session: Session, repository_id: int) -> IndexManifest:
+    """Project the persisted index for reuse decisions: no source text, no vectors."""
+
+    repository = _repository_or_raise(session, repository_id)
+    rows = session.execute(
+        select(
+            RepositoryFileRecord.relative_path,
+            RepositoryFileRecord.content_hash,
+            func.count(CodeChunkRecord.id),
+        )
+        .select_from(RepositoryFileRecord)
+        .outerjoin(CodeChunkRecord)
+        .where(RepositoryFileRecord.repository_id == repository_id)
+        .group_by(RepositoryFileRecord.relative_path, RepositoryFileRecord.content_hash)
+    )
+    return IndexManifest(
+        fingerprint=repository.index_fingerprint,
+        files={
+            row[0]: IndexedFileState(content_hash=row[1], chunk_count=row[2]) for row in rows
+        },
+    )
+
+
+def apply_index_update(
+    session: Session,
+    repository_id: int,
+    update: IndexUpdate,
+) -> IndexSummary:
+    """Apply one index delta atomically without committing.
+
+    Unchanged files are deliberately not touched: their existing
+    ``RepositoryFileRecord`` and ``CodeChunkRecord`` rows (including vectors)
+    survive with stable database identity. Only upserted paths are rewritten
+    and only deleted paths are removed, and the fingerprint is written in this
+    same transaction so provenance can never disagree with stored content.
+    """
+
+    repository = _repository_or_raise(session, repository_id)
+    sources = {
+        source.relative_path.as_posix(): source for source in update.snapshot.files
+    }
+    # Validate against the complete snapshot and the complete persisted
+    # manifest before touching a single row: this call stamps a fingerprint
+    # that authorizes future reuse, so a bad delta must never reach
+    # persistence. The manifest is passed whole so provenance, not just
+    # content hashes, gates incremental reuse.
+    validate_index_update(update, manifest=read_index_manifest(session, repository_id))
+
+    if update.full_rebuild:
+        # A rebuild discards every prior row by definition: nothing stored
+        # under the old configuration may survive alongside new content.
+        repository.files.clear()
+    else:
+        existing = {record.relative_path: record for record in repository.files}
+        for path in (*update.deleted, *update.upserted):
+            record = existing.pop(path, None)
+            if record is not None:
+                repository.files.remove(record)
+    session.flush()
+
+    for path in update.upserted:
+        source = sources[path]
+        repository.files.append(
+            RepositoryFileRecord(
+                relative_path=path,
+                language=source.language,
+                size_bytes=source.size_bytes,
+                line_count=source.line_count,
+                content=source.content,
+                content_hash=content_sha256(source.content),
+            )
+        )
+    repository.index_fingerprint = update.fingerprint
+    repository.updated_at = datetime.now(UTC)
+    session.flush()
+
+    _append_embedded_chunks(session, repository_id, update.chunks)
+    return _index_summary(session, repository_id)
+
+
+def _append_embedded_chunks(
+    session: Session,
+    repository_id: int,
+    embedded_chunks: Sequence[EmbeddedChunk],
+) -> None:
+    """Attach freshly embedded chunks to their (already rewritten) file rows."""
+
+    if not embedded_chunks:
+        return
+    files_by_path = _files_by_path(session, repository_id)
+    chunks = [embedded.chunk for embedded in embedded_chunks]
+    _validate_chunk_inputs(files_by_path, chunks)
+    embeddings = _validated_embeddings(embedded_chunks)
+    for embedded in embedded_chunks:
+        chunk = embedded.chunk
+        path = chunk.relative_path.as_posix()
+        files_by_path[path].chunks.append(
+            _chunk_record(chunk, embeddings.get((path, chunk.chunk_index)))
+        )
+    session.flush()
+
+
+def _index_summary(session: Session, repository_id: int) -> IndexSummary:
+    files, chunks, model = session.execute(
+        select(
+            func.count(distinct(RepositoryFileRecord.id)),
+            func.count(CodeChunkRecord.id),
+            func.min(CodeChunkRecord.embedding_model),
+        )
+        .select_from(RepositoryFileRecord)
+        .outerjoin(CodeChunkRecord)
+        .where(RepositoryFileRecord.repository_id == repository_id)
+    ).one()
+    return IndexSummary(file_count=files, chunk_count=chunks, embedding_model=model)
+
+
+def persist_chunks(
+    session: Session,
+    repository_id: int,
+    chunks: Sequence[CodeChunk],
+) -> list[CodeChunkRecord]:
+    """Replace all chunks for a repository without generating embeddings or committing."""
+
+    return _replace_chunks(session, repository_id, chunks, {})
+
+
+def persist_embedded_chunks(
+    session: Session,
+    repository_id: int,
+    embedded_chunks: Sequence[EmbeddedChunk],
+) -> list[CodeChunkRecord]:
+    """Replace all chunks and pgvector embeddings for a repository without committing."""
+
+    embeddings = _validated_embeddings(embedded_chunks)
+    chunks = [embedded_chunk.chunk for embedded_chunk in embedded_chunks]
     return _replace_chunks(session, repository_id, chunks, embeddings)
 
 

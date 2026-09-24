@@ -11,20 +11,20 @@ from sqlalchemy.orm import Session, sessionmaker
 from repomind.api.errors import APIError
 from repomind.api.models import RepositoryFileResponse
 from repomind.db import (
+    apply_index_update,
     load_neighbor_chunks,
-    persist_embedded_chunks,
-    persist_repository_snapshot,
     pgvector_semantic_search,
     postgres_hybrid_search,
     postgres_hybrid_symbol_search,
+    read_index_manifest,
     session_scope,
 )
 from repomind.db.models import RepositoryFileRecord, RepositoryRecord
 from repomind.db.repositories import RepositoryNotFoundError
-from repomind.ingestion import CodeChunk, RepositorySnapshot
+from repomind.indexing import IndexManifest, IndexSummary, IndexUpdate
+from repomind.ingestion import CodeChunk
 from repomind.retrieval import (
     DEFAULT_SYMBOL_CANDIDATE_LIMIT,
-    EmbeddedChunk,
     EmbeddingVector,
     RankedChunk,
     SemanticSearchMode,
@@ -48,9 +48,8 @@ class RepositoryStore(Protocol):
     def files(
         self, repository_id: int, limit: int, offset: int
     ) -> list[RepositoryFileResponse]: ...
-    def replace_index(
-        self, repository_id: int, snapshot: RepositorySnapshot, chunks: Sequence[EmbeddedChunk]
-    ) -> None: ...
+    def index_manifest(self, repository_id: int) -> IndexManifest: ...
+    def apply_index_update(self, repository_id: int, update: IndexUpdate) -> IndexSummary: ...
     def search(
         self,
         repository_id: int,
@@ -126,17 +125,20 @@ class PostgresRepositoryStore:
                 for row in rows
             ]
 
-    def replace_index(
-        self, repository_id: int, snapshot: RepositorySnapshot, chunks: Sequence[EmbeddedChunk]
-    ) -> None:
+    def index_manifest(self, repository_id: int) -> IndexManifest:
+        with self.factory() as session:
+            return read_index_manifest(session, repository_id)
+
+    def apply_index_update(self, repository_id: int, update: IndexUpdate) -> IndexSummary:
+        """Apply the whole delta in one transaction: all of it lands, or none of it."""
+
         with session_scope(self.factory) as session:
             record = session.get(RepositoryRecord, repository_id)
             if record is None:
                 raise RepositoryNotFoundError("Repository not found")
-            if record.name != snapshot.name:
+            if record.name != update.snapshot.name:
                 raise APIError(409, "repository_conflict", "Repository binding changed.")
-            persist_repository_snapshot(session, snapshot)
-            persist_embedded_chunks(session, repository_id, chunks)
+            return apply_index_update(session, repository_id, update)
 
     def search(
         self,

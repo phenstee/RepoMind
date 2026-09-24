@@ -5,6 +5,7 @@ from repomind.db.hybrid import postgres_hybrid_search, postgres_hybrid_symbol_se
 from repomind.db.repositories import (
     PersistenceError,
     RepositoryNotFoundError,
+    apply_index_update,
     content_sha256,
     find_symbol_candidates,
     load_chunks,
@@ -14,6 +15,7 @@ from repomind.db.repositories import (
     persist_embedded_chunks,
     persist_repository_snapshot,
     pgvector_semantic_search,
+    read_index_manifest,
 )
 from repomind.db.session import (
     create_database_engine,
@@ -25,6 +27,7 @@ __all__ = [
     "Base",
     "PersistenceError",
     "RepositoryNotFoundError",
+    "apply_index_update",
     "content_sha256",
     "create_database_engine",
     "create_session_factory",
@@ -38,5 +41,6 @@ __all__ = [
     "pgvector_semantic_search",
     "postgres_hybrid_search",
     "postgres_hybrid_symbol_search",
+    "read_index_manifest",
     "session_scope",
 ]
