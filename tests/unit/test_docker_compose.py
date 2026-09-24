@@ -137,6 +137,26 @@ def test_backend_identity_defaults_to_uid_gid_1000_in_compose_source() -> None:
     assert "REPOMIND_GID: ${REPOMIND_GID:-1000}" in source
 
 
+def test_backend_runtime_image_includes_coding_verifiers_and_git() -> None:
+    dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    pyproject = (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    sync_commands = [
+        line.strip() for line in dockerfile.splitlines() if line.startswith("RUN uv sync ")
+    ]
+    assert len(sync_commands) == 2
+    assert all("--group dev" in command for command in sync_commands)
+    assert all("--no-dev" not in command for command in sync_commands)
+    assert '"pytest>=' in pyproject
+    assert '"ruff>=' in pyproject
+
+    assert "apt-get install -y --no-install-recommends git" in dockerfile
+    assert "rm -rf /var/lib/apt/lists/*" in dockerfile
+    safe_directory = "RUN git config --system --add safe.directory '*'"
+    assert safe_directory in dockerfile
+    assert dockerfile.index(safe_directory) < dockerfile.index("USER repomind")
+
+
 def test_compose_source_does_not_hardcode_secrets() -> None:
     source = (REPOSITORY_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     assert "${OPENAI_API_KEY" in source

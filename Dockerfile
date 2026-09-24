@@ -9,14 +9,14 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /app
 
 COPY pyproject.toml uv.lock ./
-RUN uv sync --locked --no-install-project --no-dev --no-editable
+RUN uv sync --locked --no-install-project --no-editable --group dev
 
 COPY README.md ./
 COPY src ./src
 COPY alembic ./alembic
 COPY alembic.ini ./
 
-RUN uv sync --locked --no-dev --no-editable
+RUN uv sync --locked --no-editable --group dev
 
 FROM python:3.13-slim-bookworm AS runtime
 
@@ -25,6 +25,12 @@ FROM python:3.13-slim-bookworm AS runtime
 # passes REPOMIND_UID/REPOMIND_GID as build args; both default to 1000).
 ARG REPOMIND_UID=1000
 ARG REPOMIND_GID=1000
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git config --system --add safe.directory '*'
 
 RUN groupadd --system --gid "${REPOMIND_GID}" repomind \
     && useradd --system --uid "${REPOMIND_UID}" --gid repomind --create-home repomind
