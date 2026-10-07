@@ -11,7 +11,7 @@ interface RepositoryPanelProps {
   loadingFiles: boolean;
   running: boolean;
   indexResult: IndexResponse | null;
-  onSelect: (id: number) => void;
+  onSelect: (id: number | null) => void;
   onRegister: (name: string, path: string) => Promise<void>;
   onIndex: () => void;
 }
@@ -51,7 +51,7 @@ export function RepositoryPanel({
       </div>
       <label>
         Selected repository
-        <select value={selectedId ?? ""} onChange={(event) => onSelect(Number(event.target.value))}>
+        <select value={selectedId ?? ""} onChange={(event) => onSelect(event.target.value === "" ? null : Number(event.target.value))}>
           <option value="">Select a registered repository</option>
           {repositories.map((repository) => (
             <option key={repository.id} value={repository.id}>
@@ -65,7 +65,14 @@ export function RepositoryPanel({
         <h3>Register repository</h3>
         <label>
           Name
-          <input value={name} onChange={(event) => setName(event.target.value)} required maxLength={255} />
+          <input
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            required
+            maxLength={255}
+            pattern="[A-Za-z0-9][A-Za-z0-9 ._\-]*"
+            title="Start with a letter or digit; then letters, digits, spaces, dots, underscores, or hyphens."
+          />
         </label>
         <label>
           Workspace-relative path

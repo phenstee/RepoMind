@@ -36,6 +36,17 @@ const labels: Record<string, string> = {
   "review.completed": "Independent review completed",
   "review.blocked": "Review: changes required",
   "review.failed": "Independent review failed",
+  "context.assembled": "Context assembled",
+  "symbol.matched": "Symbols matched",
+  "model.started": "Model call started",
+  "model.completed": "Model call completed",
+  "model.attempt": "Model call attempt",
+  "model.usage": "Model token usage",
+  "model.failed": "Model call failed",
+  "agent.stopped": "Agent stopped",
+  "job.cancel_requested": "Cancellation requested",
+  "job.cancellation_deferred": "Cancellation deferred",
+  "job.cancelled": "Job cancelled",
 };
 
 const blockerLabels: Record<string, string> = {
@@ -51,7 +62,7 @@ const blockerLabels: Record<string, string> = {
 
 function stateFor(event: string): string {
   if (event.includes("failed")) return "failure";
-  if (event.includes("blocked")) return "blocked";
+  if (event.includes("blocked") || event.includes("cancel")) return "blocked";
   if (event.includes("completed") || event.includes("passed")) return "success";
   return "running";
 }

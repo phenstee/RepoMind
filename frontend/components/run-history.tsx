@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { api, ApiError } from "../lib/api";
 import type { ProgressEvent, RunDetail, RunSummary } from "../lib/types";
@@ -24,6 +24,7 @@ export function RunHistory({ refreshKey }: { refreshKey: number }) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [selected, setSelected] = useState<RunDetail | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const latestChoice = useRef<string | null>(null);
 
   async function refresh() {
     try {
@@ -36,11 +37,15 @@ export function RunHistory({ refreshKey }: { refreshKey: number }) {
   }
 
   async function choose(runId: string) {
+    latestChoice.current = runId;
     try {
-      setSelected(await api.run(runId));
+      const run = await api.run(runId);
+      // Ignore responses for runs the user has already clicked away from.
+      if (latestChoice.current !== runId) return;
+      setSelected(run);
       setMessage(null);
     } catch (error) {
-      setMessage(safeError(error));
+      if (latestChoice.current === runId) setMessage(safeError(error));
     }
   }
 
