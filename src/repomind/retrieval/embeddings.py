@@ -102,14 +102,49 @@ def _ensure_consistent_dimensions(embeddings: Sequence[EmbeddingVector]) -> None
         raise EmbeddingError("Embedding response contains inconsistent vector dimensions")
 
 
-def _normalize_response(response: Any, expected_count: int) -> EmbeddingBatchResult:
+def _batches(
+    texts: Sequence[str],
+    config: EmbeddingConfig,
+) -> list[Sequence[str]]:
+    """Split inputs by item count and estimated request size, preserving order.
+
+    Item count alone is not a safe bound: a few huge inputs can exceed the
+    provider's per-request token limit and fail the whole indexing run.
+    """
+
+    batches: list[Sequence[str]] = []
+    start = 0
+    chars = 0
+    for index, text in enumerate(texts):
+        size = index - start
+        if size and (
+            size >= config.batch_size or chars + len(text) > config.max_batch_chars
+        ):
+            batches.append(texts[start:index])
+            start = index
+            chars = 0
+        chars += len(text)
+    if start < len(texts):
+        batches.append(texts[start:])
+    return batches
+
+
+def _normalize_response(
+    response: Any,
+    expected_count: int,
+    *,
+    model: str,
+) -> EmbeddingBatchResult:
+    """Validate a provider response, stamping vectors with the requested model.
+
+    ``response.model`` is deliberately ignored for identity: it is whatever the
+    provider chose to echo, while fingerprints and query filters are keyed on
+    the configured model name.
+    """
+
     data = getattr(response, "data", None)
     if data is None:
         raise EmbeddingError("Embedding response contains no data")
-
-    response_model = getattr(response, "model", None)
-    if not isinstance(response_model, str) or not response_model:
-        raise EmbeddingError("Embedding response contains no model name")
 
     embeddings_by_index: dict[int, EmbeddingVector] = {}
     for item in data:
@@ -124,7 +159,7 @@ def _normalize_response(response: Any, expected_count: int) -> EmbeddingBatchRes
         try:
             vector = EmbeddingVector(
                 values=getattr(item, "embedding", None),
-                model=response_model,
+                model=model,
             )
         except (TypeError, ValidationError, ValueError) as exc:
             raise EmbeddingError(
@@ -208,7 +243,7 @@ class OpenAIEmbeddingClient:
         return self.embed_texts([text]).embeddings[0]
 
     def embed_texts(self, texts: Sequence[str]) -> EmbeddingBatchResult:
-        """Embed strings in deterministic item-count batches and preserve order."""
+        """Embed strings in deterministic count- and size-bounded batches, in order."""
 
         validated = _validate_texts(texts)
         if not validated:
@@ -217,8 +252,7 @@ class OpenAIEmbeddingClient:
         embeddings: list[EmbeddingVector] = []
         prompt_tokens = 0
         total_tokens = 0
-        for start in range(0, len(validated), self.config.batch_size):
-            batch = validated[start : start + self.config.batch_size]
+        for batch in _batches(validated, self.config):
             result = self._request_batch(batch)
             embeddings.extend(result.embeddings)
             prompt_tokens += result.usage.prompt_tokens
@@ -248,8 +282,7 @@ class OpenAIEmbeddingClient:
         embeddings: list[EmbeddingVector] = []
         prompt_tokens = 0
         total_tokens = 0
-        for start in range(0, len(validated), self.config.batch_size):
-            batch = validated[start : start + self.config.batch_size]
+        for batch in _batches(validated, self.config):
             result = await self._request_batch_async(batch)
             embeddings.extend(result.embeddings)
             prompt_tokens += result.usage.prompt_tokens
@@ -303,7 +336,7 @@ class OpenAIEmbeddingClient:
                     model=self.model,
                 )
                 record_model_usage(trace, response, attempt + 1, embedding=True)
-                return _normalize_response(response, len(texts))
+                return _normalize_response(response, len(texts), model=self.model)
             except _RETRYABLE_ERRORS as exc:
                 if attempt >= self.max_retries:
                     raise EmbeddingError(
@@ -328,7 +361,7 @@ class OpenAIEmbeddingClient:
                     model=self.model,
                 )
                 record_model_usage(trace, response, attempt + 1, embedding=True)
-                return _normalize_response(response, len(texts))
+                return _normalize_response(response, len(texts), model=self.model)
             except _RETRYABLE_ERRORS as exc:
                 if attempt >= self.max_retries:
                     raise EmbeddingError(

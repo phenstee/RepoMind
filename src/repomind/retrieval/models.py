@@ -31,10 +31,22 @@ class EmbeddingTextStrategy(StrEnum):
     STRUCTURAL_CONTEXT = "structural_context"
 
 
+# OpenAI caps one embeddings request at 300,000 tokens summed over its inputs.
+# Even dense minified code rarely drops below ~1.5 characters per token, so this
+# character bound keeps a full request under that cap without a tokenizer.
+DEFAULT_EMBEDDING_BATCH_MAX_CHARS = 400_000
+
+
 class EmbeddingConfig(BaseModel):
-    """Configuration for deterministic item-count-based embedding batches."""
+    """Configuration for deterministic embedding batches.
+
+    A batch closes at ``batch_size`` inputs or before its summed input length
+    would exceed ``max_batch_chars``, whichever comes first. A single input
+    longer than ``max_batch_chars`` is still sent, alone, in its own request.
+    """
 
     batch_size: int = Field(default=64, gt=0)
+    max_batch_chars: int = Field(default=DEFAULT_EMBEDDING_BATCH_MAX_CHARS, gt=0)
     text_strategy: EmbeddingTextStrategy = EmbeddingTextStrategy.RAW_SOURCE
 
 
@@ -46,7 +58,13 @@ class EmbeddingUsage(BaseModel):
 
 
 class EmbeddingVector(BaseModel):
-    """A validated embedding vector and the model that produced it."""
+    """A validated embedding vector and the model identity that produced it.
+
+    ``model`` is the model name the client *requested*, which is the identity
+    index fingerprints, persistence filters, and query-time matching all use.
+    Providers may echo a different string (``text-embedding-ada-002-v2``, an
+    Azure deployment, a proxy alias), so it is never taken from the response.
+    """
 
     values: tuple[float, ...]
     model: str = Field(min_length=1)

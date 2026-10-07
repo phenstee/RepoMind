@@ -231,3 +231,82 @@ def test_chunk_invariants(content: str, config: ChunkingConfig) -> None:
             for line in range(chunk.start_line, chunk.end_line + 1)
         }
         assert covered_lines == set(range(1, source.line_count + 1))
+
+
+def test_single_minified_line_is_split_into_bounded_exact_pieces() -> None:
+    content = "var a=" + ("x" * 200_000) + ";\n"
+    chunks = chunk_source_file(
+        _source(content, path="dist/app.min.js", language="javascript"),
+        ChunkingConfig(),
+    )
+
+    assert len(chunks) > 1
+    assert all(len(chunk.content) <= 12_000 for chunk in chunks)
+    assert "".join(chunk.content for chunk in chunks) == content
+    assert all((chunk.start_line, chunk.end_line) == (1, 1) for chunk in chunks)
+    assert [chunk.chunk_index for chunk in chunks] == list(range(len(chunks)))
+
+
+def test_long_line_between_short_lines_keeps_exact_citations() -> None:
+    content = "first\n" + ("y" * 25) + "\nlast\n"
+    chunks = chunk_source_file(
+        _source(content),
+        ChunkingConfig(max_lines_per_chunk=5, overlap_lines=2, max_chars_per_chunk=10),
+    )
+
+    assert all(len(chunk.content) <= 10 for chunk in chunks)
+    assert [(chunk.start_line, chunk.end_line, chunk.content) for chunk in chunks] == [
+        (1, 1, "first\n"),
+        (2, 2, "y" * 9),
+        (2, 2, "y" * 9),
+        (2, 2, "y" * 7 + "\n"),
+        (3, 3, "last\n"),
+    ]
+
+
+def test_character_capped_windows_keep_proportional_overlap() -> None:
+    content = "".join(f"{index:03d}\n" for index in range(12))
+    chunks = chunk_source_file(
+        _source(content),
+        ChunkingConfig(max_lines_per_chunk=8, overlap_lines=4, max_chars_per_chunk=16),
+    )
+
+    # Four 4-char lines fit the cap; half of each window overlaps, like 4/8.
+    assert [(chunk.start_line, chunk.end_line) for chunk in chunks] == [
+        (1, 4),
+        (3, 6),
+        (5, 8),
+        (7, 10),
+        (9, 12),
+    ]
+    assert all(len(chunk.content) <= 16 for chunk in chunks)
+
+
+def test_windows_within_character_cap_keep_original_boundaries() -> None:
+    content = "".join(f"line {index}\n" for index in range(25))
+    config = ChunkingConfig(max_lines_per_chunk=10, overlap_lines=3)
+
+    chunks = chunk_source_file(_source(content), config)
+
+    assert [(chunk.start_line, chunk.end_line) for chunk in chunks] == [
+        (1, 10),
+        (8, 17),
+        (15, 24),
+        (22, 25),
+    ]
+
+
+@pytest.mark.parametrize("separator", ["\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x85", " ", " "])
+def test_only_newline_sequences_start_new_lines(separator: str) -> None:
+    content = f"a{separator}b\nc\rd\r\ne\n"
+    chunks = chunk_source_file(
+        _source(content),
+        ChunkingConfig(max_lines_per_chunk=1, overlap_lines=0),
+    )
+
+    assert [(chunk.start_line, chunk.content) for chunk in chunks] == [
+        (1, f"a{separator}b\n"),
+        (2, "c\r"),
+        (3, "d\r\n"),
+        (4, "e\n"),
+    ]

@@ -193,3 +193,15 @@ def test_invalid_top_k_is_rejected(top_k: object) -> None:
 def test_invalid_bm25_configuration_is_rejected(config: dict[str, float]) -> None:
     with pytest.raises(ValidationError):
         BM25Config(**config)
+
+
+def test_tokenless_corpus_returns_no_results_instead_of_dividing_by_zero() -> None:
+    index = BM25Index.from_chunks(
+        [
+            _chunk("blank.py", "   \n", 0),
+            _chunk("punctuation.css", "{}();\n", 1),
+        ]
+    )
+
+    assert index.average_document_length == 0.0
+    assert index.search("authentication", top_k=5) == []

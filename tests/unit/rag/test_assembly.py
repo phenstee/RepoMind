@@ -460,15 +460,41 @@ def test_budget_keeps_higher_priority_evidence_first() -> None:
     assert result.dropped_for_budget_count == 2
 
 
-def test_oversized_first_chunk_is_still_included() -> None:
+def test_oversized_first_chunk_is_included_but_truncated_to_the_budget() -> None:
     huge = _line_chunk("src/a.py", 0, start_line=1, content="x" * 10_000)
     seeds = [_seed(huge, 1)]
-    config = ContextAssemblyConfig(strategy=ContextStrategy.SEEDS_ONLY, budget_tokens=1)
+    config = ContextAssemblyConfig(strategy=ContextStrategy.SEEDS_ONLY, budget_tokens=200)
 
     result = assemble_context(seeds, None, config)
 
     assert result.packed_count == 1
-    assert result.estimated_tokens > config.budget_tokens
+    assert result.estimated_tokens <= config.budget_tokens
+    packed = result.chunks[0]
+    assert packed.truncated is True
+    assert packed.origin is ContextOrigin.SEED
+    assert huge.content.startswith(packed.chunk.content)
+    assert (packed.chunk.start_line, packed.chunk.end_line) == (1, 1)
+    assert packed.estimated_tokens == estimate_tokens(
+        format_source_block(ContextSource(source_id="S1", chunk=packed.chunk, truncated=True))
+    )
+
+
+def test_truncated_first_chunk_cites_only_the_lines_it_shows() -> None:
+    content = "".join(f"value_{index:03d} = {index}\n" for index in range(300))
+    huge = _line_chunk("src/a.py", 0, start_line=50, content=content)
+    config = ContextAssemblyConfig(strategy=ContextStrategy.SEEDS_ONLY, budget_tokens=250)
+
+    result = assemble_context([_seed(huge, 1)], None, config)
+    context = build_repository_context(result.chunks)
+
+    packed = result.chunks[0]
+    shown = packed.chunk.content.splitlines(keepends=True)
+    assert packed.truncated is True
+    assert packed.chunk.end_line == 50 + len(shown) - 1 < huge.end_line
+    assert context.sources[0].truncated is True
+    assert context.sources[0].chunk == packed.chunk
+    assert 'truncated="true"' in context.text
+    assert f"<lines>50-{packed.chunk.end_line}</lines>" in context.text
 
 
 def test_token_estimate_uses_the_exact_prompt_source_block() -> None:

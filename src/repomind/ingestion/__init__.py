@@ -7,6 +7,7 @@ from repomind.ingestion.language import (
     is_supported_source_file,
     language_for_path,
 )
+from repomind.ingestion.lines import count_source_lines, split_source_lines
 from repomind.ingestion.models import (
     ChunkingConfig,
     ChunkingStrategy,
@@ -45,12 +46,14 @@ __all__ = [
     "SourceFile",
     "chunk_repository",
     "chunk_source_file",
+    "count_source_lines",
     "find_source_files",
     "ingest_repository",
     "is_supported_source_file",
     "language_for_path",
     "load_source_file",
     "resolve_repository_path",
+    "split_source_lines",
     "validate_repository_relative_path",
     "validate_repository_root",
 ]

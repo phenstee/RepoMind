@@ -4,7 +4,19 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import case, cast, distinct, false, func, or_, select, text, tuple_
+from sqlalchemy import (
+    Select,
+    case,
+    cast,
+    distinct,
+    false,
+    func,
+    literal_column,
+    or_,
+    select,
+    text,
+    tuple_,
+)
 from sqlalchemy.orm import Session
 
 from repomind.db.models import (
@@ -754,6 +766,99 @@ def find_symbol_candidates(
     return results
 
 
+def _semantic_search_statement(
+    repository_id: int,
+    query_embedding: EmbeddingVector,
+    *,
+    top_k: int,
+    mode: SemanticSearchMode,
+) -> Select:
+    """Build the ranked cosine-search query for one repository and model.
+
+    Exact mode orders every candidate by distance plus a deterministic
+    tie-break. ANN mode must not do that inside the nearest-neighbor step: an
+    HNSW index only yields rows ordered by the distance expression alone, so
+    any extra ORDER BY key forces PostgreSQL to fetch and sort every match
+    instead of walking the index. The ANN query therefore selects the nearest
+    ``top_k`` chunk IDs ordered by distance only, and the outer query joins
+    back and applies the deterministic tie-break to just those rows.
+    """
+
+    vector = list(query_embedding.values)
+    if mode is SemanticSearchMode.EXACT:
+        # The uncast expression intentionally cannot match the fixed-dimension
+        # expression index, preserving an exact pgvector baseline.
+        distance = CodeChunkRecord.embedding.cosine_distance(vector).label(
+            "cosine_distance"
+        )
+        return (
+            select(
+                CodeChunkRecord,
+                RepositoryFileRecord.relative_path,
+                RepositoryFileRecord.language,
+                distance,
+            )
+            .join(RepositoryFileRecord)
+            .where(
+                RepositoryFileRecord.repository_id == repository_id,
+                CodeChunkRecord.embedding.is_not(None),
+                CodeChunkRecord.embedding_model == query_embedding.model,
+                CodeChunkRecord.embedding_dimensions == query_embedding.dimensions,
+            )
+            .order_by(
+                distance,
+                RepositoryFileRecord.relative_path,
+                CodeChunkRecord.start_line,
+                CodeChunkRecord.chunk_index,
+                CodeChunkRecord.id,
+            )
+            .limit(top_k)
+        )
+
+    # Must match the HNSW expression index exactly: the same cast expression
+    # in ORDER BY, and a literal dimension so the planner can prove the
+    # partial-index predicate (embedding_dimensions = 1536) even for a
+    # generic prepared plan, where a bound parameter could not be used.
+    indexed_distance = cast(
+        CodeChunkRecord.embedding,
+        Vector(HNSW_EMBEDDING_DIMENSIONS),
+    ).cosine_distance(vector)
+    nearest = (
+        select(
+            CodeChunkRecord.id.label("chunk_id"),
+            indexed_distance.label("cosine_distance"),
+        )
+        .join(RepositoryFileRecord)
+        .where(
+            RepositoryFileRecord.repository_id == repository_id,
+            CodeChunkRecord.embedding.is_not(None),
+            CodeChunkRecord.embedding_model == query_embedding.model,
+            CodeChunkRecord.embedding_dimensions
+            == literal_column(str(HNSW_EMBEDDING_DIMENSIONS)),
+        )
+        .order_by(indexed_distance)
+        .limit(top_k)
+        .subquery("nearest")
+    )
+    return (
+        select(
+            CodeChunkRecord,
+            RepositoryFileRecord.relative_path,
+            RepositoryFileRecord.language,
+            nearest.c.cosine_distance,
+        )
+        .join(nearest, nearest.c.chunk_id == CodeChunkRecord.id)
+        .join(RepositoryFileRecord)
+        .order_by(
+            nearest.c.cosine_distance,
+            RepositoryFileRecord.relative_path,
+            CodeChunkRecord.start_line,
+            CodeChunkRecord.chunk_index,
+            CodeChunkRecord.id,
+        )
+    )
+
+
 def pgvector_semantic_search(
     session: Session,
     repository_id: int,
@@ -810,41 +915,13 @@ def pgvector_semantic_search(
         # enough repository/model matches are found. SET LOCAL never changes the
         # database-wide setting and expires with the current transaction.
         session.execute(text("SET LOCAL hnsw.iterative_scan = 'strict_order'"))
-        indexed_embedding = cast(
-            CodeChunkRecord.embedding,
-            Vector(HNSW_EMBEDDING_DIMENSIONS),
-        )
-        distance = indexed_embedding.cosine_distance(
-            list(query_embedding.values)
-        ).label("cosine_distance")
-    else:
-        # The uncast expression intentionally cannot match the fixed-dimension
-        # expression index, preserving an exact pgvector baseline.
-        distance = CodeChunkRecord.embedding.cosine_distance(
-            list(query_embedding.values)
-        ).label("cosine_distance")
     rows = session.execute(
-        select(
-            CodeChunkRecord,
-            RepositoryFileRecord.relative_path,
-            RepositoryFileRecord.language,
-            distance,
+        _semantic_search_statement(
+            repository_id,
+            query_embedding,
+            top_k=top_k,
+            mode=resolved_mode,
         )
-        .join(RepositoryFileRecord)
-        .where(
-            RepositoryFileRecord.repository_id == repository_id,
-            CodeChunkRecord.embedding.is_not(None),
-            CodeChunkRecord.embedding_model == query_embedding.model,
-            CodeChunkRecord.embedding_dimensions == query_embedding.dimensions,
-        )
-        .order_by(
-            distance,
-            RepositoryFileRecord.relative_path,
-            CodeChunkRecord.start_line,
-            CodeChunkRecord.chunk_index,
-            CodeChunkRecord.id,
-        )
-        .limit(top_k)
     ).all()
 
     results: list[SemanticSearchResult] = []

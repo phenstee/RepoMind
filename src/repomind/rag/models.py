@@ -40,12 +40,18 @@ class ContextAssemblyConfig(BaseModel):
 
 
 class AssembledContextChunk(BaseModel):
-    """One packed chunk plus the provenance an evaluator or trace can inspect."""
+    """One packed chunk plus the provenance an evaluator or trace can inspect.
+
+    ``truncated`` marks a first chunk that alone exceeded the token budget and
+    was cut to fit; its ``chunk`` then holds only the shown prefix and the
+    line range of that prefix.
+    """
 
     chunk: CodeChunk
     origin: ContextOrigin
     seed_rank: int | None = Field(default=None, ge=1)
     estimated_tokens: int = Field(ge=0)
+    truncated: bool = False
 
     @model_validator(mode="after")
     def _validate_seed_rank(self) -> "AssembledContextChunk":
@@ -123,10 +129,16 @@ class RepositoryAnswer(BaseModel):
 
 
 class ContextSource(BaseModel):
-    """A retrieved chunk paired with its deterministic prompt identifier."""
+    """A retrieved chunk paired with its deterministic prompt identifier.
+
+    When ``truncated`` is set, ``chunk`` is the shown prefix of the retrieved
+    chunk, with ``end_line`` reduced to the last line actually shown, so
+    citations never claim unseen lines.
+    """
 
     source_id: str = Field(pattern=r"^S[1-9][0-9]*$")
     chunk: CodeChunk
+    truncated: bool = False
 
 
 class BuiltRepositoryContext(BaseModel):

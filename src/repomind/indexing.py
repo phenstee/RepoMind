@@ -24,8 +24,12 @@ from repomind.ingestion import ChunkingConfig, RepositorySnapshot
 from repomind.retrieval import EmbeddedChunk, EmbeddingTextStrategy
 
 # Bumping this invalidates every persisted fingerprint, which forces one safe
-# rebuild everywhere. Bump it whenever the digest inputs or encoding change.
-INDEX_FINGERPRINT_VERSION = 1
+# rebuild everywhere. Bump it whenever the digest inputs or encoding change, or
+# when the same configuration starts producing different chunks.
+#
+# 2: line chunks are bounded by max_chars_per_chunk, and every chunker numbers
+#    lines on \r\n, \r, and \n only (not the wider str.splitlines() set).
+INDEX_FINGERPRINT_VERSION = 2
 
 
 def content_digest(content: str) -> str:

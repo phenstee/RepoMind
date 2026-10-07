@@ -344,3 +344,25 @@ def test_ingest_repository_builds_snapshot(tmp_path: Path) -> None:
 
     skipped = {(item.relative_path.as_posix(), item.reason) for item in snapshot.skipped}
     assert ("image.png", "unsupported_extension") in skipped
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_line_count"),
+    [
+        ("a\x0cb\n", 1),
+        ("a\x0bb\x1cc\x85d e f\n", 1),
+        ("a\rb\r\nc\n", 3),
+        ("a\r", 1),
+    ],
+)
+def test_line_count_splits_only_on_newline_sequences(
+    tmp_path: Path,
+    content: str,
+    expected_line_count: int,
+) -> None:
+    root = tmp_path / "repo"
+    _write(root / "sample.py", content.encode("utf-8"))
+
+    source = load_source_file(root, root / "sample.py")
+
+    assert source.line_count == expected_line_count

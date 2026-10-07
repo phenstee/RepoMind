@@ -259,6 +259,96 @@ def test_batch_splitting_preserves_global_order_and_aggregates_usage() -> None:
     assert result.usage.total_tokens == 5
 
 
+def test_batches_are_bounded_by_total_input_size() -> None:
+    sdk_client = _sync_client()
+
+    def create(*, input: list[str], model: str):
+        del model
+        return _response([[float(len(text)), 1.0] for text in input])
+
+    sdk_client.embeddings.create.side_effect = create
+    client = OpenAIEmbeddingClient(
+        _settings(),
+        config=EmbeddingConfig(batch_size=64, max_batch_chars=10),
+        client=sdk_client,
+    )
+    texts = ["aaaa", "bbbb", "cc", "d" * 25, "eeeeee", "ffff"]
+
+    result = client.embed_texts(texts)
+
+    assert [call.kwargs["input"] for call in sdk_client.embeddings.create.call_args_list] == [
+        ["aaaa", "bbbb", "cc"],
+        ["d" * 25],
+        ["eeeeee", "ffff"],
+    ]
+    assert [embedding.values[0] for embedding in result.embeddings] == [
+        float(len(text)) for text in texts
+    ]
+
+
+def test_default_batches_keep_large_chunks_under_request_size_bound() -> None:
+    sdk_client = _sync_client()
+
+    def create(*, input: list[str], model: str):
+        del model
+        assert sum(len(text) for text in input) <= EmbeddingConfig().max_batch_chars
+        return _response([[0.1, 0.2] for _ in input])
+
+    sdk_client.embeddings.create.side_effect = create
+    client = OpenAIEmbeddingClient(_settings(), client=sdk_client)
+
+    result = client.embed_texts(["x" * 12_000] * 64)
+
+    assert len(result.embeddings) == 64
+    assert sdk_client.embeddings.create.call_count == 2
+
+
+@pytest.mark.parametrize("echoed_model", ["text-embedding-ada-002-v2", "my-azure-deployment"])
+def test_vectors_carry_requested_model_not_provider_echo(echoed_model: str) -> None:
+    sdk_client = _sync_client(_response([[0.1, 0.2]], model=echoed_model))
+    client = OpenAIEmbeddingClient(
+        _settings(openai_embedding_model="text-embedding-ada-002"),
+        client=sdk_client,
+    )
+
+    vector = client.embed_text("hello")
+
+    assert vector.model == "text-embedding-ada-002"
+    assert vector.model == client.embedding_model
+
+
+def test_response_without_model_name_is_accepted() -> None:
+    response = _response([[0.1, 0.2]])
+    del response.model
+    client = OpenAIEmbeddingClient(_settings(), client=_sync_client(response))
+
+    assert client.embed_text("hello").model == "embedding-test"
+
+
+@pytest.mark.asyncio
+async def test_async_vectors_carry_requested_model_and_size_bounded_batches() -> None:
+    sdk_client = _async_client()
+
+    async def create(*, input: list[str], model: str):
+        del model
+        return _response([[0.1, 0.2] for _ in input], model="proxy-alias")
+
+    sdk_client.embeddings.create.side_effect = create
+    client = OpenAIEmbeddingClient(
+        _settings(),
+        config=EmbeddingConfig(max_batch_chars=8),
+        async_client=sdk_client,
+    )
+
+    result = await client.aembed_texts(["aaaa", "bbbb", "cccc"])
+
+    assert [call.kwargs["input"] for call in sdk_client.embeddings.create.call_args_list] == [
+        ["aaaa", "bbbb"],
+        ["cccc"],
+    ]
+    assert {embedding.model for embedding in result.embeddings} == {"embedding-test"}
+
+
 def test_configured_embedding_model_is_sent_to_api() -> None:
     sdk_client = _sync_client()
     client = OpenAIEmbeddingClient(
