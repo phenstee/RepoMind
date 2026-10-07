@@ -66,6 +66,23 @@ def _verification_blockers(
     return blockers
 
 
+def _missing_change_evidence(review: FinalChangeReview, policy: VerificationPolicy) -> bool:
+    """Whether workflow-changed files exist but the captured diff shows nothing.
+
+    A change the diff cannot show (for example a file Git does not render) must
+    never reach review as an empty diff that looks like "nothing changed".
+    """
+
+    if not policy.require_final_diff or not review.workflow_changed_files:
+        return False
+    if review.unstaged_diff_error is not None or review.staged_diff_error is not None:
+        return False
+    return not any(
+        diff is not None and diff.content.strip()
+        for diff in (review.unstaged_diff, review.staged_diff)
+    )
+
+
 def _review_blockers(
     review: FinalChangeReview | None,
     policy: VerificationPolicy,
@@ -91,6 +108,15 @@ def _review_blockers(
             )
         if review.staged_diff_error is not None:
             blockers.append(f"Required staged Git diff failed: {review.staged_diff_error}")
+    if _missing_change_evidence(review, policy):
+        paths = ", ".join(path.as_posix() for path in review.workflow_changed_files)
+        blockers.append(
+            f"Final Git diff is empty although the workflow changed files: {paths}."
+        )
+    if review.git_status.truncated:
+        blockers.append(
+            "Final Git status is truncated; not every changed file could be reviewed."
+        )
     if review.unexpected_changed_files:
         paths = ", ".join(path.as_posix() for path in review.unexpected_changed_files)
         blockers.append(f"Unexpected changed files detected: {paths}.")

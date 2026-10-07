@@ -14,6 +14,7 @@ from repomind.agent.models import (
     AgentDecision,
     AgentRun,
     AgentStep,
+    ToolObservation,
     WorkflowFeedback,
 )
 from repomind.agent.prompts import INDEXED_READ_ONLY_AGENT_SYSTEM_PROMPT
@@ -22,6 +23,7 @@ from repomind.jobs.control import CooperativeCancellation
 from repomind.observability import TraceContext, TraceRecorder
 from repomind.observability.instrumentation import traced_run
 from repomind.tools import ToolRegistry
+from repomind.tools.filesystem import MISSING_FILE_ERROR_PREFIX
 
 _INDEXED_SEARCH_TOOL = "indexed_code_search"
 _READ_FILE_TOOL = "read_file"
@@ -50,7 +52,12 @@ class _IndexedGroundingPolicy:
 
     def observe(self, step: AgentStep) -> None:
         observation = step.observation
-        if observation is None or not observation.success or observation.output is None:
+        if observation is None:
+            return
+        if not observation.success:
+            self._discard_missing_read(observation)
+            return
+        if observation.output is None:
             return
 
         if observation.tool_name == _INDEXED_SEARCH_TOOL:
@@ -71,6 +78,23 @@ class _IndexedGroundingPolicy:
             path = _path_identity(observation.output.get("path"))
             if path is not None and path in self.pending_paths:
                 self.pending_paths = frozenset()
+
+    def _discard_missing_read(self, observation: ToolObservation) -> None:
+        """Stop requiring a read of an indexed path the working tree no longer has.
+
+        The persisted index can outlive a file. Once read_file has observed that
+        a pending path does not exist, that hint is resolved as stale; without
+        this, an index whose hits were all deleted would block every final
+        answer until the iteration limit.
+        """
+
+        if observation.tool_name != _READ_FILE_TOOL or observation.error is None:
+            return
+        if not observation.error.startswith(MISSING_FILE_ERROR_PREFIX):
+            return
+        path = _path_identity(observation.arguments.get("path"))
+        if path is not None and path in self.pending_paths:
+            self.pending_paths = self.pending_paths - {path}
 
     def handle_final(
         self,

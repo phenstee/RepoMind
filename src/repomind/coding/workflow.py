@@ -19,7 +19,7 @@ from repomind.agent import (
     WorkflowFeedback,
 )
 from repomind.agent.loop import _FinalDecisionControl, _run_editing_agent_controlled
-from repomind.coding.completion import _evaluate_completion
+from repomind.coding.completion import _evaluate_completion, _missing_change_evidence
 from repomind.coding.models import (
     AcceptanceReviewStatus,
     CodingPlan,
@@ -337,7 +337,11 @@ def _capture_final_review(
     staged_error: str | None = None
     if policy.require_final_diff:
         try:
-            output = _execute_typed(registry, "git_diff", {}, GitDiffOutput)
+            # Untracked files are part of the change: plain `git diff` omits
+            # them, which would hide every newly created file from review.
+            output = _execute_typed(
+                registry, "git_diff", {"include_untracked": True}, GitDiffOutput
+            )
             unstaged = GitDiffOutput.model_validate(output.model_dump())
         except ToolError as exc:
             unstaged_error = str(exc)
@@ -409,10 +413,14 @@ def _trace_blocker_codes(
             codes.append("review_stale")
         if review.unexpected_changed_files:
             codes.append("unexpected_files")
+        if review.git_status.truncated:
+            codes.append("status_truncated")
         if policy.require_final_diff and (
             review.unstaged_diff is None or review.unstaged_diff_error or review.staged_diff_error
         ):
             codes.append("diff_unavailable")
+        elif _missing_change_evidence(review, policy):
+            codes.append("diff_empty")
     return codes
 
 

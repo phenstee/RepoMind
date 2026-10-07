@@ -6,9 +6,15 @@ import re
 from collections.abc import Iterator
 from pathlib import Path
 
-from repomind.ingestion import IngestionConfig, find_source_files, is_supported_source_file
+from repomind.ingestion import (
+    IngestionConfig,
+    find_source_files,
+    is_supported_source_file,
+    split_source_lines,
+)
 from repomind.tools.filesystem import _read_text, _resolve_workspace_path
 from repomind.tools.models import (
+    MAX_SEARCH_LINE_CHARS,
     FindSymbolInput,
     FindSymbolOutput,
     SearchCodeInput,
@@ -54,8 +60,26 @@ def _source_lines(
         except ToolExecutionError:
             continue
         relative = path.relative_to(context.repository_root)
-        for line_number, line in enumerate(content.splitlines(), start=1):
-            yield relative, line_number, line
+        # Line numbers must match read_file and index citations, so split only
+        # on \r\n, \r, and \n, then drop each line's single terminator.
+        for line_number, line in enumerate(split_source_lines(content), start=1):
+            yield relative, line_number, line.rstrip("\r\n")
+
+
+def _bounded_line(line: str, match_start: int = 0) -> tuple[str, bool]:
+    """Return at most ``MAX_SEARCH_LINE_CHARS`` of a line, keeping the match visible.
+
+    Minified or generated sources can put megabytes on one line; returning it
+    whole would flood the agent's context with a single observation.
+    """
+
+    if len(line) <= MAX_SEARCH_LINE_CHARS:
+        return line, False
+    start = min(
+        max(0, match_start - MAX_SEARCH_LINE_CHARS // 4),
+        len(line) - MAX_SEARCH_LINE_CHARS,
+    )
+    return line[start : start + MAX_SEARCH_LINE_CHARS], True
 
 
 def search_code(
@@ -77,12 +101,21 @@ def search_code(
         resolved_config,
     ):
         haystack = line if arguments.case_sensitive else line.casefold()
-        if needle not in haystack:
+        match_start = haystack.find(needle)
+        if match_start < 0:
             continue
         if len(matches) == result_limit:
             truncated = True
             break
-        matches.append(SearchCodeMatch(path=path, line_number=line_number, line=line))
+        bounded, line_truncated = _bounded_line(line, match_start)
+        matches.append(
+            SearchCodeMatch(
+                path=path,
+                line_number=line_number,
+                line=bounded,
+                line_truncated=line_truncated,
+            )
+        )
 
     return SearchCodeOutput(
         query=arguments.query,
@@ -146,8 +179,15 @@ def find_symbol(
         if len(matches) == result_limit:
             truncated = True
             break
+        bounded, line_truncated = _bounded_line(line)
         matches.append(
-            SymbolMatch(path=path, line_number=line_number, line=line, kind=kind)
+            SymbolMatch(
+                path=path,
+                line_number=line_number,
+                line=bounded,
+                kind=kind,
+                line_truncated=line_truncated,
+            )
         )
 
     return FindSymbolOutput(

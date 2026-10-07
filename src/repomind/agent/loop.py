@@ -83,8 +83,23 @@ def _coerce_decision(response: object) -> AgentDecision:
     raise AgentError("LLM returned an unexpected agent decision model")
 
 
-def _tool_call_identity(tool_name: str, arguments: Mapping[str, Any]) -> str:
-    payload = {"arguments": arguments, "tool_name": tool_name}
+def _tool_call_identity(
+    tool_name: str,
+    arguments: Mapping[str, Any],
+    workspace_revision: int,
+) -> str:
+    """Identify a call by its arguments and the workspace state it observes.
+
+    Including the count of successful mutations lets the same inspection or
+    verification call run again after an edit (edit -> run_tests -> edit ->
+    run_tests) while still blocking true repeats against an unchanged tree.
+    """
+
+    payload = {
+        "arguments": arguments,
+        "tool_name": tool_name,
+        "workspace_revision": workspace_revision,
+    }
     try:
         return json.dumps(
             payload,
@@ -212,7 +227,11 @@ def _run_agent(
 
         if decision.tool_name is None or decision.tool_arguments is None:
             raise AgentError("Validated tool decision is missing tool fields")
-        identity = _tool_call_identity(decision.tool_name, decision.tool_arguments)
+        identity = _tool_call_identity(
+            decision.tool_name,
+            decision.tool_arguments,
+            successful_mutations,
+        )
         prior_executions = tool_call_counts.get(identity, 0)
         is_mutation = decision.tool_name in mutation_tool_names
         if is_mutation and max_mutations is not None and successful_mutations >= max_mutations:

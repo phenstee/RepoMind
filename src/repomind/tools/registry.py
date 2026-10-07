@@ -33,6 +33,20 @@ class ToolExecutionError(ToolError):
 
 ToolHandler = Callable[[BaseModel], BaseModel]
 
+_MAX_VALIDATION_DETAIL_CHARS = 500
+
+
+def _validation_summary(exc: ValidationError) -> str:
+    """Summarize schema violations by location and message, never echoing input."""
+
+    details = "; ".join(
+        f"{'.'.join(str(part) for part in error['loc']) or '(arguments)'}: {error['msg']}"
+        for error in exc.errors(include_input=False, include_url=False, include_context=False)
+    )
+    if len(details) > _MAX_VALIDATION_DETAIL_CHARS:
+        details = details[: _MAX_VALIDATION_DETAIL_CHARS - 3] + "..."
+    return details
+
 
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
@@ -132,7 +146,9 @@ class ToolRegistry:
         try:
             validated_input = tool.input_model.model_validate(arguments)
         except ValidationError as exc:
-            raise ToolValidationError(f"Invalid arguments for tool {name}") from exc
+            raise ToolValidationError(
+                f"Invalid arguments for tool {name}: {_validation_summary(exc)}"
+            ) from exc
 
         try:
             result = tool.handler(validated_input)

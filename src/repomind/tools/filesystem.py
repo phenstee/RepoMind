@@ -8,6 +8,7 @@ from pathlib import Path
 from repomind.ingestion import (
     RepositoryIngestionError,
     resolve_repository_path,
+    split_source_lines,
 )
 from repomind.ingestion.models import DEFAULT_IGNORED_DIRECTORIES
 from repomind.tools.models import (
@@ -18,8 +19,11 @@ from repomind.tools.models import (
     ReadFileOutput,
     ToolConfig,
     ToolContext,
+    _is_git_metadata_path,
 )
 from repomind.tools.registry import ToolExecutionError
+
+MISSING_FILE_ERROR_PREFIX = "File does not exist: "
 
 
 def _resolve_workspace_path(
@@ -28,6 +32,12 @@ def _resolve_workspace_path(
     *,
     allow_root: bool,
 ) -> Path:
+    # Central enforcement for every path-taking tool, independent of whether
+    # the caller went through the Pydantic input models.
+    if _is_git_metadata_path(path):
+        raise ToolExecutionError(
+            f"Git metadata is not accessible through repository tools: {path.as_posix()}"
+        )
     try:
         return resolve_repository_path(
             context.repository_root,
@@ -87,14 +97,16 @@ def read_file(
     resolved_config = config or ToolConfig()
     path = _resolve_workspace_path(context, arguments.path, allow_root=False)
     if not path.exists():
-        raise ToolExecutionError(f"File does not exist: {arguments.path.as_posix()}")
+        raise ToolExecutionError(f"{MISSING_FILE_ERROR_PREFIX}{arguments.path.as_posix()}")
     if not path.is_file():
         raise ToolExecutionError(f"Path is not a regular file: {arguments.path.as_posix()}")
 
     data = _read_bounded_bytes(path, resolved_config.max_file_bytes)
     content = _decode_text(data)
     sha256 = hashlib.sha256(data).hexdigest()
-    lines = content.splitlines(keepends=True)
+    # Number lines exactly like ast, editors, and index citations (\r\n, \r,
+    # \n only); str.splitlines would also break on form feeds and U+2028.
+    lines = split_source_lines(content)
     total_lines = len(lines)
     if total_lines == 0:
         return ReadFileOutput(
@@ -172,6 +184,8 @@ def list_directory(
 
         child_directories: list[Path] = []
         for child in children:
+            if _is_git_metadata_path(Path(child.name)):
+                continue
             is_link = _is_link_or_junction(child)
             if (
                 arguments.recursive

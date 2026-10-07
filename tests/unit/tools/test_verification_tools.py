@@ -3,7 +3,9 @@
 import json
 import os
 import py_compile
-import subprocess
+import shutil
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,38 @@ from repomind.tools import (
     run_ruff,
     run_tests,
 )
+from repomind.tools.verification import _run_fixed_verifier
+
+
+class _FakeProcess:
+    """Popen stand-in that records its launch and exits immediately with 0."""
+
+    launches: list[tuple[list[str], dict[str, object]]]
+
+    def __init__(self, command: list[str], **kwargs: object) -> None:
+        type(self).launches.append((command, kwargs))
+        self.pid = -1
+        self.returncode = 0
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+    def poll(self) -> int:
+        return 0
+
+    def kill(self) -> None:
+        return None
+
+
+def _fake_popen(monkeypatch: pytest.MonkeyPatch) -> list[tuple[list[str], dict[str, object]]]:
+    launches: list[tuple[list[str], dict[str, object]]] = []
+    monkeypatch.setattr(_FakeProcess, "launches", launches, raising=False)
+    monkeypatch.setattr("repomind.tools.verification.subprocess.Popen", _FakeProcess)
+    # The fake has no real process group; never signal one.
+    monkeypatch.setattr(
+        "repomind.tools.verification._terminate_process_tree", lambda process: None
+    )
+    return launches
 
 
 def _write_test(root: Path, body: str, name: str = "test_sample.py") -> Path:
@@ -185,24 +219,20 @@ def test_run_tests_uses_argument_array_and_never_shell(
     inherited_cache = tmp_path / "inherited-cache"
     monkeypatch.setenv("PYTHONPYCACHEPREFIX", str(inherited_cache))
     monkeypatch.setenv("REPOMIND_TEST_ENVIRONMENT_SENTINEL", "must-not-pass-through")
-    captured: dict[str, object] = {}
-
-    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        captured["command"] = command
-        captured.update(kwargs)
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr("repomind.tools.verification.subprocess.run", fake_run)
+    launches = _fake_popen(monkeypatch)
     output = run_tests(
         ToolContext(repository_root=tmp_path),
         RunTestsInput(paths=["tests/test_sample.py"], max_failures=2),
     )
 
-    command = captured["command"]
+    ((command, captured),) = launches
     assert isinstance(command, list)
-    assert command[1:3] == ["-m", "pytest"]
-    assert command[-2:] == ["--maxfail=2", "-q"]
+    # -P: the repository root must not be importable while pytest is imported.
+    assert command[:3] == [sys.executable, "-P", "-c"]
+    assert "import pytest" in command[3]
+    assert command[4:] == ["tests/test_sample.py", "--maxfail=2", "-q"]
     assert captured["shell"] is False
+    assert captured["start_new_session"] is (os.name == "posix")
     environment = captured["env"]
     assert isinstance(environment, dict)
     isolated_cache = Path(environment["PYTHONPYCACHEPREFIX"])
@@ -221,22 +251,19 @@ def test_pytest_and_ruff_use_the_same_allowlisted_base_environment(
     monkeypatch.setenv("OPENAI_API_KEY", "sk-parent-secret")
     monkeypatch.setenv("REPOMIND_ARBITRARY_SECRET", "private")
     monkeypatch.setenv("PYTHONUTF8", "1")
-    captured_environments: list[dict[str, str]] = []
-
-    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        environment = kwargs.get("env")
-        assert isinstance(environment, dict)
-        captured_environments.append(environment.copy())
-        assert kwargs["shell"] is False
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr("repomind.tools.verification.subprocess.run", fake_run)
+    launches = _fake_popen(monkeypatch)
     context = ToolContext(repository_root=tmp_path)
 
     assert run_tests(context, RunTestsInput()).passed
     assert run_ruff(context, RunRuffInput(paths=["clean.py"])).passed
 
-    pytest_environment, ruff_environment = captured_environments
+    environments: list[dict[str, str]] = []
+    for _, kwargs in launches:
+        environment = kwargs.get("env")
+        assert isinstance(environment, dict)
+        assert kwargs["shell"] is False
+        environments.append(dict(environment))
+    pytest_environment, ruff_environment = environments
     pycache_prefix = pytest_environment.pop("PYTHONPYCACHEPREFIX")
     assert pycache_prefix
     assert pytest_environment == ruff_environment
@@ -244,6 +271,8 @@ def test_pytest_and_ruff_use_the_same_allowlisted_base_environment(
     assert pytest_environment.get("PATH")
     assert "OPENAI_API_KEY" not in pytest_environment
     assert "REPOMIND_ARBITRARY_SECRET" not in pytest_environment
+    ruff_command = launches[1][0]
+    assert ruff_command[:5] == [sys.executable, "-P", "-m", "ruff", "check"]
 
 
 def test_verifier_startup_failure_is_a_tool_error(
@@ -254,9 +283,103 @@ def test_verifier_startup_failure_is_a_tool_error(
     def fail_start(command: list[str], **kwargs: object) -> None:
         raise OSError("missing executable")
 
-    monkeypatch.setattr("repomind.tools.verification.subprocess.run", fail_start)
+    monkeypatch.setattr("repomind.tools.verification.subprocess.Popen", fail_start)
     with pytest.raises(ToolExecutionError, match="Could not start"):
         run_tests(ToolContext(repository_root=tmp_path), RunTestsInput())
+
+
+def test_repository_level_pytest_and_ruff_modules_cannot_shadow_verifiers(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "shadow-imported"
+    hijack = f"open({str(marker)!r}, 'w').close()\nraise SystemExit(0)\n"
+    (tmp_path / "pytest.py").write_text(hijack, encoding="utf-8")
+    (tmp_path / "ruff.py").write_text(hijack, encoding="utf-8")
+    (tmp_path / "bad.py").write_text("import os\n", encoding="utf-8")
+    _write_test(tmp_path, "def test_value():\n    assert 1 == 2\n")
+    context = ToolContext(repository_root=tmp_path)
+
+    tests = run_tests(context, RunTestsInput())
+    lint = run_ruff(context, RunRuffInput(paths=["bad.py"]))
+
+    assert not marker.exists()
+    assert not tests.passed and "1 failed" in tests.stdout
+    assert not lint.passed and "F401" in lint.stdout + lint.stderr
+
+
+def test_run_tests_keeps_flat_layout_root_modules_importable(tmp_path: Path) -> None:
+    # `python -m pytest` puts the repository root on sys.path; the safe-path
+    # bootstrap must preserve that for test imports after pytest is loaded.
+    (tmp_path / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    _write_test(
+        tmp_path,
+        "from app import add\n\ndef test_add():\n    assert add(2, 3) == 5\n",
+    )
+
+    output = run_tests(ToolContext(repository_root=tmp_path), RunTestsInput())
+
+    assert output.passed, output.stdout + output.stderr
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or shutil.which("sleep") is None,
+    reason="process-group cleanup is POSIX-specific",
+)
+def test_run_tests_timeout_kills_grandchild_processes(tmp_path: Path) -> None:
+    pid_file = tmp_path / "grandchild.pid"
+    _write_test(
+        tmp_path,
+        "import pathlib, subprocess, time\n\n"
+        "def test_spawn():\n"
+        "    child = subprocess.Popen(['sleep', '300'])\n"
+        f"    pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))\n"
+        "    time.sleep(60)\n",
+    )
+
+    output = run_tests(
+        ToolContext(repository_root=tmp_path),
+        RunTestsInput(timeout_seconds=2),
+        config=ToolConfig(verification_timeout_seconds=2),
+    )
+
+    assert output.timed_out and not output.passed
+    grandchild = int(pid_file.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(grandchild, 0)
+        except ProcessLookupError:
+            break
+        # A killed but not yet reaped orphan is a zombie; that still counts as gone.
+        status = Path(f"/proc/{grandchild}/stat")
+        if status.exists() and status.read_text().split(") ", 1)[-1].startswith("Z"):
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(grandchild, 9)
+        pytest.fail("timed-out verifier left a grandchild process running")
+
+
+def test_verifier_stops_runaway_output_spooling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # pytest captures test output itself, so drive the fixed runner directly
+    # with a child that floods its stdout.
+    monkeypatch.setattr("repomind.tools.verification._MAX_SPOOLED_OUTPUT_BYTES", 200_000)
+    flood = "import sys\nwhile True:\n    sys.stdout.write('x' * 65536)\n"
+
+    output = _run_fixed_verifier(
+        [sys.executable, "-c", flood],
+        context=ToolContext(repository_root=tmp_path),
+        paths=[],
+        timeout_seconds=30,
+        max_output_chars=100,
+    )
+
+    assert output.output_limit_exceeded
+    assert output.truncated and not output.passed and not output.timed_out
+    assert output.stdout == "x" * 100
+    assert output.duration_seconds < 20
 
 
 def test_run_ruff_reports_clean_and_lint_failure_without_fixing(tmp_path: Path) -> None:

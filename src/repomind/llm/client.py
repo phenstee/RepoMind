@@ -188,6 +188,10 @@ class OpenAILLMClient:
                 _sleep_for_retry(attempt, base_delay=1.0)
             except openai.APIError as exc:
                 raise LLMError(f"OpenAI API error: {exc}") from exc
+            except openai.OpenAIError as exc:
+                # Client-side SDK failures such as LengthFinishReasonError and
+                # ContentFilterFinishReasonError are not APIError subclasses.
+                raise LLMError(f"OpenAI client error: {exc}") from exc
 
         raise LLMError("Structured LLM request failed unexpectedly")
 
@@ -229,6 +233,10 @@ class OpenAILLMClient:
                 await _sleep_for_retry_async(attempt, base_delay=1.0)
             except openai.APIError as exc:
                 raise LLMError(f"OpenAI API error: {exc}") from exc
+            except openai.OpenAIError as exc:
+                # Client-side SDK failures such as LengthFinishReasonError and
+                # ContentFilterFinishReasonError are not APIError subclasses.
+                raise LLMError(f"OpenAI client error: {exc}") from exc
 
         raise LLMError("Structured LLM request failed unexpectedly")
 
@@ -261,6 +269,10 @@ class OpenAILLMClient:
                 _sleep_for_retry(attempt, base_delay=1.0)
             except openai.APIError as exc:
                 raise LLMError(f"OpenAI API error: {exc}") from exc
+            except openai.OpenAIError as exc:
+                # Client-side SDK failures such as LengthFinishReasonError and
+                # ContentFilterFinishReasonError are not APIError subclasses.
+                raise LLMError(f"OpenAI client error: {exc}") from exc
 
         raise LLMError("LLM request failed unexpectedly")
 
@@ -293,6 +305,10 @@ class OpenAILLMClient:
                 await _sleep_for_retry_async(attempt, base_delay=1.0)
             except openai.APIError as exc:
                 raise LLMError(f"OpenAI API error: {exc}") from exc
+            except openai.OpenAIError as exc:
+                # Client-side SDK failures such as LengthFinishReasonError and
+                # ContentFilterFinishReasonError are not APIError subclasses.
+                raise LLMError(f"OpenAI client error: {exc}") from exc
 
         raise LLMError("LLM request failed unexpectedly")
 

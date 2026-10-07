@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -50,6 +51,21 @@ _VERIFICATION_ENVIRONMENT_ALLOWLIST = (
     "LC_ALL",
     "LC_CTYPE",
 )
+
+# ``python -P`` keeps the repository root (the working directory) off
+# ``sys.path`` while pytest itself is imported, so a repository-level
+# pytest.py (or a module shadowing one of pytest's own dependencies) cannot
+# replace the verifier. The root is then restored at the front of ``sys.path``
+# exactly as ``python -m pytest`` would, so flat-layout test imports still work.
+_PYTEST_BOOTSTRAP = (
+    "import os, runpy, sys; import pytest; sys.path.insert(0, os.getcwd()); "
+    "runpy.run_module('pytest', run_name='__main__', alter_sys=True)"
+)
+
+# Hard cap on what one verifier stream may spool to disk before the whole
+# process tree is terminated; only ``max_output_chars`` is ever read back.
+_MAX_SPOOLED_OUTPUT_BYTES = 64 * 1024 * 1024
+_PROCESS_POLL_SECONDS = 0.1
 
 
 def _verification_environment() -> dict[str, str]:
@@ -99,6 +115,52 @@ def _read_bounded_output(stream: object, max_chars: int) -> tuple[str, bool]:
     return data[:max_chars].decode("utf-8", errors="replace"), truncated
 
 
+def _spooled_bytes(stream: object) -> int:
+    try:
+        return os.fstat(stream.fileno()).st_size  # type: ignore[attr-defined]
+    except OSError:
+        return 0
+
+
+def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
+    """Kill the verifier and, on POSIX, every process left in its session.
+
+    The verifier is started as a session leader, so its process-group ID is
+    its PID; killing the group also reaps grandchildren a test may spawn,
+    which a plain ``kill`` of the direct child would orphan.
+    """
+
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            process.kill()
+    elif process.poll() is None:
+        process.kill()
+
+
+def _wait_bounded(
+    process: subprocess.Popen[bytes],
+    *,
+    deadline: float,
+    streams: Sequence[object],
+) -> tuple[int | None, bool, bool]:
+    """Wait for exit, a deadline, or a spool overflow; return exit/timeout/overflow."""
+
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None, True, False
+        try:
+            return process.wait(timeout=min(remaining, _PROCESS_POLL_SECONDS)), False, False
+        except subprocess.TimeoutExpired:
+            pass
+        if any(_spooled_bytes(stream) > _MAX_SPOOLED_OUTPUT_BYTES for stream in streams):
+            return None, False, True
+
+
 def _run_fixed_verifier(
     command: list[str],
     *,
@@ -109,29 +171,34 @@ def _run_fixed_verifier(
     environment: dict[str, str] | None = None,
 ) -> VerificationOutput:
     started = time.monotonic()
-    timed_out = False
-    exit_code: int | None = None
     with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(
         mode="w+b"
     ) as stderr_file:
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 cwd=context.repository_root,
+                stdin=subprocess.DEVNULL,
                 stdout=stdout_file,
                 stderr=stderr_file,
-                timeout=timeout_seconds,
-                check=False,
                 shell=False,
                 env=environment,
+                start_new_session=os.name == "posix",
             )
-            exit_code = completed.returncode
-        except subprocess.TimeoutExpired:
-            timed_out = True
         except OSError as exc:
             raise ToolExecutionError("Could not start local verification process") from exc
         except subprocess.SubprocessError as exc:
             raise ToolExecutionError("Local verification process failed internally") from exc
+
+        try:
+            exit_code, timed_out, output_overflow = _wait_bounded(
+                process,
+                deadline=started + timeout_seconds,
+                streams=(stdout_file, stderr_file),
+            )
+        finally:
+            _terminate_process_tree(process)
+            process.wait()
 
         stdout, stdout_truncated = _read_bounded_output(
             stdout_file, max_output_chars
@@ -143,11 +210,12 @@ def _run_fixed_verifier(
     return VerificationOutput(
         paths=paths,
         exit_code=exit_code,
-        passed=exit_code == 0 and not timed_out,
+        passed=exit_code == 0 and not timed_out and not output_overflow,
         stdout=stdout,
         stderr=stderr,
-        truncated=stdout_truncated or stderr_truncated,
+        truncated=stdout_truncated or stderr_truncated or output_overflow,
         timed_out=timed_out,
+        output_limit_exceeded=output_overflow,
         duration_seconds=time.monotonic() - started,
     )
 
@@ -169,8 +237,9 @@ def run_tests(
     max_failures = min(arguments.max_failures, resolved_config.max_test_failures)
     command = [
         sys.executable,
-        "-m",
-        "pytest",
+        "-P",
+        "-c",
+        _PYTEST_BOOTSTRAP,
         *(path.as_posix() for path in paths),
         f"--maxfail={max_failures}",
         "-q",
@@ -203,8 +272,11 @@ def run_ruff(
         arguments.timeout_seconds or resolved_config.verification_timeout_seconds,
         resolved_config.verification_timeout_seconds,
     )
+    # -P keeps the repository root off sys.path so a repository-level ruff.py
+    # cannot shadow the real Ruff entry point.
     command = [
         sys.executable,
+        "-P",
         "-m",
         "ruff",
         "check",

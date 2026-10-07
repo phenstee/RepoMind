@@ -259,3 +259,56 @@ def test_cancellation_checkpoint_stops_before_another_model_or_tool_call(
 
     assert len(llm.calls) == 1
     assert not (tmp_path / "must-not-exist.py").exists()
+
+
+def test_identical_verification_reruns_after_each_successful_edit(tmp_path: Path) -> None:
+    # edit -> run_tests -> edit -> run_tests -> edit -> run_tests: every test
+    # run observes a different workspace, so none is a repeated identical call.
+    versions = [b"value = %d\n" % number for number in range(4)]
+    (tmp_path / "app.py").write_bytes(versions[0])
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_app.py").write_text(
+        "from app import value\n\ndef test_value():\n    assert value == 3\n",
+        encoding="utf-8",
+    )
+    decisions: list[AgentDecision] = []
+    for number in range(3):
+        decisions.extend(
+            [
+                _tool(
+                    "replace_text",
+                    path="app.py",
+                    old_text=f"value = {number}",
+                    new_text=f"value = {number + 1}",
+                    expected_sha256=_hash(versions[number]),
+                ),
+                _tool("run_tests", paths=["tests/test_app.py"]),
+            ]
+        )
+    decisions.extend(
+        [
+            _tool("run_tests", paths=["tests/test_app.py"]),
+            _tool("run_tests", paths=["tests/test_app.py"]),
+            _final("value is three"),
+        ]
+    )
+    llm = _ScriptedLLM(decisions)
+
+    run = run_editing_agent(
+        "Make value three",
+        llm,
+        _registry(tmp_path),
+        config=EditingAgentConfig(max_iterations=len(decisions)),
+    )
+
+    test_runs = [
+        step.observation for step in run.steps[:6] if step.decision.tool_name == "run_tests"
+    ]
+    assert [observation.success for observation in test_runs] == [True, True, True]
+    assert [observation.output["passed"] for observation in test_runs] == [False, False, True]
+    # Against an unchanged tree the identical-call guard still applies.
+    assert run.steps[6].observation.success
+    assert run.steps[7].observation.error == (
+        "Repeated identical tool call; choose a different action."
+    )
+    assert run.status is AgentRunStatus.COMPLETED

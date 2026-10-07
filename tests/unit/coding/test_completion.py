@@ -163,3 +163,87 @@ def test_stale_independent_review_cannot_complete_a_new_revision() -> None:
 
     assert not decision.completed
     assert "Independent coding review is stale" in decision.blockers[0]
+
+
+def _changed_review(
+    revision: int,
+    *,
+    diff_content: str,
+    status_truncated: bool = False,
+) -> FinalChangeReview:
+    status = GitStatusOutput(
+        branch="main",
+        changed_files=[{"path": "tests/conftest.py", "status": "??"}],
+        clean=False,
+        truncated=status_truncated,
+    )
+    return FinalChangeReview(
+        workspace_revision=revision,
+        git_status=status,
+        unstaged_diff=GitDiffOutput(
+            content=diff_content, truncated=False, staged=False, path=None
+        ),
+        changed_files=(Path("tests/conftest.py"),),
+        baseline_changed_files=(),
+        workflow_changed_files=(Path("tests/conftest.py"),),
+        unexpected_changed_files=(),
+        diff_truncated=False,
+    )
+
+
+def test_workflow_changes_with_an_empty_diff_block_completion() -> None:
+    # An empty diff must never reach review looking like "nothing changed"
+    # while the workflow is known to have changed files.
+    decision = _evaluate_completion(
+        agent_requested_completion=True,
+        workspace_revision=1,
+        verification=_report(1),
+        final_review=_changed_review(1, diff_content=""),
+        coding_review=_coding_review(1),
+        policy=VerificationPolicy(),
+    )
+
+    assert not decision.completed
+    assert decision.blockers == (
+        "Final Git diff is empty although the workflow changed files: tests/conftest.py.",
+    )
+
+
+def test_workflow_changes_with_rendered_diff_are_not_flagged() -> None:
+    decision = _evaluate_completion(
+        agent_requested_completion=True,
+        workspace_revision=1,
+        verification=_report(1),
+        final_review=_changed_review(1, diff_content="diff --git a/tests/conftest.py ..."),
+        coding_review=_coding_review(1),
+        policy=VerificationPolicy(),
+    )
+
+    assert decision.completed
+
+
+def test_empty_diff_check_is_skipped_when_policy_does_not_require_a_diff() -> None:
+    decision = _evaluate_completion(
+        agent_requested_completion=True,
+        workspace_revision=1,
+        verification=_report(1),
+        final_review=_changed_review(1, diff_content=""),
+        coding_review=_coding_review(1),
+        policy=VerificationPolicy(require_final_diff=False),
+    )
+
+    assert decision.completed
+
+
+def test_truncated_final_git_status_blocks_completion() -> None:
+    decision = _evaluate_completion(
+        agent_requested_completion=True,
+        workspace_revision=1,
+        verification=_report(1),
+        final_review=_changed_review(1, diff_content="diff", status_truncated=True),
+        coding_review=_coding_review(1),
+        policy=VerificationPolicy(),
+    )
+
+    assert not decision.completed
+    assert any("status is truncated" in blocker for blocker in decision.blockers)
