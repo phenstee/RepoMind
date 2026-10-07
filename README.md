@@ -63,8 +63,9 @@ Next.js frontend.
   best-effort wakeup and progress fanout and can be lost without losing a
   job.
 - **Evaluation is reproducible and provenance-stamped.** Every report
-  records benchmark version, harness schema version, model, and the
-  code-under-test Git SHA — see [Evaluation](#evaluation).
+  records its benchmark version; the live harness additionally records the
+  harness schema version, model, code-under-test Git SHA, and whether the
+  working tree was dirty — see [Evaluation](#evaluation).
 
 Deeper rationale for these and other decisions: [`docs/architecture.md`](docs/architecture.md).
 
@@ -147,7 +148,7 @@ and artifact provenance: [`docs/evaluation.md`](docs/evaluation.md).
 | Layer | Technology |
 | --- | --- |
 | Backend | Python 3.13, FastAPI, Pydantic, SQLAlchemy, Alembic |
-| Retrieval / data | PostgreSQL, pgvector, HNSW, BM25, Reciprocal Rank Fusion |
+| Retrieval / data | PostgreSQL, pgvector (≥ 0.8 for the ANN path), HNSW, BM25, Reciprocal Rank Fusion |
 | Coordination | Redis (worker wakeup + progress fanout) |
 | AI | OpenAI SDK (structured outputs, embeddings) |
 | Frontend | Next.js, React, TypeScript |
@@ -216,11 +217,22 @@ task -> clean-worktree preflight -> planner -> controlled editing
   and pytest/Ruff verification use fixed subprocess argument arrays only.
 - **Controlled, exact editing only.** File creation and one-occurrence exact
   literal replacement with a SHA-256 precondition — not free-form patching.
+- **Git metadata is off-limits.** No tool can read, list, or write anything
+  under `.git/`, and RepoMind's own Git calls disable fsmonitor, hooks,
+  external diff, and textconv and run without API keys in their environment.
+- **Verification cannot be rewired by the model.** The editing tools refuse
+  `conftest.py`, pytest/Ruff/tox config, `pyproject.toml`, `setup.cfg`,
+  `sitecustomize.py`/`usercustomize.py`, `*.pth`, and `pytest.py`/`ruff.py`;
+  pytest and Ruff run under `python -P` so repository modules cannot shadow
+  them; and the independent review sees new (untracked) files, not just the
+  tracked diff.
 - **Current filesystem is authority over persisted retrieval.** An indexed
   navigation hit cannot become a final answer without a fresh `read_file` on
   a current-worktree path.
 - **Bounded everywhere.** Fixed agent iteration limits, bounded history,
-  bounded tool output, repeated-call protection.
+  bounded tool output (including long lines and `git status`), Git and
+  verifier timeouts that kill the whole process group, repeated-call
+  protection.
 - **Deterministic gates the model cannot override.** pytest/Ruff pass/fail
   and Git evidence are application-owned checks, evaluated in Python.
 - **Git publication is human-controlled.** No `commit`, `push`, `reset`, or
@@ -228,6 +240,10 @@ task -> clean-worktree preflight -> planner -> controlled editing
   pushes on its own.
 - **No authentication/authorization exists.** The API is for trusted local
   development only; do not expose it beyond loopback without adding auth.
+  Against hostile web pages it checks the `Host` header
+  (`REPOMIND_ALLOWED_HOSTS`, DNS-rebinding protection) and requires an
+  `X-RepoMind-Client` header on every state-changing request, which forces a
+  CORS preflight and blocks cross-site "simple request" CSRF.
 - **Tests executed by the coding workflow are not a sandbox.** `run_tests`
   and `run_ruff` execute real pytest/Ruff against the real workspace — only
   point RepoMind at repositories you trust.
@@ -305,6 +321,12 @@ RepoMind/
   navigation rather than treating the index as authoritative.
 - **The coding agent does not use indexed navigation.** It always operates
   on the filesystem-only tool set.
+- **The coding agent cannot edit project/verification config.** Tasks that
+  need changes to `pyproject.toml`, `setup.cfg`, `conftest.py`, and similar
+  files must be done by a human; this is the price of a completion gate the
+  model cannot rewire.
+- **ANN search needs pgvector ≥ 0.8** (`hnsw.iterative_scan`). Exact search
+  works on older versions; the Compose stack and CI pin 0.8.x.
 - **BM25 has no persisted index.** It is rebuilt in memory from persisted
   chunks on every hybrid query — a scaling limit at large repository sizes.
 - **No arbitrary shell execution anywhere**, by design, not as a
