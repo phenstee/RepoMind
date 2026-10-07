@@ -4,14 +4,17 @@ import hashlib
 import json
 import shutil
 import subprocess
+import time
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import UUID
 
 import pytest
 
 from repomind.api.services.streaming import _ProgressChannel
-from repomind.api.streaming import encode_sse_event, safe_progress_event
+from repomind.api.streaming import ProgressEvent, encode_sse_event, safe_progress_event
 from repomind.ingestion import CodeChunk
+from repomind.jobs.models import JobStatus
 from repomind.observability import TraceEvent
 from repomind.retrieval import SemanticSearchResult
 
@@ -457,3 +460,98 @@ def test_per_request_channels_cannot_mix_runs():
     channel_b.receive(second, event)
     assert channel_a.next_event().run_id == first
     assert channel_b.next_event().run_id == second
+
+
+def test_streamed_public_errors_keep_their_code(api, monkeypatch):
+    monkeypatch.setattr(api.app.state.container.get().repositories, "MAX_FILES", 0)
+    too_large = _stream(api, "/repositories/1/index/stream")
+    assert too_large[-1]["event"] == "error"
+    assert too_large[-1]["data"]["error"] == {
+        "code": "repository_too_large",
+        "message": "Repository exceeds synchronous index limits.",
+    }
+
+    with api.app.state.container.get().repositories.workspace.operation(api.repo):
+        busy = _stream(api, "/repositories/1/agent/runs/stream", {"query": "inspect"})
+    assert busy[-1]["data"]["error"]["code"] == "repository_busy"
+    assert not api.llm.calls
+
+
+class _ScriptedSubscription:
+    """Fake Redis subscription; ``on_wait`` runs on every blocking poll."""
+
+    def __init__(self, on_wait):
+        self.on_wait = on_wait
+        self.queued = []
+        self.waits = 0
+        self.closed = False
+
+    def next(self, timeout):
+        if timeout > 0:
+            self.waits += 1
+            self.on_wait(self)
+            time.sleep(0.02)
+            return None
+        return self.queued.pop(0) if self.queued else None
+
+    def close(self):
+        self.closed = True
+
+
+def _queued_job_stream(api, on_wait, *, keep_alive_seconds=15.0):
+    jobs = api.app.state.container.get().jobs
+    job_id = api.client.post("/api/v1/repositories/1/jobs/index").json()["job_id"]
+    subscription = _ScriptedSubscription(on_wait)
+    jobs.broker = SimpleNamespace(subscribe=lambda requested: subscription, close=lambda: None)
+    jobs.keep_alive_seconds = keep_alive_seconds
+
+    def succeed():
+        job = jobs.store.jobs[UUID(job_id)]
+        jobs.store.jobs[job.id] = job.model_copy(
+            update={"status": JobStatus.SUCCEEDED, "result_payload": {"files_indexed": 1}}
+        )
+
+    return job_id, subscription, succeed
+
+
+def _progress(sequence, event):
+    return ProgressEvent(
+        run_id=UUID(int=9),
+        sequence=sequence,
+        event=event,
+        timestamp=datetime(2026, 9, 16, tzinfo=UTC),
+        data={},
+    )
+
+
+def test_job_stream_delivers_queued_progress_before_the_terminal_frame(api):
+    def worker_finishes(subscription):
+        # Published by the worker, but not yet read when the job turns terminal.
+        subscription.queued = [_progress(1, "index.started"), _progress(2, "run.completed")]
+        succeed()
+
+    job_id, subscription, succeed = _queued_job_stream(api, worker_finishes)
+
+    events = _events(api.client.get(f"/api/v1/jobs/{job_id}/events"))
+
+    assert [event["event"] for event in events] == ["index.started", "run.completed", "result"]
+    assert [event["id"] for event in events] == [1, 2, None]
+    assert subscription.closed
+
+
+def test_quiet_job_stream_sends_keep_alive_comments(api):
+    def worker_is_slow(subscription):
+        if subscription.waits >= 6:
+            succeed()
+
+    job_id, subscription, succeed = _queued_job_stream(
+        api, worker_is_slow, keep_alive_seconds=0.03
+    )
+
+    response = api.client.get(f"/api/v1/jobs/{job_id}/events")
+    blocks = [block for block in response.text.split("\n\n") if block]
+
+    assert ": keep-alive" in blocks
+    assert blocks[-1].startswith("event: result\n")
+    assert all(block == ": keep-alive" for block in blocks[:-1])
+    assert subscription.closed

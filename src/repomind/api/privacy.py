@@ -4,14 +4,17 @@ import re
 from typing import Any
 
 # This is not a general secret detector. Private payloads are excluded by response models.
+# Case-sensitive on purpose: a global IGNORECASE plus an unanchored ``sk-`` turned ordinary
+# words such as ``task-runner`` or ``risk-model`` into ``ta[REDACTED]``. Only the parts that
+# are genuinely case-insensitive (schemes, header names, drive letters) opt in inline.
 _PRIVATE = re.compile(
-    r"sk-[\w-]+|postgres(?:ql)?(?:\+\w+)?://[^\s]+|"
-    r"(?:authorization\s*:\s*)?bearer\s+[^\s]+|"
-    r"OPENAI_API_KEY(?:\s*[:=]\s*[^\s,;]+)?|"
-    r"(?<![\w])[a-z]:[/\\][^\s\"'`<>]*|"
+    r"(?<![A-Za-z0-9])sk-(?:proj-|ant-)?[A-Za-z0-9_-]{8,}|"
+    r"(?i:postgres(?:ql)?(?:\+\w+)?://)[^\s]+|"
+    r"(?i:(?:authorization\s*:\s*)?bearer\s+)[^\s]+|"
+    r"(?i:openai_api_key)(?:\s*[:=]\s*[^\s,;]+)?|"
+    r"(?<![\w])[A-Za-z]:[/\\][^\s\"'`<>]*|"
     r"(?<![\w:/])/(?:[^\s/\"'`<>]+/)+[^\s\"'`<>]*|"
-    r"\\\\[^\s\"'`<>]+",
-    re.IGNORECASE,
+    r"\\\\[^\s\"'`<>]+"
 )
 
 

@@ -1,5 +1,6 @@
 """Typed durable-job submission, public projection, and detached SSE observation."""
 
+import time
 from uuid import UUID
 
 import anyio
@@ -13,12 +14,24 @@ from repomind.jobs.broker import JobBroker
 from repomind.jobs.models import Job, JobStatus, JobType
 from repomind.jobs.store import JobNotFoundError, PostgresJobStore
 
+# SSE comment frame: ignored by clients, but resets proxy idle timers on quiet jobs.
+_KEEP_ALIVE = ": keep-alive\n\n"
+_MAX_DRAINED_PROGRESS = 1_000
+
 
 class JobService:
-    def __init__(self, store: PostgresJobStore, broker: JobBroker, repositories: RepositoryService) -> None:
+    def __init__(
+        self,
+        store: PostgresJobStore,
+        broker: JobBroker,
+        repositories: RepositoryService,
+        *,
+        keep_alive_seconds: float = 15.0,
+    ) -> None:
         self.store = store
         self.broker = broker
         self.repositories = repositories
+        self.keep_alive_seconds = keep_alive_seconds
 
     def enqueue(self, job_type: JobType, repository_id: int, request: object | None = None) -> Job:
         self.repositories.locate(repository_id)
@@ -46,36 +59,68 @@ class JobService:
         self.get(job_id)
 
         async def events():
-            subscription = self.broker.subscribe(job_id)
+            # Redis I/O blocks, so it never runs on the event loop thread.
+            subscription = await anyio.to_thread.run_sync(self.broker.subscribe, job_id)
+            last_frame = time.monotonic()
             try:
                 while True:
                     if await request.is_disconnected():
                         return
                     job = await anyio.to_thread.run_sync(self.get, job_id)
-                    if job.status == JobStatus.SUCCEEDED:
-                        yield encode_sse_event(
-                            "result", {"job_id": str(job.id), "result": job.result_payload, "trace_run_id": str(job.trace_run_id) if job.trace_run_id else None}
-                        )
-                        return
-                    if job.status == JobStatus.FAILED:
-                        yield encode_sse_event("error", {"job_id": str(job.id), "error": {"code": job.error_code or "operation_failed", "message": "The operation failed."}})
-                        return
-                    if job.status == JobStatus.CANCELLED:
-                        yield encode_sse_event(
-                            "cancelled",
-                            {
-                                "job_id": str(job.id),
-                                "status": job.status.value,
-                                "cancelled_at": job.cancelled_at.isoformat()
-                                if job.cancelled_at
-                                else None,
-                            },
-                        )
+                    if job.terminal:
+                        # Progress such as run.completed is published just before the
+                        # terminal state commits; deliver what is queued before the end.
+                        for _ in range(_MAX_DRAINED_PROGRESS):
+                            progress = await anyio.to_thread.run_sync(subscription.next, 0)
+                            if progress is None:
+                                break
+                            yield encode_sse_event(
+                                progress.event, progress, event_id=progress.sequence
+                            )
+                        yield _terminal_frame(job)
                         return
                     progress = await anyio.to_thread.run_sync(subscription.next, 1.0)
                     if progress is not None:
                         yield encode_sse_event(progress.event, progress, event_id=progress.sequence)
+                        last_frame = time.monotonic()
+                    elif time.monotonic() - last_frame >= self.keep_alive_seconds:
+                        yield _KEEP_ALIVE
+                        last_frame = time.monotonic()
             finally:
-                subscription.close()
+                # Shielded: a disconnect cancels this task, but the Pub/Sub connection
+                # must still be released.
+                with anyio.CancelScope(shield=True):
+                    await anyio.to_thread.run_sync(subscription.close)
 
         return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _terminal_frame(job: Job) -> str:
+    if job.status == JobStatus.SUCCEEDED:
+        return encode_sse_event(
+            "result",
+            {
+                "job_id": str(job.id),
+                "result": job.result_payload,
+                "trace_run_id": str(job.trace_run_id) if job.trace_run_id else None,
+            },
+        )
+    if job.status == JobStatus.FAILED:
+        return encode_sse_event(
+            "error",
+            {
+                "job_id": str(job.id),
+                "error": {
+                    "code": job.error_code or "operation_failed",
+                    "message": "The operation failed.",
+                },
+            },
+        )
+    return encode_sse_event(
+        "cancelled",
+        {
+            "job_id": str(job.id),
+            "status": job.status.value,
+            "cancelled_at": job.cancelled_at.isoformat() if job.cancelled_at else None,
+        },
+    )

@@ -43,6 +43,7 @@ class ServiceContainer:
     ):
         self.settings = settings
         self.services = services
+        self._owns_services = services is None
         self.repository_store = repository_store
         self.trace_store = trace_store
         self.llm_factory = llm_factory
@@ -86,10 +87,15 @@ class ServiceContainer:
                         notify_job = lambda self, job_id: None
                         publish_progress = lambda self, job_id, event: None
                         subscribe = lambda self, job_id: NullSubscription()
-                        wait_for_work = lambda self, timeout: None
+                        wait_for_work = lambda self, timeout: False
+                        close = lambda self: None
                     jobs = JobService(InMemoryJobStore(), OfflineBroker(), repositories)
                 else:
-                    jobs = JobService(PostgresJobStore(factory), RedisJobBroker(settings.redis_url), repositories)
+                    jobs = JobService(
+                        PostgresJobStore(factory, max_attempts=settings.job_max_attempts),
+                        RedisJobBroker(settings.redis_url),
+                        repositories,
+                    )
                 self.services = Services(
                     repositories,
                     execution,
@@ -100,6 +106,8 @@ class ServiceContainer:
             return self.services
 
     def close(self) -> None:
+        if self._owns_services and self.services is not None:
+            self.services.jobs.broker.close()
         if self.engine is not None:
             self.engine.dispose()
 

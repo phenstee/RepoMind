@@ -9,6 +9,7 @@ from starlette.middleware.cors import CORSMiddleware
 from repomind.api.dependencies import ServiceContainer, Services
 from repomind.api.errors import install_error_handlers
 from repomind.api.routes import router
+from repomind.api.security import CLIENT_HEADER, ClientHeaderMiddleware, TrustedHostMiddleware
 from repomind.api.services.execution import EmbeddingFactory, LLMFactory
 from repomind.api.services.runs import TraceStore
 from repomind.api.store import RepositoryStore
@@ -49,12 +50,18 @@ def create_app(
     )
     application.state.container = container
     active_settings = settings if settings is not None else get_settings()
+    # The last middleware added runs first: Host check, then CORS, then the client header,
+    # so a missing-header rejection still carries CORS headers for a trusted frontend.
+    application.add_middleware(ClientHeaderMiddleware)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(active_settings.repomind_trusted_frontend_origins),
         allow_credentials=False,
         allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type"],
+        allow_headers=["Content-Type", CLIENT_HEADER],
+    )
+    application.add_middleware(
+        TrustedHostMiddleware, allowed_hosts=active_settings.repomind_allowed_hosts
     )
     install_error_handlers(application)
     application.include_router(router)

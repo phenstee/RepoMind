@@ -1,7 +1,10 @@
 """Persistence output is revalidated and reduced at the HTTP boundary."""
 
+import time
 from datetime import UTC, datetime
 from uuid import UUID
+
+import pytest
 
 from repomind.api.privacy import public_text
 from repomind.observability import RunStatus, RunTrace, RunType, TraceEvent
@@ -19,7 +22,7 @@ def test_run_list_filters_and_sanitized_detail(api):
             "old_text": "REPLACEMENT",
             "embedding": [1, 2],
             "path": "C:/private/secret.py",
-            "message": "sk-abcdef",
+            "message": "sk-abcdefgh1234",
             "model": "postgresql://private:password@host/database",
             "operation": "C:/private/workspace",
         }
@@ -38,7 +41,7 @@ def test_run_list_filters_and_sanitized_detail(api):
     metadata = response.json()["events"][0]["metadata"]
     for key in ("prompt", "stdout", "content", "old_text", "embedding"):
         assert key not in metadata
-    for private in ("private", "password", "abcdef", "FULL PROMPT", "REPLACEMENT", "SOURCE"):
+    for private in ("private", "password", "abcdefgh1234", "FULL PROMPT", "REPLACEMENT", "SOURCE"):
         assert private not in response.text
     assert response.json()["estimated_cost_usd"] is None
     listing = api.client.get("/api/v1/runs?run_type=rag&status=completed&limit=1").json()["runs"]
@@ -51,15 +54,47 @@ def test_model_authored_answers_redact_host_paths_and_recognizable_secrets(api):
     api.llm.responses.append(
         {
             "action": "final",
-            "final_answer": r"See C:\Users\private\app.py or /home/private/app.py. sk-abcdef src/app.py stays relative.",
+            "final_answer": r"See C:\Users\private\app.py or /home/private/app.py. sk-abcdefgh1234 src/app.py stays relative.",
         }
     )
     response = api.client.post("/api/v1/repositories/1/agent/runs", json={"query": "inspect"})
     assert response.status_code == 200
-    assert "private" not in response.text and "abcdef" not in response.text
+    assert "private" not in response.text and "abcdefgh1234" not in response.text
     assert "src/app.py" in response.json()["final_answer"]
 
 
 def test_redaction_preserves_urls_relative_paths_and_long_answers():
     answer = "Read https://example.invalid/docs and src/app.py.\n" * 30
     assert public_text(answer) == answer
+
+
+def test_redaction_keeps_ordinary_words_that_contain_sk_dash():
+    text = "Run task-runner.py, then compare risk-model and desk-lamp outputs."
+    assert public_text(text) == text
+
+
+@pytest.mark.parametrize(
+    "secret", ["sk-proj-abcdefgh12345678", "sk-ant-api03-abcdefgh", "sk-abcdefgh12345678"]
+)
+def test_redaction_still_removes_key_shaped_tokens(secret):
+    assert public_text(f"use {secret} now") == "use [REDACTED] now"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        r"C:\Users\private",
+        r"c:\users\private",
+        "POSTGRESQL+psycopg://user:password@host/db",
+        "Authorization: BEARER token-value",
+        "openai_api_key=value",
+    ],
+)
+def test_case_insensitive_parts_of_redaction_still_match(value):
+    assert public_text(value) == "[REDACTED]"
+
+
+def test_key_redaction_is_linear_time_on_adversarial_input():
+    started = time.monotonic()
+    public_text("sk-" + "proj-" * 20_000 + "!" + "a-" * 20_000)
+    assert time.monotonic() - started < 1.0

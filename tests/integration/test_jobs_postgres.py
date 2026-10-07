@@ -1,5 +1,6 @@
 """Real PostgreSQL coverage for durable-job claiming, recovery, and repository locks."""
 
+import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -12,12 +13,12 @@ from sqlalchemy import Engine, delete, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from repomind.api.errors import APIError
-from repomind.api.models import RAGResponse
+from repomind.api.models import IndexResponse, RAGResponse
 from repomind.api.streaming import ProgressEvent
 from repomind.db.models import JobRecord, RepositoryRecord, TraceEventRecord, TraceRunRecord
 from repomind.jobs.locks import PostgresRepositoryExecutionLock
 from repomind.jobs.models import JobStatus, JobType
-from repomind.jobs.store import PostgresJobStore
+from repomind.jobs.store import JobNotFoundError, PostgresJobStore
 from repomind.jobs.worker import JobWorker
 from repomind.observability import PostgresTraceStore
 
@@ -421,3 +422,143 @@ def test_worker_persists_normal_cancellation_as_cancelled_not_failed(
         "job.cancel_requested",
         "job.cancelled",
     ]
+
+
+def test_expired_job_fails_once_max_attempts_are_exhausted(job_database: JobDatabase):
+    clock, values = _clock(datetime(2026, 9, 16, tzinfo=UTC))
+    store = PostgresJobStore(job_database.factory, clock=clock, max_attempts=2)
+    job = store.create(JobType.RAG, job_database.create_repository(), {"question": "crashes"})
+
+    for expected_status in (JobStatus.QUEUED, JobStatus.FAILED):
+        assert store.claim_next("worker", lease_seconds=30).id == job.id
+        values[0] += timedelta(seconds=31)
+        assert store.recover_expired() == (job.id,)
+        assert store.get(job.id).status == expected_status
+
+    exhausted = store.get(job.id)
+    assert exhausted.attempt_count == 2
+    assert exhausted.error_code == "job_attempts_exhausted"
+    assert exhausted.finished_at == values[0]
+    assert exhausted.lease_owner is None
+    assert store.claim_next("worker", lease_seconds=30) is None
+
+
+def _wait_until_blocked_by(factory: sessionmaker[Session], blocker_pid: int) -> None:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        with factory() as session:
+            waiting = session.scalar(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE :pid = ANY(pg_blocking_pids(pid))"
+                ),
+                {"pid": blocker_pid},
+            )
+        if waiting:
+            return
+        time.sleep(0.01)
+    pytest.fail("the ownership-guarded transition never waited for the row lock")
+
+
+@pytest.mark.parametrize(
+    "transition,expected",
+    [
+        (lambda store, job_id: store.renew_lease(job_id, "worker", 60), False),
+        (lambda store, job_id: store.mark_succeeded(job_id, "worker", {"answer": "late"}), None),
+    ],
+    ids=["renew_lease", "mark_succeeded"],
+)
+def test_ownership_guarded_transition_cannot_overwrite_concurrent_recovery(
+    job_database: JobDatabase, transition, expected
+):
+    store = PostgresJobStore(job_database.factory)
+    job = store.create(JobType.RAG, job_database.create_repository(), {"question": "race"})
+    assert store.claim_next("worker", lease_seconds=60).id == job.id
+
+    with ThreadPoolExecutor(max_workers=1) as pool, job_database.factory() as recovery:
+        # Lease recovery holds the row and re-queues it; the worker's write races it.
+        recovery.begin()
+        recovery.execute(text("SET LOCAL lock_timeout = '5s'"))
+        blocker_pid = recovery.scalar(text("SELECT pg_backend_pid()"))
+        record = recovery.scalar(
+            select(JobRecord).where(JobRecord.id == job.id).with_for_update()
+        )
+        record.status = JobStatus.QUEUED.value
+        record.lease_owner = None
+        record.lease_expires_at = None
+        recovery.flush()
+
+        def attempt():
+            try:
+                return transition(store, job.id)
+            except JobNotFoundError:
+                return None
+
+        pending = pool.submit(attempt)
+        _wait_until_blocked_by(job_database.factory, blocker_pid)
+        recovery.commit()
+        assert pending.result(timeout=10) is expected
+
+    final = store.get(job.id)
+    assert final.status == JobStatus.QUEUED
+    assert final.lease_owner is None
+    assert final.lease_expires_at is None
+    assert final.result_payload is None
+
+
+def test_worker_records_success_when_cancel_arrives_after_index_is_applied(
+    job_database: JobDatabase,
+):
+    repository_id = job_database.create_repository()
+    store = PostgresJobStore(job_database.factory)
+    job = store.create(JobType.INDEX, repository_id, {})
+    trace_store = PostgresTraceStore(job_database.factory)
+
+    class IndexThenLateCancel:
+        def __init__(self) -> None:
+            self.trace_store = trace_store
+
+        def index(self, repository_id, *, trace, cancellation):
+            cancellation.checkpoint()
+            trace.finish()
+            # The index transaction has committed; the cancel request is now too late.
+            store.request_cancel(job.id)
+            return IndexResponse(
+                repository_id=repository_id,
+                files_indexed=1,
+                chunks_indexed=1,
+                embedding_model="offline-model",
+            )
+
+    assert JobWorker(store, _Broker(), IndexThenLateCancel(), worker_id="late").run_once()
+
+    finished = store.get(job.id)
+    assert finished.status == JobStatus.SUCCEEDED
+    assert finished.cancel_requested_at is not None
+    assert finished.result_payload["files_indexed"] == 1
+    persisted = trace_store.get_run_trace(finished.trace_run_id)
+    assert persisted is not None and persisted.status.value == "completed"
+
+
+def test_worker_survives_losing_its_lease_before_recording_the_outcome(
+    job_database: JobDatabase,
+):
+    repository_id = job_database.create_repository()
+    store = PostgresJobStore(job_database.factory)
+    job = store.create(JobType.RAG, repository_id, {"question": "slow"})
+    trace_store = PostgresTraceStore(job_database.factory)
+
+    class LeaseStolenExecution(_Execution):
+        def rag(self, repository_id, request, *, trace, cancellation):
+            with job_database.factory.begin() as session:
+                session.get(JobRecord, job.id).lease_owner = "another-worker"
+            return super().rag(repository_id, request, trace=trace, cancellation=cancellation)
+
+    assert JobWorker(
+        store, _Broker(), LeaseStolenExecution(trace_store), worker_id="original"
+    ).run_once()
+
+    current = store.get(job.id)
+    assert current.status == JobStatus.RUNNING
+    assert current.lease_owner == "another-worker"
+    assert current.result_payload is None

@@ -5,11 +5,11 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
 from repomind.api import create_app
 from repomind.api.errors import APIError
 from repomind.api.services.repositories import WorkspacePolicy
+from repomind.api.store import workspace_paths_overlap
 from repomind.config import Settings
 from repomind.ingestion import ChunkingConfig, ChunkingStrategy, ChunkKind
 from repomind.jobs import JobCancellationRequested
@@ -81,14 +81,15 @@ def test_repository_list_is_compact_and_uses_relative_binding(api):
     }
 
 
-def test_missing_workspace_is_safe_and_health_still_works(api):
-    with TestClient(
+def test_missing_workspace_is_safe_and_health_still_works(
+    api, offline_settings, offline_client
+):
+    with offline_client(
         create_app(
-            settings=Settings(_env_file=None, repomind_workspace_root=None),
+            settings=offline_settings(repomind_workspace_root=None),
             repository_store=api.store,
             trace_store=api.traces,
-        ),
-        raise_server_exceptions=False,
+        )
     ) as client:
         assert client.get("/api/v1/health").status_code == 200
         assert (
@@ -288,3 +289,77 @@ def test_stored_traversal_is_rejected_at_use(api):
 def test_workspace_setting_reads_environment(monkeypatch, tmp_path):
     monkeypatch.setenv("REPOMIND_WORKSPACE_ROOT", str(tmp_path))
     assert Settings(_env_file=None).repomind_workspace_root == tmp_path
+
+
+def test_cancel_request_after_index_is_applied_reports_the_committed_index(api, monkeypatch):
+    applied = []
+    apply = api.store.apply_index_update
+
+    def record_apply(repository_id, update):
+        summary = apply(repository_id, update)
+        applied.append(repository_id)
+        return summary
+
+    class CancelOnceApplied:
+        def checkpoint(self) -> None:
+            if applied:
+                raise JobCancellationRequested("cancel arrived after the index was replaced")
+
+        def side_effect_started(self) -> None:
+            raise AssertionError("indexing has no coding side effect boundary")
+
+    monkeypatch.setattr(api.store, "apply_index_update", record_apply)
+    service = api.app.state.container.get().repositories
+
+    response = service.index(1, api.embeddings, cancellation=CancelOnceApplied())
+
+    assert applied == [1]
+    assert response.files_indexed == response.chunks_indexed == 1
+    assert len(api.store.chunks[1]) == 1
+
+
+@pytest.mark.parametrize(
+    "name,path",
+    [
+        ("alias", "sample"),  # same directory under another name
+        ("child", "sample/sub"),  # nested inside an existing binding
+    ],
+)
+def test_overlapping_workspace_binding_is_rejected(api, name, path):
+    (api.repo / "sub").mkdir()
+
+    response = api.client.post("/api/v1/repositories", json={"name": name, "path": path})
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "workspace_path_conflict"
+    assert len(api.store.bindings) == 1
+
+
+def test_parent_of_existing_binding_is_rejected_but_prefix_sibling_is_not(api):
+    (api.root / "outer" / "inner").mkdir(parents=True)
+    (api.root / "samples").mkdir()
+    inner = api.client.post("/api/v1/repositories", json={"name": "inner", "path": "outer/inner"})
+    assert inner.status_code == 201, inner.text
+
+    outer = api.client.post("/api/v1/repositories", json={"name": "outer", "path": "outer"})
+    sibling = api.client.post("/api/v1/repositories", json={"name": "samples", "path": "samples"})
+
+    assert outer.status_code == 409
+    assert outer.json()["error"]["code"] == "workspace_path_conflict"
+    assert sibling.status_code == 201, sibling.text
+
+
+@pytest.mark.parametrize(
+    "first,second,overlap",
+    [
+        ("sample", "sample", True),
+        ("sample", "sample/sub", True),
+        ("a/b/c", "a", True),
+        ("sample", "samples", False),
+        ("a/b", "a/c", False),
+        ("Sample", "sample", False),
+    ],
+)
+def test_workspace_paths_overlap_compares_path_components(first, second, overlap):
+    assert workspace_paths_overlap(first, second) is overlap
+    assert workspace_paths_overlap(second, first) is overlap

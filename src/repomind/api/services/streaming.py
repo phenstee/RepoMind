@@ -12,6 +12,7 @@ from fastapi import Request
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
+from repomind.api.errors import APIError, public_error
 from repomind.api.models import AgentRequest, CodingRequest, RAGRequest
 from repomind.api.services.execution import ExecutionService
 from repomind.api.streaming import ProgressEvent, encode_sse_event, safe_progress_event
@@ -20,6 +21,15 @@ from repomind.observability import InMemoryTraceRecorder, RunType, TraceContext,
 logger = logging.getLogger(__name__)
 
 _CHANNEL_CAPACITY = 256
+# Same generic code the durable worker records for an unclassified failure.
+_OPERATION_FAILED = APIError(500, "operation_failed", "The operation failed.")
+
+
+def _stream_error(exc: Exception) -> APIError:
+    """Keep public codes (repository_busy, repository_too_large, ...) actionable."""
+
+    error = public_error(exc)
+    return _OPERATION_FAILED if error.code == "internal_error" else error
 
 
 class _ProgressChannel:
@@ -32,7 +42,7 @@ class _ProgressChannel:
         self._disconnected = Event()
         self._lock = Lock()
         self._result: BaseModel | None = None
-        self._failed = False
+        self._error: APIError | None = None
         self.dropped = 0
 
     def receive(self, run_id: UUID, event: TraceEvent) -> None:
@@ -54,9 +64,9 @@ class _ProgressChannel:
             self._result = result
             self._done.set()
 
-    def fail(self) -> None:
+    def fail(self, error: APIError) -> None:
         with self._lock:
-            self._failed = True
+            self._error = error
             self._done.set()
 
     def disconnect(self) -> None:
@@ -77,8 +87,8 @@ class _ProgressChannel:
         return self._result
 
     @property
-    def failed(self) -> bool:
-        return self._failed
+    def error(self) -> APIError | None:
+        return self._error
 
 
 class StreamingService:
@@ -154,8 +164,10 @@ class StreamingService:
         def produce() -> None:
             try:
                 channel.complete(operation(trace))
-            except Exception:  # noqa: BLE001 - terminal SSE errors intentionally hide domain details
-                channel.fail()
+            except Exception as exc:  # only the public error vocabulary reaches the client
+                if not isinstance(exc, APIError):
+                    logger.exception("Streamed operation failed")
+                channel.fail(_stream_error(exc))
 
         async def stream() -> Any:
             producer = Thread(target=produce, name=f"repomind-stream-{trace.run_id}", daemon=False)
@@ -172,14 +184,14 @@ class StreamingService:
                         yield encode_sse_event(progress.event, progress, event_id=progress.sequence)
                         continue
                     if channel.done:
-                        if channel.failed:
+                        if channel.error is not None:
                             yield encode_sse_event(
                                 "error",
                                 {
                                     "run_id": str(trace.run_id),
                                     "error": {
-                                        "code": "operation_failed",
-                                        "message": "The operation failed.",
+                                        "code": channel.error.code,
+                                        "message": channel.error.message,
                                     },
                                 },
                             )
