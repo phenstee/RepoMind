@@ -1,9 +1,6 @@
 import { SSEParser } from "./sse";
 import type {
-  AgentResponse,
-  ApiErrorPayload,
   HealthResponse,
-  IndexResponse,
   JobCancelResponse,
   JobDetail,
   JobQueuedResponse,
@@ -11,7 +8,6 @@ import type {
   Repository,
   RepositoryFilesResponse,
   RepositoryListResponse,
-  RAGResponse,
   RunDetail,
   RunListResponse,
 } from "./types";
@@ -25,6 +21,7 @@ export class ApiError extends Error {
   constructor(
     readonly code: string,
     message: string,
+    readonly status: number | null = null,
   ) {
     super(message);
     this.name = "ApiError";
@@ -35,14 +32,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function errorFromPayload(payload: unknown): ApiError {
+function errorFromPayload(payload: unknown, status: number | null = null): ApiError {
   if (isRecord(payload) && isRecord(payload.error)) {
     const { code, message } = payload.error;
     if (typeof code === "string" && typeof message === "string") {
-      return new ApiError(code, message);
+      return new ApiError(code, message, status);
     }
   }
-  return new ApiError("request_failed", "The request could not be completed.");
+  return new ApiError("request_failed", "The request could not be completed.", status);
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -52,7 +49,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   const payload: unknown = await response.json().catch(() => null);
   if (!response.ok) {
-    throw errorFromPayload(payload);
+    throw errorFromPayload(payload, response.status);
   }
   return payload as T;
 }
@@ -83,53 +80,12 @@ export interface StreamHandlers<T> {
   onCancelled?: () => void;
 }
 
-export async function postSSE<T>(
-  path: string,
-  body: unknown,
-  handlers: StreamHandlers<T>,
-): Promise<void> {
-  const response = await fetch(`${baseUrl}${path}`, {
-    method: "POST",
-    signal: handlers.signal,
-    headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) {
-    throw errorFromPayload(await response.json().catch(() => null));
-  }
-  if (response.body === null) {
-    throw new ApiError("stream_unavailable", "The server did not provide a progress stream.");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  const parser = new SSEParser();
-  let terminal = false;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      for (const frame of parser.feed(decoder.decode(value, { stream: !done }))) {
-        if (frame.event === "result" && isRecord(frame.data) && "result" in frame.data) {
-          handlers.onResult(frame.data.result as T);
-          terminal = true;
-        } else if (frame.event === "error") {
-          throw errorFromPayload(isRecord(frame.data) && "error" in frame.data ? { error: frame.data.error } : null);
-        } else if (isProgressEvent(frame.data)) {
-          handlers.onProgress(frame.data);
-        }
-      }
-      if (done) {
-        break;
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  if (!terminal) {
-    throw new ApiError("stream_disconnected", "The progress stream ended before a final result.");
-  }
-}
-
+/**
+ * Follow one job's SSE stream until it emits a terminal frame.
+ *
+ * Throws `stream_disconnected` when the connection closes before a `result`, `error`, or
+ * `cancelled` frame, so callers never mistake a dropped connection for a finished job.
+ */
 export async function getJobEvents<T>(
   jobId: string,
   handlers: StreamHandlers<T>,
@@ -138,7 +94,7 @@ export async function getJobEvents<T>(
     signal: handlers.signal,
     headers: { Accept: "text/event-stream" },
   });
-  if (!response.ok) throw errorFromPayload(await response.json().catch(() => null));
+  if (!response.ok) throw errorFromPayload(await response.json().catch(() => null), response.status);
   if (response.body === null) throw new ApiError("stream_unavailable", "The job stream is unavailable.");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -147,17 +103,28 @@ export async function getJobEvents<T>(
     while (true) {
       const { done, value } = await reader.read();
       for (const frame of parser.feed(decoder.decode(value, { stream: !done }))) {
-        if (frame.event === "result" && isRecord(frame.data) && "result" in frame.data) handlers.onResult(frame.data.result as T);
-        else if (frame.event === "cancelled") {
+        if (frame.event === "result" && isRecord(frame.data) && "result" in frame.data) {
+          handlers.onResult(frame.data.result as T);
+          return;
+        }
+        if (frame.event === "cancelled") {
           handlers.onCancelled?.();
           return;
         }
-        else if (frame.event === "error") throw errorFromPayload(isRecord(frame.data) && "error" in frame.data ? { error: frame.data.error } : null);
-        else if (isProgressEvent(frame.data)) handlers.onProgress(frame.data);
+        if (frame.event === "error") {
+          throw errorFromPayload(isRecord(frame.data) && "error" in frame.data ? { error: frame.data.error } : null);
+        }
+        if (isProgressEvent(frame.data)) handlers.onProgress(frame.data);
       }
-      if (done) return;
+      if (done) {
+        throw new ApiError("stream_disconnected", "The progress stream ended before the job finished.");
+      }
     }
-  } finally { reader.releaseLock(); }
+  } finally {
+    // Cancelling (not just unlocking) closes the HTTP connection on every exit path, so a
+    // handler error or malformed frame cannot leave a long-lived job stream open.
+    await reader.cancel().catch(() => undefined);
+  }
 }
 
 function isProgressEvent(value: unknown): value is ProgressEvent {
@@ -171,4 +138,3 @@ function isProgressEvent(value: unknown): value is ProgressEvent {
   );
 }
 
-export type StreamResult = IndexResponse | RAGResponse | AgentResponse;

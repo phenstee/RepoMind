@@ -57,24 +57,30 @@ export function AskPanel({
 function AskResults({ history }: { history: Array<{ question: string; answer: RAGResponse }> }) {
   if (history.length === 0) return <p className="muted">Q&amp;A history is stored only in this browser tab.</p>;
   return (
-    <div className="resultList">
+    <div className="resultList" aria-live="polite">
       {history.map((item, index) => (
-        <article className="answer" key={`${item.question}-${index}`}>
-          <h3>{item.question}</h3>
-          {item.answer.insufficient_evidence ? <p className="warning">Insufficient repository evidence.</p> : null}
-          <p>{item.answer.answer}</p>
-          {item.answer.citations.length > 0 ? (
-            <ul className="citations">
-              {item.answer.citations.map((citation) => (
-                <li key={`${citation.relative_path}:${citation.start_line}`}>
-                  <code>{citation.relative_path}</code> lines {citation.start_line}–{citation.end_line}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-          {item.answer.trace_run_id ? <small>Trace {item.answer.trace_run_id}</small> : null}
-        </article>
+        <AnswerCard key={`${item.question}-${index}`} question={item.question} answer={item.answer} />
       ))}
     </div>
+  );
+}
+
+export function AnswerCard({ question, answer }: { question: string; answer: RAGResponse }) {
+  return (
+    <article className="answer">
+      <h3>{question}</h3>
+      {answer.insufficient_evidence ? <p className="warning">Insufficient repository evidence.</p> : null}
+      <p>{answer.answer}</p>
+      {answer.citations.length > 0 ? (
+        <ul className="citations">
+          {answer.citations.map((citation) => (
+            <li key={`${citation.relative_path}:${citation.start_line}`}>
+              <code>{citation.relative_path}</code> lines {citation.start_line}–{citation.end_line}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {answer.trace_run_id ? <small>Trace {answer.trace_run_id}</small> : null}
+    </article>
   );
 }
