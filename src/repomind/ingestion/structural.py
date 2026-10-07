@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
-from math import ceil
 
+from repomind.ingestion.lines import split_oversized_line, split_source_lines
 from repomind.ingestion.models import (
     ChunkingConfig,
     ChunkingStrategy,
@@ -188,19 +188,11 @@ def _pieces_for_range(
     end_line: int,
     max_chars: int,
 ) -> list[_Piece]:
-    pieces: list[_Piece] = []
-    for line_number in range(start_line, end_line + 1):
-        text = lines[line_number - 1]
-        if not text:
-            continue
-        piece_count = ceil(len(text) / max_chars)
-        piece_size, larger_pieces = divmod(len(text), piece_count)
-        offset = 0
-        for piece_index in range(piece_count):
-            end = offset + piece_size + (piece_index < larger_pieces)
-            pieces.append(_Piece(text=text[offset:end], line=line_number))
-            offset = end
-    return pieces
+    return [
+        _Piece(text=text, line=line_number)
+        for line_number in range(start_line, end_line + 1)
+        for text in split_oversized_line(lines[line_number - 1], max_chars)
+    ]
 
 
 def _bounded_parts(
@@ -281,7 +273,7 @@ def chunk_python_source(source_file: SourceFile, config: ChunkingConfig) -> list
     except (SyntaxError, ValueError, MemoryError, OverflowError, RecursionError):
         return _fallback_chunks(source_file, config)
 
-    lines = source_file.content.splitlines(keepends=True)
+    lines = split_source_lines(source_file.content)
     if not lines:
         return []
 

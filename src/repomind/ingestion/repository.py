@@ -8,6 +8,7 @@ from collections import Counter
 from pathlib import Path
 
 from repomind.ingestion.language import is_supported_source_file, language_for_path
+from repomind.ingestion.lines import count_source_lines
 from repomind.ingestion.models import (
     IngestionConfig,
     RepositorySnapshot,
@@ -228,9 +229,9 @@ def _decode_source(data: bytes, fallback_encoding: str) -> str:
 
 
 def _count_lines(content: str) -> int:
-    """Return the number of logical lines using Python ``splitlines()`` semantics."""
+    """Return the number of ``\\r\\n``/``\\r``/``\\n`` lines, matching chunk citations."""
 
-    return len(content.splitlines())
+    return count_source_lines(content)
 
 
 def _read_source_bytes(path: Path, max_file_size_bytes: int) -> bytes:

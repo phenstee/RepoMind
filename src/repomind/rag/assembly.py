@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from typing import Protocol
 
 from repomind.ingestion import ChunkKind, CodeChunk
-from repomind.rag.context import format_source_block
+from repomind.rag.context import format_source_block, truncate_source_to_fit
 from repomind.rag.models import (
     AssembledContextChunk,
     AssembledContextResult,
@@ -20,7 +20,7 @@ from repomind.rag.models import (
     ContextSource,
     ContextStrategy,
 )
-from repomind.rag.tokens import estimate_tokens
+from repomind.rag.tokens import estimate_tokens, max_chars_for_tokens
 from repomind.retrieval import ChunkIdentity, RankedChunk, chunk_identity
 
 NeighborKey = tuple[str, int]
@@ -125,7 +125,9 @@ def assemble_context(
     Seed relevance is always primary: every seed is considered for packing
     before any neighbor, regardless of budget pressure from lower-ranked
     seeds' neighbors. Neighbors are ordered same-symbol-fragment first, then
-    by the rank of the seed that produced them, then by proximity.
+    by the rank of the seed that produced them, then by proximity. The first
+    packed chunk is always kept; if it alone exceeds the budget it is
+    truncated to fit and marked ``truncated``.
     """
 
     if not isinstance(config, ContextAssemblyConfig):
@@ -212,17 +214,24 @@ def assemble_context(
             deduplicated_count += 1
             continue
         source = ContextSource(source_id=f"S{len(packed) + 1}", chunk=candidate.chunk)
-        block = format_source_block(source)
-        tokens = estimate_tokens(block)
-        if packed and estimated_tokens + tokens > config.budget_tokens:
-            dropped_for_budget_count += 1
-            continue
+        tokens = estimate_tokens(format_source_block(source))
+        if estimated_tokens + tokens > config.budget_tokens:
+            if packed:
+                dropped_for_budget_count += 1
+                continue
+            # The highest-ranked chunk is always packed, but never unbounded:
+            # cut it to the budget, shrinking its line range to what is shown.
+            source = truncate_source_to_fit(
+                source, max_chars_for_tokens(config.budget_tokens)
+            )
+            tokens = estimate_tokens(format_source_block(source))
         packed.append(
             AssembledContextChunk(
-                chunk=candidate.chunk,
+                chunk=source.chunk,
                 origin=candidate.origin,
                 seed_rank=candidate.seed_rank if candidate.origin is ContextOrigin.SEED else None,
                 estimated_tokens=tokens,
+                truncated=source.truncated,
             )
         )
         estimated_tokens += tokens

@@ -151,7 +151,8 @@ class ChunkingConfig(BaseModel):
     chunk. ``overlap_lines`` is the number of lines repeated between adjacent
     line chunks, which helps preserve context across chunk boundaries.
     ``max_chars_per_chunk`` is a cheap deterministic approximation used to
-    bound structural chunks without adding a tokenizer dependency.
+    bound every chunk (line and structural) without adding a tokenizer
+    dependency; a single longer line is split into exact character pieces.
     """
 
     strategy: ChunkingStrategy = ChunkingStrategy.LINE

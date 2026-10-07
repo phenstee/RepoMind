@@ -76,7 +76,9 @@ class BM25Index:
         if not isinstance(query, str):
             raise BM25Error("query must be a string")
         query_terms = Counter(tokenize_code(query))
-        if not self.chunks or not query_terms:
+        if not self.chunks or not query_terms or self.average_document_length <= 0.0:
+            # A zero average length means no chunk has a single token, so
+            # nothing can match and the length normalization is undefined.
             return []
 
         scored: list[tuple[int, float]] = []

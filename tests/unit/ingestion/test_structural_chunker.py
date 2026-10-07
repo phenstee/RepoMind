@@ -186,3 +186,36 @@ def test_structural_chunks_preserve_crlf_source_slices_and_citation_lines() -> N
     assert chunks[0].content == "VALUE = 1\r\n\r\n"
     assert chunks[1].content == "def answer():\r\n    return VALUE\r\n"
     assert all("\r\n" in chunk.content for chunk in chunks)
+
+
+@pytest.mark.parametrize("separator", ["\x0c", "\x0b", "\x85", " ", " "])
+def test_structural_line_numbers_match_ast_with_unicode_line_separators(
+    separator: str,
+) -> None:
+    content = (
+        f"TEXT = 'before{separator}after'\n"
+        "\n"
+        "def answer():\n"
+        "    return TEXT\n"
+    )
+
+    chunks = chunk_source_file(_source(content), _structural())
+
+    function = next(chunk for chunk in chunks if chunk.symbol_name == "answer")
+    assert (function.start_line, function.end_line) == (3, 4)
+    assert function.content == "def answer():\n    return TEXT\n"
+    assert "".join(chunk.content for chunk in chunks) == content
+
+
+def test_non_python_fallback_bounds_minified_lines() -> None:
+    content = "export const data=" + ("9," * 50_000) + "0;\n"
+    chunks = chunk_source_file(
+        _source(content, language="javascript"),
+        _structural(max_chars_per_chunk=12_000),
+    )
+
+    assert len(chunks) > 1
+    assert all(len(chunk.content) <= 12_000 for chunk in chunks)
+    assert "".join(chunk.content for chunk in chunks) == content
+    assert all(chunk.chunk_kind is ChunkKind.LINE_FALLBACK for chunk in chunks)
+    assert all((chunk.start_line, chunk.end_line) == (1, 1) for chunk in chunks)

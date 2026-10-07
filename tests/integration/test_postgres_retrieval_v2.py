@@ -5,7 +5,8 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import ClauseElement, Executable, Select, text
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import Session
 
 from repomind.db import (
@@ -14,6 +15,7 @@ from repomind.db import (
     pgvector_semantic_search,
 )
 from repomind.db.models import HNSW_INDEX_NAME
+from repomind.db.repositories import _semantic_search_statement
 from repomind.ingestion import (
     ChunkingStrategy,
     ChunkKind,
@@ -89,7 +91,7 @@ def test_hnsw_index_exists_is_valid_and_uses_cosine_ops(db_session: Session) -> 
     assert "vector(1536)" in definition
 
 
-def test_ann_recall_filters_roundtrip_and_query_plan(db_session: Session) -> None:
+def test_ann_recall_filters_and_roundtrip(db_session: Session) -> None:
     count = 128
     repository_id = _repository(db_session, "ann-primary", count + 1)
     other_repository_id = _repository(db_session, "ann-other", 1)
@@ -128,23 +130,56 @@ def test_ann_recall_filters_roundtrip_and_query_plan(db_session: Session) -> Non
         for result in approximate
     )
 
-    vector_literal = "[" + ",".join(str(value) for value in query.values) + "]"
-    plan = db_session.execute(
-        text(
-            "EXPLAIN (COSTS OFF) "
-            "SELECT c.id FROM code_chunks c "
-            "JOIN repository_files f ON f.id = c.repository_file_id "
-            "WHERE f.repository_id = :repository_id "
-            "AND c.embedding IS NOT NULL "
-            "AND c.embedding_model = :model "
-            "AND c.embedding_dimensions = 1536 "
-            "ORDER BY (c.embedding::vector(1536)) <=> CAST(:query AS vector(1536)) "
-            "LIMIT 10"
-        ),
-        {"repository_id": repository_id, "model": _MODEL, "query": vector_literal},
-    ).scalars()
-    plan_text = "\n".join(plan)
-    db_session.execute(text("SET LOCAL enable_seqscan = on"))
 
-    assert HNSW_INDEX_NAME in plan_text
-    assert "Index Scan" in plan_text
+class _Explain(Executable, ClauseElement):
+    """``EXPLAIN`` the exact production statement, binds and all."""
+
+    inherit_cache = False
+
+    def __init__(self, statement: Select) -> None:
+        self.statement = statement
+
+
+@compiles(_Explain, "postgresql")
+def _compile_explain(element: _Explain, compiler, **kwargs) -> str:
+    return "EXPLAIN (COSTS OFF) " + compiler.process(element.statement, **kwargs)
+
+
+def _plan(session: Session, statement: Select) -> str:
+    return "\n".join(session.execute(_Explain(statement)).scalars())
+
+
+def test_production_ann_statement_walks_the_hnsw_index(db_session: Session) -> None:
+    count = 128
+    repository_id = _repository(db_session, "ann-plan", count)
+    persist_embedded_chunks(
+        db_session, repository_id, [_embedded(index) for index in range(count)]
+    )
+    query = EmbeddingVector(values=_vector(0.403), model=_MODEL)
+
+    # The tiny fixture would otherwise make a sequential scan cheapest; this
+    # proves index eligibility, not the planner's cost choice. Production
+    # retrieval never changes enable_seqscan, and SET LOCAL ends with the test
+    # transaction.
+    db_session.execute(text("SET LOCAL enable_seqscan = off"))
+    ann_plan = _plan(
+        db_session,
+        _semantic_search_statement(
+            repository_id, query, top_k=10, mode=SemanticSearchMode.ANN
+        ),
+    )
+    exact_plan = _plan(
+        db_session,
+        _semantic_search_statement(
+            repository_id, query, top_k=10, mode=SemanticSearchMode.EXACT
+        ),
+    )
+
+    # The nearest-neighbor LIMIT must be fed by the HNSW index in distance
+    # order, never by sorting every repository match; the deterministic
+    # tie-break sort may only run above it, over the top_k rows.
+    nearest_step = ann_plan[ann_plan.index("Limit") :]
+    assert f"Index Scan using {HNSW_INDEX_NAME}" in nearest_step
+    assert "Sort" not in nearest_step
+    # Exact mode stays an exact baseline that cannot use the ANN index.
+    assert HNSW_INDEX_NAME not in exact_plan
