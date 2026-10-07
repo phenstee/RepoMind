@@ -1,6 +1,7 @@
 """Real Redis Pub/Sub coverage for best-effort durable-job coordination."""
 
 import os
+import threading
 import time
 from datetime import UTC, datetime
 from urllib.parse import urlsplit, urlunsplit
@@ -96,3 +97,77 @@ def test_redis_progress_fanout_round_trips_safe_event_metadata(redis_test_url: s
     serialized = received.model_dump_json()
     assert "password" not in serialized
     assert "C:\\" not in serialized
+
+
+def _isolated_broker(url: str) -> RedisJobBroker:
+    # Pub/Sub channels ignore the database number; a unique prefix keeps
+    # concurrent test runs from waking each other.
+    return RedisJobBroker(url, channel_prefix=f"repomind-test:{uuid4().hex}")
+
+
+def test_idle_wait_for_work_blocks_for_the_full_timeout(redis_test_url: str):
+    broker = _isolated_broker(redis_test_url)
+    try:
+        for _ in range(2):  # the first call also consumes the subscribe confirmation
+            started = time.monotonic()
+            assert broker.wait_for_work(0.5) is False
+            assert time.monotonic() - started >= 0.4
+    finally:
+        broker.close()
+
+
+def test_wait_for_work_returns_promptly_on_a_wakeup(redis_test_url: str):
+    broker = _isolated_broker(redis_test_url)
+    publisher = RedisJobBroker(redis_test_url, channel_prefix=broker.channel_prefix)
+    try:
+        assert broker.wait_for_work(0.05) is False
+        timer = threading.Timer(0.1, publisher.notify_job, args=(uuid4(),))
+        timer.start()
+        started = time.monotonic()
+        assert broker.wait_for_work(5.0) is True
+        assert time.monotonic() - started < 1.0
+        timer.join()
+
+        # A wakeup published while the worker was busy is not lost, and a burst of
+        # wakeups is coalesced into one claim attempt.
+        publisher.notify_job(uuid4())
+        publisher.notify_job(uuid4())
+        time.sleep(0.05)
+        started = time.monotonic()
+        assert broker.wait_for_work(5.0) is True
+        assert time.monotonic() - started < 0.5
+        assert broker.wait_for_work(0.2) is False
+    finally:
+        publisher.close()
+        broker.close()
+
+
+def test_progress_subscription_waits_out_its_timeout_when_redis_fails(
+    redis_test_url: str, monkeypatch
+):
+    broker = _isolated_broker(redis_test_url)
+    subscription = broker.subscribe(uuid4())
+    try:
+
+        def unavailable(*args, **kwargs):
+            raise redis.ConnectionError("Redis went away")
+
+        monkeypatch.setattr(subscription.pubsub, "get_message", unavailable)
+        started = time.monotonic()
+        assert subscription.next(timeout=0.3) is None
+        assert time.monotonic() - started >= 0.25
+    finally:
+        subscription.close()
+        broker.close()
+
+
+def test_unreachable_redis_degrades_to_bounded_polling_waits():
+    broker = RedisJobBroker("redis://127.0.0.1:1/0")
+    try:
+        started = time.monotonic()
+        assert broker.wait_for_work(0.3) is False
+        assert broker.subscribe(uuid4()).next(0.2) is None
+        broker.notify_job(uuid4())
+        assert 0.45 <= time.monotonic() - started < 5.0
+    finally:
+        broker.close()

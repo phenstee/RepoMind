@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import sessionmaker
 
 from repomind.api import create_app
+from repomind.api.security import CLIENT_HEADER
 from repomind.api.store import PostgresRepositoryStore
 from repomind.config import Settings
 from repomind.db import load_chunks, read_index_manifest
@@ -53,13 +54,19 @@ def client(db_session, tmp_path):
         join_transaction_mode="create_savepoint",
     )
     app = create_app(
-        settings=Settings(_env_file=None, repomind_workspace_root=tmp_path),
+        settings=Settings(
+            _env_file=None,
+            repomind_workspace_root=tmp_path,
+            repomind_allowed_hosts=("testserver",),
+        ),
         repository_store=PostgresRepositoryStore(factory),
         trace_store=PostgresTraceStore(factory),
         llm_factory=lambda trace: FakeLLM(),
         embedding_factory=lambda trace: FakeEmbeddings(),
     )
-    with TestClient(app, raise_server_exceptions=False) as http:
+    with TestClient(
+        app, raise_server_exceptions=False, headers={CLIENT_HEADER: "test"}
+    ) as http:
         yield http
 
 
@@ -199,3 +206,19 @@ def test_streamed_api_retains_postgres_trace_history(client, db_session):
     assert [event["event_type"] for event in trace.json()["events"]] == [
         event["event"] for event in events[:-1]
     ]
+
+
+def test_postgres_registration_rejects_overlapping_workspace_bindings(client, tmp_path):
+    name = "api-overlap-" + uuid4().hex
+    (tmp_path / "sample" / "nested").mkdir()
+    first = client.post("/api/v1/repositories", json={"name": name, "path": "sample"})
+    assert first.status_code == 201, first.text
+
+    for alias, path in ((name + "-alias", "sample"), (name + "-nested", "sample/nested")):
+        response = client.post("/api/v1/repositories", json={"name": alias, "path": path})
+        assert response.status_code == 409, response.text
+        assert response.json()["error"]["code"] == "workspace_path_conflict"
+
+    again = client.post("/api/v1/repositories", json={"name": name, "path": "sample"})
+    assert again.status_code == 201
+    assert again.json()["id"] == first.json()["id"]

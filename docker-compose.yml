@@ -1,6 +1,7 @@
 services:
   postgres:
     image: pgvector/pgvector:0.8.6-pg17-bookworm
+    restart: unless-stopped
     environment:
       POSTGRES_DB: repomind
       POSTGRES_USER: repomind
@@ -18,6 +19,7 @@ services:
 
   redis:
     image: redis:7.4.8-alpine
+    restart: unless-stopped
     ports:
       - "127.0.0.1:6379:6379"
     healthcheck:
@@ -48,6 +50,9 @@ services:
       args:
         REPOMIND_UID: ${REPOMIND_UID:-1000}
         REPOMIND_GID: ${REPOMIND_GID:-1000}
+    restart: unless-stopped
+    # Reaps verifier subprocesses (pytest/ruff/git) and forwards SIGTERM.
+    init: true
     environment:
       DATABASE_URL: postgresql+psycopg://repomind:repomind@postgres:5432/repomind
       REDIS_URL: redis://redis:6379/0
@@ -87,6 +92,9 @@ services:
         REPOMIND_UID: ${REPOMIND_UID:-1000}
         REPOMIND_GID: ${REPOMIND_GID:-1000}
     command: ["python", "-m", "repomind.worker"]
+    restart: unless-stopped
+    # Reaps verifier subprocesses and forwards SIGTERM so the current job can finish.
+    init: true
     environment:
       DATABASE_URL: postgresql+psycopg://repomind:repomind@postgres:5432/repomind
       REDIS_URL: redis://redis:6379/0
@@ -110,6 +118,7 @@ services:
       dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_REPOMIND_API_URL: http://127.0.0.1:8000/api/v1
+    restart: unless-stopped
     ports:
       - "127.0.0.1:3000:3000"
     depends_on:

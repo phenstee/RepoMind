@@ -1,14 +1,19 @@
 """HTTP contracts, error privacy and dependency-independent startup."""
 
 import inspect
+import logging
 from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 
 from repomind.api import create_app
 from repomind.api.dependencies import get_services
 from repomind.api.routes import router
+from repomind.api.security import request_hostname
+from repomind.config import Settings
+from repomind.jobs.store import JobNotFoundError
 
 
 def test_health_and_openapi_do_not_build_services():
@@ -18,7 +23,8 @@ def test_health_and_openapi_do_not_build_services():
         raise AssertionError("Health must not need any service")
 
     app.dependency_overrides[get_services] = forbidden
-    with TestClient(app) as client:
+    # Default settings trust loopback Host names only, not TestClient's "testserver".
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
         assert client.get("/api/v1/health").json() == {"status": "ok", "service": "repomind"}
         schema = client.get("/openapi.json").json()
         assert len(schema["paths"]) == 22
@@ -186,3 +192,131 @@ def test_queued_job_cancellation_is_idempotent_and_does_not_expose_request(api):
     detail = api.client.get(f"/api/v1/jobs/{queued['job_id']}").json()
     assert detail["status"] == "cancelled"
     assert detail["cancelled_at"] is not None
+
+
+TRUSTED_ORIGIN = {"origin": "http://localhost:3000"}
+
+
+@pytest.mark.parametrize(
+    "path", ["/repositories/1/jobs/index", "/repositories/1/index", "/repositories"]
+)
+def test_cross_site_simple_post_without_client_header_is_rejected(api, path):
+    # A hostile page can send a text/plain "simple request" without any preflight.
+    browser = TestClient(api.app, raise_server_exceptions=False)
+    response = browser.post(
+        "/api/v1" + path,
+        content=b"",
+        headers={"origin": "https://evil.example", "content-type": "text/plain"},
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "error": {
+            "code": "missing_client_header",
+            "message": "State-changing requests require the X-RepoMind-Client header.",
+        }
+    }
+    assert "access-control-allow-origin" not in response.headers
+    assert not api.app.state.container.get().jobs.store.jobs
+    assert not api.embeddings.calls
+
+
+def test_cross_site_cancel_without_client_header_leaves_job_queued(api):
+    job_id = api.client.post("/api/v1/repositories/1/jobs/index").json()["job_id"]
+
+    browser = TestClient(api.app, raise_server_exceptions=False)
+    rejected = browser.post(
+        f"/api/v1/jobs/{job_id}/cancel", headers={"origin": "https://evil.example"}
+    )
+    blank = browser.post(f"/api/v1/jobs/{job_id}/cancel", headers={"X-RepoMind-Client": " "})
+
+    assert rejected.status_code == blank.status_code == 403
+    assert api.client.get(f"/api/v1/jobs/{job_id}").json()["status"] == "queued"
+
+
+def test_client_header_rejection_is_readable_by_trusted_frontend_and_reads_need_no_header(api):
+    browser = TestClient(api.app, raise_server_exceptions=False)
+
+    rejected = browser.post("/api/v1/repositories/1/jobs/index", headers=TRUSTED_ORIGIN)
+    read = browser.get("/api/v1/repositories/1", headers=TRUSTED_ORIGIN)
+
+    assert rejected.status_code == 403
+    assert rejected.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert read.status_code == 200
+
+
+def test_cors_preflight_allows_the_client_header_for_trusted_origins(api):
+    response = api.client.options(
+        "/api/v1/repositories/1/jobs/index",
+        headers={
+            **TRUSTED_ORIGIN,
+            "access-control-request-method": "POST",
+            "access-control-request-headers": "content-type,x-repomind-client",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "x-repomind-client" in response.headers["access-control-allow-headers"].lower()
+
+
+@pytest.mark.parametrize(
+    "host", ["localhost:8000", "127.0.0.1:8000", "127.0.0.1", "api:8000", "[::1]:8000"]
+)
+def test_default_settings_accept_loopback_and_compose_host_names(host):
+    with TestClient(create_app(settings=Settings(_env_file=None))) as client:
+        assert client.get("/api/v1/health", headers={"host": host}).status_code == 200
+
+
+@pytest.mark.parametrize("host", ["rebind.attacker.example", "testserver", "127.0.0.1.nip.io", ""])
+def test_dns_rebinding_host_names_are_rejected(host):
+    with TestClient(create_app(settings=Settings(_env_file=None))) as client:
+        response = client.get("/api/v1/health", headers={"host": host})
+    assert response.status_code == 400
+    assert response.json() == {
+        "error": {"code": "invalid_host", "message": "Request host is not allowed."}
+    }
+
+
+@pytest.mark.parametrize(
+    "header,expected",
+    [
+        ("localhost:8000", "localhost"),
+        ("LOCALHOST", "localhost"),
+        ("[::1]:8000", "[::1]"),
+        ("[::1]", "[::1]"),
+        ("[::1", ""),
+    ],
+)
+def test_request_hostname_handles_ports_case_and_ipv6(header, expected):
+    assert request_hostname(header) == expected
+
+
+def test_unknown_repository_404_carries_cors_headers_without_logging_a_traceback(api, caplog):
+    with caplog.at_level(logging.ERROR):
+        response = api.client.get("/api/v1/repositories/999", headers=TRUSTED_ORIGIN)
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "repository_not_found"
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+    assert not caplog.records
+
+
+def test_storage_and_job_lookup_failures_carry_cors_headers(api, monkeypatch):
+    def unavailable(*args):
+        raise OperationalError("SELECT 1", {}, Exception("postgresql://user:password@db"))
+
+    monkeypatch.setattr(api.store, "get", unavailable)
+    storage = api.client.get("/api/v1/repositories/1", headers=TRUSTED_ORIGIN)
+    assert storage.status_code == 503
+    assert storage.json()["error"]["code"] == "storage_unavailable"
+    assert "password" not in storage.text
+    assert storage.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+    def missing(*args):
+        raise JobNotFoundError("Job lease is no longer active")
+
+    monkeypatch.setattr(api.app.state.container.get().jobs, "get", missing)
+    job = api.client.get(f"/api/v1/jobs/{UUID(int=7)}", headers=TRUSTED_ORIGIN)
+    assert job.status_code == 404
+    assert job.json()["error"] == {"code": "job_not_found", "message": "Job not found."}
+    assert job.headers["access-control-allow-origin"] == "http://localhost:3000"

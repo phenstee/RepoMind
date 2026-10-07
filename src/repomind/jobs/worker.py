@@ -1,8 +1,12 @@
 """One explicit durable worker loop that reuses existing execution services."""
 
 import logging
+from collections.abc import Callable
+from functools import partial
 from threading import Event, Thread
 from uuid import uuid4
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from repomind.api.errors import APIError
 from repomind.api.models import AgentRequest, CodingRequest, RAGRequest
@@ -11,7 +15,7 @@ from repomind.api.streaming import safe_progress_event
 from repomind.jobs.broker import JobBroker
 from repomind.jobs.control import DurableCancellationToken, JobCancellationRequested
 from repomind.jobs.models import Job, JobType
-from repomind.jobs.store import PostgresJobStore
+from repomind.jobs.store import JobNotFoundError, PostgresJobStore
 from repomind.observability import InMemoryTraceRecorder, RunType, TraceContext
 
 logger = logging.getLogger(__name__)
@@ -21,6 +25,8 @@ _RUN_TYPES = {
     JobType.AGENT: RunType.READ_ONLY_AGENT,
     JobType.CODING: RunType.CODING_TASK,
 }
+# After a failed renewal, retry well before the lease (>= 30s in production) can lapse.
+_RENEWAL_RETRY_SECONDS = 5.0
 
 
 class JobWorker:
@@ -54,7 +60,11 @@ class JobWorker:
         recorder = InMemoryTraceRecorder(sink=self.execution.trace_store.persist_run_trace, listener=forward)
         trace = TraceContext(recorder, _RUN_TYPES[job.job_type])
         assert trace.run_id is not None
-        self.store.link_trace(job.id, self.worker_id, trace.run_id)
+        try:
+            self.store.link_trace(job.id, self.worker_id, trace.run_id)
+        except JobNotFoundError:
+            logger.warning("Lease lost for job %s before it started; skipping it", job.id)
+            return
         done = Event()
         heartbeat = Thread(target=self._heartbeat, args=(job.id, done), daemon=True)
         heartbeat.start()
@@ -67,25 +77,52 @@ class JobWorker:
         )
         try:
             cancellation.checkpoint()
-            result = self._dispatch(job, trace, cancellation)
-            cancellation.checkpoint()
-            self.store.mark_succeeded(job.id, self.worker_id, result.model_dump(mode="json"))
+            # No checkpoint after dispatch: once the operation returns its effects are
+            # committed (and its trace completed), so the job is reported as succeeded.
+            result = self._dispatch(job, trace, cancellation).model_dump(mode="json")
         except JobCancellationRequested:
             trace.finish("cancelled")
-            self.store.mark_cancelled(job.id, self.worker_id)
+            self._finish(job, partial(self.store.mark_cancelled, job.id, self.worker_id))
         except APIError as exc:
-            self.store.mark_failed(job.id, self.worker_id, exc.code)
+            self._finish(job, partial(self.store.mark_failed, job.id, self.worker_id, exc.code))
         except Exception:
             logger.exception("Durable job failed")
-            self.store.mark_failed(job.id, self.worker_id, "operation_failed")
+            self._finish(
+                job, partial(self.store.mark_failed, job.id, self.worker_id, "operation_failed")
+            )
+        else:
+            self._finish(job, partial(self.store.mark_succeeded, job.id, self.worker_id, result))
         finally:
             done.set()
             heartbeat.join(timeout=1)
 
+    @staticmethod
+    def _finish(job: Job, transition: Callable[[], None]) -> None:
+        """Record a terminal state; a lost lease or database blip must not kill the worker."""
+
+        try:
+            transition()
+        except JobNotFoundError:
+            logger.warning("Lease lost for job %s; its outcome was not recorded here", job.id)
+        except SQLAlchemyError:
+            logger.exception(
+                "Could not record the outcome of job %s; lease expiry will recover it", job.id
+            )
+
     def _heartbeat(self, job_id, done: Event) -> None:
-        while not done.wait(self.lease_seconds / 3):
-            if not self.store.renew_lease(job_id, self.worker_id, self.lease_seconds):
+        interval = self.lease_seconds / 3
+        delay = interval
+        while not done.wait(delay):
+            try:
+                renewed = self.store.renew_lease(job_id, self.worker_id, self.lease_seconds)
+            except Exception:  # one transient failure must not end renewals
+                logger.warning("Lease renewal for job %s failed; retrying", job_id, exc_info=True)
+                delay = min(interval, _RENEWAL_RETRY_SECONDS)
+                continue
+            if not renewed:
+                logger.warning("Lease for job %s is no longer held by this worker", job_id)
                 return
+            delay = interval
 
     def _dispatch(
         self, job: Job, trace: TraceContext, cancellation: DurableCancellationToken

@@ -269,7 +269,8 @@ class RepositoryService:
             )
             if trace is not None:
                 self._emit_index_completed(trace, repository_id, plan, summary, len(embedded))
-            cancellation.checkpoint()
+            # No checkpoint past this point: the index is committed, so a late cancel
+            # request must not report the job as cancelled.
             return IndexResponse(
                 repository_id=repository_id,
                 files_indexed=summary.file_count,

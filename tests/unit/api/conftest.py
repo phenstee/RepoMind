@@ -11,7 +11,12 @@ from repomind.agent import AgentDecisionResponse
 from repomind.api import create_app
 from repomind.api.errors import APIError
 from repomind.api.models import RepositoryFileResponse
-from repomind.api.store import RepositoryBinding
+from repomind.api.security import CLIENT_HEADER
+from repomind.api.store import (
+    RepositoryBinding,
+    workspace_path_conflict,
+    workspace_paths_overlap,
+)
 from repomind.coding import CodingPlan, CodingReview
 from repomind.config import Settings
 from repomind.db.repositories import RepositoryNotFoundError, content_sha256
@@ -56,6 +61,12 @@ class MemoryRepositoryStore:
                 if binding.workspace_relative_path != path:
                     raise APIError(409, "repository_conflict", "Repository name is already bound.")
                 return binding
+        if any(
+            binding.workspace_relative_path is not None
+            and workspace_paths_overlap(path, binding.workspace_relative_path)
+            for binding in self.bindings.values()
+        ):
+            raise workspace_path_conflict()
         binding = RepositoryBinding(
             len(self.bindings) + 1, name, path, datetime(2026, 9, 15, tzinfo=UTC)
         )
@@ -301,6 +312,32 @@ class ScriptedLLM:
         return response_model.model_validate(response)
 
 
+# TestClient sends ``Host: testserver``; production only trusts loopback/compose names.
+TEST_ALLOWED_HOSTS = ("testserver",)
+CLIENT_HEADERS = {CLIENT_HEADER: "test"}
+
+
+def offline_settings(**overrides) -> Settings:
+    return Settings(_env_file=None, repomind_allowed_hosts=TEST_ALLOWED_HOSTS, **overrides)
+
+
+def offline_client(app, **kwargs) -> TestClient:
+    """A client that passes the Host and state-changing client-header guards."""
+
+    kwargs.setdefault("raise_server_exceptions", False)
+    return TestClient(app, headers=CLIENT_HEADERS, **kwargs)
+
+
+@pytest.fixture(name="offline_settings")
+def offline_settings_fixture():
+    return offline_settings
+
+
+@pytest.fixture(name="offline_client")
+def offline_client_fixture():
+    return offline_client
+
+
 @pytest.fixture(autouse=True)
 def no_real_models(monkeypatch):
     def forbidden(*args, **kwargs):
@@ -324,13 +361,13 @@ def api(tmp_path):
         FakeEmbeddings(),
     )
     app = create_app(
-        settings=Settings(_env_file=None, repomind_workspace_root=root),
+        settings=offline_settings(repomind_workspace_root=root),
         repository_store=store,
         trace_store=traces,
         llm_factory=lambda trace: llm,
         embedding_factory=lambda trace: embeddings,
     )
-    with TestClient(app, raise_server_exceptions=False) as client:
+    with offline_client(app) as client:
         result = client.post("/api/v1/repositories", json={"name": "sample", "path": "sample"})
         assert result.status_code == 201, result.text
         yield SimpleNamespace(

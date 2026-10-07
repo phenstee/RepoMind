@@ -16,6 +16,9 @@ def _isolated_settings_environment(monkeypatch):
         "REDIS_URL",
         "LLM_TIMEOUT_SECONDS",
         "LLM_MAX_RETRIES",
+        "JOB_MAX_ATTEMPTS",
+        "REPOMIND_ALLOWED_HOSTS",
+        "REPOMIND_TRUSTED_FRONTEND_ORIGINS",
     ):
         monkeypatch.delenv(name, raising=False)
     get_settings.cache_clear()
@@ -90,3 +93,61 @@ def test_valid_timeout_and_zero_retries_are_accepted() -> None:
 
     assert settings.llm_timeout_seconds == 0.1
     assert settings.llm_max_retries == 0
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "*",
+        "null",
+        "http://*.example.com",
+        "file:///tmp/index.html",
+        "chrome-extension://abcdef",
+        "ftp://localhost:3000",
+        "localhost:3000",
+        "http://localhost:3000/",
+        "http://localhost:3000/app",
+        "http://user@localhost:3000",
+        "http://localhost:notaport",
+    ],
+)
+def test_trusted_frontend_origins_reject_wildcards_and_non_http_origins(origin: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings(repomind_trusted_frontend_origins=(origin,), _env_file=None)
+
+
+def test_trusted_frontend_origins_accept_explicit_http_origins(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "REPOMIND_TRUSTED_FRONTEND_ORIGINS",
+        '["http://localhost:3000","https://repomind.internal:8443"]',
+    )
+
+    settings = Settings(_env_file=None)
+
+    assert settings.repomind_trusted_frontend_origins == (
+        "http://localhost:3000",
+        "https://repomind.internal:8443",
+    )
+
+
+def test_allowed_hosts_default_to_loopback_and_compose_names() -> None:
+    assert Settings(_env_file=None).repomind_allowed_hosts == (
+        "localhost",
+        "127.0.0.1",
+        "api",
+        "[::1]",
+    )
+
+
+@pytest.mark.parametrize("hosts", [(), ("*",), ("*.example.com",), ("localhost:8000",), ("",)])
+def test_allowed_hosts_reject_wildcards_ports_and_empty_values(hosts) -> None:
+    with pytest.raises(ValidationError):
+        Settings(repomind_allowed_hosts=hosts, _env_file=None)
+
+
+def test_job_max_attempts_defaults_reads_environment_and_is_bounded(monkeypatch) -> None:
+    assert Settings(_env_file=None).job_max_attempts == 3
+    monkeypatch.setenv("JOB_MAX_ATTEMPTS", "5")
+    assert Settings(_env_file=None).job_max_attempts == 5
+    with pytest.raises(ValidationError):
+        Settings(job_max_attempts=0, _env_file=None)

@@ -3,9 +3,10 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Protocol
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from repomind.api.errors import APIError
@@ -66,6 +67,28 @@ class RepositoryStore(Protocol):
     ) -> Sequence[CodeChunk]: ...
 
 
+def workspace_paths_overlap(first: str, second: str) -> bool:
+    """True when two workspace-relative bindings are equal or one contains the other.
+
+    Execution locks are keyed by repository id, so two repositories bound to the
+    same (or a nested) directory could otherwise index or edit it concurrently.
+    Bindings are stored as canonical POSIX paths, compared component-wise and
+    case-sensitively exactly as stored.
+    """
+
+    a, b = PurePosixPath(first).parts, PurePosixPath(second).parts
+    shorter = min(len(a), len(b))
+    return a[:shorter] == b[:shorter]
+
+
+def workspace_path_conflict() -> APIError:
+    return APIError(
+        409,
+        "workspace_path_conflict",
+        "Repository path overlaps a directory bound to another repository.",
+    )
+
+
 def _binding(record: RepositoryRecord) -> RepositoryBinding:
     return RepositoryBinding(
         record.id, record.name, record.workspace_relative_path, record.created_at
@@ -73,15 +96,28 @@ def _binding(record: RepositoryRecord) -> RepositoryBinding:
 
 
 class PostgresRepositoryStore:
+    # Serializes registrations so two overlapping bindings cannot both pass the check.
+    _REGISTRATION_LOCK = 1_902_020
+
     def __init__(self, factory: sessionmaker[Session]):
         self.factory = factory
 
     def register(self, name: str, path: str) -> RepositoryBinding:
         with session_scope(self.factory) as session:
+            session.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"), {"key": self._REGISTRATION_LOCK}
+            )
             record = session.scalar(select(RepositoryRecord).where(RepositoryRecord.name == name))
             if record is not None and record.workspace_relative_path != path:
                 raise APIError(409, "repository_conflict", "Repository name is already bound.")
             if record is None:
+                bound_paths = session.scalars(
+                    select(RepositoryRecord.workspace_relative_path).where(
+                        RepositoryRecord.workspace_relative_path.is_not(None)
+                    )
+                )
+                if any(workspace_paths_overlap(path, bound) for bound in bound_paths):
+                    raise workspace_path_conflict()
                 record = RepositoryRecord(name=name, workspace_relative_path=path)
                 session.add(record)
                 session.flush()

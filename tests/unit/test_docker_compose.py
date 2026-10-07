@@ -111,6 +111,21 @@ def test_app_services_declare_healthchecks(compose_config: dict) -> None:
         assert "healthcheck" in compose_config["services"][service_name]
 
 
+def test_long_running_services_restart_but_one_shot_migration_does_not(
+    compose_config: dict,
+) -> None:
+    services = compose_config["services"]
+    for service_name in ("postgres", "redis", "api", "worker", "frontend"):
+        assert services[service_name]["restart"] == "unless-stopped"
+    assert services["migrate"].get("restart", "no") == "no"
+
+
+def test_api_and_worker_run_under_an_init_process(compose_config: dict) -> None:
+    # PID 1 must reap verifier subprocesses and forward SIGTERM for a graceful stop.
+    for service_name in ("api", "worker"):
+        assert compose_config["services"][service_name]["init"] is True
+
+
 def test_frontend_waits_for_api_to_be_healthy(compose_config: dict) -> None:
     depends_on = compose_config["services"]["frontend"]["depends_on"]
     assert depends_on["api"]["condition"] == "service_healthy"

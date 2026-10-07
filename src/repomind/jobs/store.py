@@ -43,10 +43,25 @@ def _job(record: JobRecord) -> Job:
     )
 
 
+def _locked(session: Session, job_id: UUID) -> JobRecord | None:
+    """Row-lock one job so an ownership check and its write are a single atomic step.
+
+    A plain read followed by an UPDATE lets lease recovery or another worker change
+    the row in between; FOR UPDATE re-reads the latest committed row under the lock.
+    """
+
+    return session.scalar(select(JobRecord).where(JobRecord.id == job_id).with_for_update())
+
+
 class PostgresJobStore:
-    def __init__(self, factory: sessionmaker[Session], *, clock=utc_now) -> None:
+    def __init__(
+        self, factory: sessionmaker[Session], *, clock=utc_now, max_attempts: int = 3
+    ) -> None:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be at least 1")
         self.factory = factory
         self.clock = clock
+        self.max_attempts = max_attempts
 
     def create(self, job_type: JobType, repository_id: int, payload: dict) -> Job:
         now = self.clock()
@@ -114,7 +129,7 @@ class PostgresJobStore:
     def renew_lease(self, job_id: UUID, worker_id: str, lease_seconds: float) -> bool:
         now = self.clock()
         with session_scope(self.factory) as session:
-            record = session.get(JobRecord, job_id)
+            record = _locked(session, job_id)
             if record is None or record.status != JobStatus.RUNNING.value or record.lease_owner != worker_id:
                 return False
             record.lease_expires_at = now + timedelta(seconds=lease_seconds)
@@ -122,7 +137,7 @@ class PostgresJobStore:
 
     def link_trace(self, job_id: UUID, worker_id: str, trace_run_id: UUID) -> None:
         with session_scope(self.factory) as session:
-            record = session.get(JobRecord, job_id)
+            record = _locked(session, job_id)
             if record is None or record.status != JobStatus.RUNNING.value or record.lease_owner != worker_id:
                 raise JobNotFoundError("Job lease is no longer active")
             record.trace_run_id = trace_run_id
@@ -130,9 +145,7 @@ class PostgresJobStore:
     def request_cancel(self, job_id: UUID) -> Job:
         now = self.clock()
         with session_scope(self.factory) as session:
-            record = session.scalar(
-                select(JobRecord).where(JobRecord.id == job_id).with_for_update()
-            )
+            record = _locked(session, job_id)
             if record is None:
                 raise JobNotFoundError("Job not found")
             if record.status in {
@@ -152,7 +165,7 @@ class PostgresJobStore:
 
     def mark_side_effect_started(self, job_id: UUID, worker_id: str) -> Job:
         with session_scope(self.factory) as session:
-            record = session.get(JobRecord, job_id)
+            record = _locked(session, job_id)
             if (
                 record is None
                 or record.status != JobStatus.RUNNING.value
@@ -167,7 +180,7 @@ class PostgresJobStore:
     def mark_cancelled(self, job_id: UUID, worker_id: str) -> None:
         now = self.clock()
         with session_scope(self.factory) as session:
-            record = session.get(JobRecord, job_id)
+            record = _locked(session, job_id)
             if (
                 record is None
                 or record.status != JobStatus.RUNNING.value
@@ -203,7 +216,7 @@ class PostgresJobStore:
         error_code: str | None = None,
     ) -> None:
         with session_scope(self.factory) as session:
-            record = session.get(JobRecord, job_id)
+            record = _locked(session, job_id)
             if record is None or record.status != JobStatus.RUNNING.value or record.lease_owner != worker_id:
                 raise JobNotFoundError("Job lease is no longer active")
             record.status = status.value
@@ -235,6 +248,12 @@ class PostgresJobStore:
                 elif record.cancel_requested_at is not None:
                     record.status = JobStatus.CANCELLED.value
                     record.cancelled_at = now
+                    record.finished_at = now
+                elif record.attempt_count >= self.max_attempts:
+                    # A job that keeps outliving its lease (e.g. it crashes the worker)
+                    # must not be replayed forever.
+                    record.status = JobStatus.FAILED.value
+                    record.error_code = "job_attempts_exhausted"
                     record.finished_at = now
                 else:
                     record.status = JobStatus.QUEUED.value
