@@ -272,3 +272,74 @@ def test_replace_failure_preserves_original_and_cleans_temporary_file(
 
     assert target.read_bytes() == b"old"
     assert [path.name for path in tmp_path.iterdir()] == ["app.py"]
+
+
+@pytest.mark.parametrize("path", [".git/config", ".git/hooks/pre-commit", "a/.Git/HEAD"])
+def test_editing_tools_reject_git_metadata(tmp_path: Path, path: str) -> None:
+    with pytest.raises(ValidationError, match="Git metadata"):
+        CreateFileInput(path=path, content="x")
+    with pytest.raises(ValidationError, match="Git metadata"):
+        ReplaceTextInput(path=path, old_text="a", new_text="b", expected_sha256="0" * 64)
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_bytes(b"[core]\n")
+    with pytest.raises(ToolExecutionError, match="Git metadata"):
+        replace_text(
+            _context(tmp_path),
+            ReplaceTextInput.model_construct(
+                path=Path(".git/config"),
+                old_text="[core]",
+                new_text="[core]\n\tfsmonitor = touch pwned",
+                expected_sha256=_hash(b"[core]\n"),
+            ),
+        )
+    assert (tmp_path / ".git" / "config").read_bytes() == b"[core]\n"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "conftest.py",
+        "tests/conftest.py",
+        "tests/CONFTEST.py",
+        "pytest.ini",
+        "tox.ini",
+        "setup.cfg",
+        "pyproject.toml",
+        "ruff.toml",
+        ".ruff.toml",
+        "sitecustomize.py",
+        "usercustomize.py",
+        "pytest.py",
+        "ruff.py",
+        "hooks/evil.pth",
+        "evil.PTH",
+    ],
+)
+def test_editing_tools_refuse_verification_config_and_import_hooks(
+    tmp_path: Path, path: str
+) -> None:
+    context = _context(tmp_path)
+    target = tmp_path / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    with pytest.raises(ToolExecutionError, match="protected file"):
+        create_file(context, CreateFileInput(path=path, content="x = 1\n"))
+    assert not target.exists()
+
+    target.write_bytes(b"x = 1\n")
+    with pytest.raises(ToolExecutionError, match="protected file"):
+        replace_text(
+            context,
+            ReplaceTextInput(
+                path=path, old_text="x = 1", new_text="x = 2", expected_sha256=_hash(b"x = 1\n")
+            ),
+        )
+    assert target.read_bytes() == b"x = 1\n"
+
+
+def test_protected_names_do_not_block_ordinary_lookalikes(tmp_path: Path) -> None:
+    context = _context(tmp_path)
+    for path in ("conftest_helpers.py", "my_pyproject.toml.md", "path_utils.py"):
+        create_file(context, CreateFileInput(path=path, content="x = 1\n"))
+        assert (tmp_path / path).is_file()

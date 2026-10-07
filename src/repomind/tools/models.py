@@ -1,6 +1,6 @@
 """Pydantic inputs, outputs, and hard limits for RepoMind tools."""
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -19,12 +19,34 @@ DEFAULT_MAX_TEST_FAILURES = 10
 DEFAULT_MAX_VERIFICATION_PATHS = 32
 DEFAULT_MAX_INDEXED_RESULTS = 5
 MAX_INDEXED_RESULTS = 10
+DEFAULT_MAX_STATUS_ENTRIES = 500
+MAX_SEARCH_LINE_CHARS = 500
+GIT_METADATA_DIRECTORY = ".git"
+
+
+def _is_git_metadata_path(path: Path) -> bool:
+    """Return whether any path component names Git metadata on any platform.
+
+    Git metadata is never repository content: writing ``.git/config`` can make
+    later Git inspection execute arbitrary commands (for example through
+    ``core.fsmonitor``), and such edits are invisible to ``git status``.
+    Trailing dots and spaces are ignored because Windows strips them.
+    """
+
+    raw_path = str(path)
+    parts = (*PurePosixPath(raw_path).parts, *PureWindowsPath(raw_path).parts)
+    return any(
+        part.rstrip(" .").casefold() == GIT_METADATA_DIRECTORY for part in parts
+    )
 
 
 def _validate_tool_path(path: Path, *, allow_root: bool) -> Path:
     if allow_root and path == Path("."):
         return path
-    return validate_repository_relative_path(path)
+    validated = validate_repository_relative_path(path)
+    if _is_git_metadata_path(validated):
+        raise ValueError("path must not refer to Git metadata (.git)")
+    return validated
 
 
 def _validate_verification_path(path: Path, *, allow_root: bool) -> Path:
@@ -69,6 +91,11 @@ class ToolConfig(BaseModel):
     )
     max_test_failures: int = Field(
         default=DEFAULT_MAX_TEST_FAILURES,
+        gt=0,
+        strict=True,
+    )
+    max_status_entries: int = Field(
+        default=DEFAULT_MAX_STATUS_ENTRIES,
         gt=0,
         strict=True,
     )
@@ -206,6 +233,7 @@ class VerificationOutput(BaseModel):
     stderr: str
     truncated: bool
     timed_out: bool
+    output_limit_exceeded: bool = False
     duration_seconds: float = Field(ge=0)
 
 
@@ -263,6 +291,7 @@ class SearchCodeMatch(BaseModel):
     path: Path
     line_number: int = Field(ge=1)
     line: str
+    line_truncated: bool = False
 
 
 class SearchCodeOutput(BaseModel):
@@ -294,6 +323,7 @@ class SymbolMatch(BaseModel):
     line_number: int = Field(ge=1)
     line: str
     kind: str | None = None
+    line_truncated: bool = False
 
 
 class FindSymbolOutput(BaseModel):
@@ -315,12 +345,20 @@ class GitStatusOutput(BaseModel):
     branch: str | None
     changed_files: list[GitChangedFile]
     clean: bool
+    truncated: bool = False
 
 
 class GitDiffInput(ToolInput):
     staged: bool = False
     path: Path | None = None
     max_chars: int | None = Field(default=None, gt=0, strict=True)
+    include_untracked: bool = Field(
+        default=False,
+        description=(
+            "Also render untracked, non-ignored files as new-file diffs. "
+            "Ignored when staged is true."
+        ),
+    )
 
     @field_validator("path")
     @classmethod

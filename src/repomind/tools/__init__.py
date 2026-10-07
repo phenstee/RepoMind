@@ -106,7 +106,10 @@ def create_default_tool_registry(
     registry.register(
         ToolDefinition(
             name="git_diff",
-            description="Inspect staged or unstaged Git changes without modifying the repository.",
+            description=(
+                "Inspect staged or unstaged Git changes without modifying the repository; "
+                "set include_untracked to also show new, untracked files."
+            ),
             input_model=GitDiffInput,
             output_model=GitDiffOutput,
             handler=partial(git_diff, context, config=resolved_config),

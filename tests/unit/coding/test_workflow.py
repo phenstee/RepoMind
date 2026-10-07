@@ -866,3 +866,62 @@ def test_verification_start_error_is_distinct_and_blocks_completion(
     assert result.verification.tests_result is None
     assert "startup failure" in result.verification.tests_execution_error
     assert any("could not execute" in blocker for blocker in result.blockers)
+
+
+def test_reviewer_diff_evidence_includes_newly_created_untracked_files(
+    tmp_path: Path,
+) -> None:
+    before = b"def value():\n    return 1\n"
+    _project(tmp_path, source=before, expected=2)
+    llm = _ScriptedLLM(
+        [
+            _tool("create_file", path="helpers.py", content="TWO = 2\n"),
+            _tool(
+                "replace_text",
+                path="app.py",
+                old_text="def value():\n    return 1\n",
+                new_text="from helpers import TWO\n\n\ndef value():\n    return TWO\n",
+                expected_sha256=_hash(before),
+            ),
+            _final("Return two via a helper constant."),
+        ]
+    )
+
+    result = run_coding_task(CodingTask(objective="Return two."), llm, _registry(tmp_path))
+
+    assert result.status is CodingTaskStatus.COMPLETED
+    assert result.final_review.workflow_changed_files == (Path("app.py"), Path("helpers.py"))
+    review_payload = json.loads(llm.review_calls[0]["prompt"])
+    diff = review_payload["repository_diff"]
+    assert "+from helpers import TWO" in diff
+    assert "diff --git a/helpers.py b/helpers.py\nnew file mode 100644\n" in diff
+    assert "+TWO = 2\n" in diff
+
+
+def test_agent_cannot_forge_passing_tests_with_a_conftest_hook(tmp_path: Path) -> None:
+    # A conftest.py that rewrites pytest's exit status would make failing tests
+    # "pass"; the editing tools refuse it, so the completion gate still fails.
+    _project(tmp_path, expected=2)
+    forged = "def pytest_sessionfinish(session, exitstatus):\n    session.exitstatus = 0\n"
+    llm = _ScriptedLLM(
+        [
+            _tool("create_file", path="tests/conftest.py", content=forged),
+            _final("Done; tests pass."),
+        ]
+    )
+
+    result = run_coding_task(
+        CodingTask(objective="Make the tests pass."),
+        llm,
+        _registry(tmp_path),
+        verification_policy=VerificationPolicy(require_ruff=False),
+        workflow_config=CodingWorkflowConfig(max_completion_attempts=1),
+    )
+
+    refused = result.agent_run.steps[0].observation
+    assert refused is not None and not refused.success
+    assert "protected file" in refused.error
+    assert not (tmp_path / "tests" / "conftest.py").exists()
+    assert result.status is CodingTaskStatus.VERIFICATION_FAILED
+    assert result.verification.tests_passed is False
+    assert llm.review_calls == []

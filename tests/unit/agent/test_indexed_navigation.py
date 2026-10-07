@@ -155,13 +155,16 @@ def test_unrelated_read_stays_blocked_until_returned_path_is_read(tmp_path: Path
 
 
 def test_failed_matching_read_does_not_satisfy_grounding(tmp_path: Path) -> None:
+    # The file exists, so a failed read (here an out-of-range line) observed
+    # nothing about it and cannot ground a claim.
+    _write(tmp_path, "src/jobs/store.py")
     retriever = _Retriever({"jobs": [_result("src/jobs/store.py")]})
 
     run, _ = _indexed_run(
         tmp_path,
         [
             _tool("indexed_code_search", query="jobs"),
-            _tool("read_file", path="src/jobs/store.py"),
+            _tool("read_file", path="src/jobs/store.py", start_line=50),
             _final("unsupported"),
         ],
         retriever,
@@ -171,6 +174,50 @@ def test_failed_matching_read_does_not_satisfy_grounding(tmp_path: Path) -> None
     assert run.steps[1].observation.success is False
     assert run.status is AgentRunStatus.MAX_ITERATIONS
     assert run.steps[2].workflow_feedback is not None
+
+
+def test_read_of_deleted_indexed_path_resolves_that_stale_hint(tmp_path: Path) -> None:
+    # Every indexed hit names a file the working tree no longer has; read_file
+    # proving it is gone must not block the final answer until max_iterations.
+    retriever = _Retriever({"jobs": [_result("src/jobs/store.py")]})
+
+    run, _ = _indexed_run(
+        tmp_path,
+        [
+            _tool("indexed_code_search", query="jobs"),
+            _tool("read_file", path="src/jobs/store.py"),
+            _final("the indexed file was deleted"),
+        ],
+        retriever,
+    )
+
+    assert run.steps[1].observation is not None
+    assert run.steps[1].observation.success is False
+    assert run.status is AgentRunStatus.COMPLETED
+    assert run.final_answer == "the indexed file was deleted"
+
+
+def test_deleted_indexed_path_only_clears_itself(tmp_path: Path) -> None:
+    _write(tmp_path, "src/live.py")
+    retriever = _Retriever(
+        {"jobs": [_result("src/deleted.py"), _result("src/live.py")]}
+    )
+
+    run, _ = _indexed_run(
+        tmp_path,
+        [
+            _tool("indexed_code_search", query="jobs"),
+            _tool("read_file", path="src/deleted.py"),
+            _final("premature"),
+            _tool("read_file", path="src/live.py"),
+            _final("grounded"),
+        ],
+        retriever,
+    )
+
+    assert run.steps[2].workflow_feedback is not None
+    assert run.status is AgentRunStatus.COMPLETED
+    assert run.final_answer == "grounded"
 
 
 def test_empty_indexed_result_does_not_activate_gate(tmp_path: Path) -> None:

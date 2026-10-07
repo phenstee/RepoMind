@@ -4,8 +4,10 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
+import openai
 import pytest
 from pydantic import BaseModel
 
@@ -17,7 +19,8 @@ from repomind.agent import (
     AgentRunStatus,
     run_read_only_agent,
 )
-from repomind.llm import LLMError
+from repomind.config import Settings
+from repomind.llm import LLMError, OpenAILLMClient
 from repomind.tools import ToolContext, create_default_tool_registry
 
 
@@ -442,3 +445,20 @@ def test_default_agent_registry_is_strictly_read_only(tmp_path: Path) -> None:
         "search_code",
     ]
     assert not {"write_file", "apply_patch", "run_tests", "shell", "run_command"} & set(names)
+
+
+def test_openai_finish_reason_errors_become_bounded_agent_errors(tmp_path: Path) -> None:
+    class _LengthLimitedParse:
+        def parse(self, **kwargs: object) -> None:
+            raise openai.LengthFinishReasonError(completion=SimpleNamespace(usage=None))
+
+    sdk = SimpleNamespace(
+        beta=SimpleNamespace(chat=SimpleNamespace(completions=_LengthLimitedParse()))
+    )
+    client = OpenAILLMClient(
+        Settings(_env_file=None, openai_api_key="sk-test", llm_max_retries=0), client=sdk
+    )
+
+    with pytest.raises(AgentError, match="Structured agent decision failed") as raised:
+        run_read_only_agent("question", client, _registry(tmp_path))
+    assert isinstance(raised.value.__cause__, LLMError)

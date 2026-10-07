@@ -171,3 +171,55 @@ def test_tools_reject_simulated_junction_component(tmp_path: Path, monkeypatch) 
 
     with pytest.raises(ToolExecutionError, match="Unsafe repository path"):
         read_file(context, ReadFileInput(path="junction/escaped.py"))
+
+
+@pytest.mark.parametrize(
+    "path",
+    [".git/config", ".GIT/config", "sub/.git/config", ".git", ".git./config"],
+)
+def test_read_file_rejects_git_metadata_paths(tmp_path: Path, path: str) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+
+    with pytest.raises(ValidationError, match="Git metadata"):
+        ReadFileInput(path=path)
+    # The execution-time boundary holds even for unvalidated model instances.
+    with pytest.raises(ToolExecutionError, match="Git metadata"):
+        read_file(
+            ToolContext(repository_root=tmp_path),
+            ReadFileInput.model_construct(path=Path(path), start_line=None, end_line=None),
+        )
+
+
+def test_list_directory_never_lists_or_enters_git_metadata(tmp_path: Path) -> None:
+    (tmp_path / ".git" / "hooks").mkdir(parents=True)
+    (tmp_path / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text("x = 1\n", encoding="utf-8")
+    context = ToolContext(repository_root=tmp_path)
+
+    flat = list_directory(context, ListDirectoryInput())
+    recursive = list_directory(context, ListDirectoryInput(recursive=True))
+
+    assert [entry.path.as_posix() for entry in flat.entries] == ["app.py", "pkg"]
+    assert [entry.path.as_posix() for entry in recursive.entries] == ["app.py", "pkg"]
+    with pytest.raises(ValidationError, match="Git metadata"):
+        ListDirectoryInput(path=".git")
+
+
+def test_read_file_numbers_lines_like_ast_and_index_citations(tmp_path: Path) -> None:
+    # Form feeds, vertical tabs, and U+2028 are ordinary characters to ast,
+    # editors, and Git; only \r\n, \r, and \n end a line.
+    content = "first = 1\n\x0c\nsecond = ' '\x0b\r\nthird = 3\rfourth = 4\n"
+    (tmp_path / "sample.py").write_bytes(content.encode("utf-8"))
+    context = ToolContext(repository_root=tmp_path)
+
+    whole = read_file(context, ReadFileInput(path="sample.py"))
+    third_line = read_file(context, ReadFileInput(path="sample.py", start_line=3, end_line=3))
+    tail = read_file(context, ReadFileInput(path="sample.py", start_line=4))
+
+    assert whole.total_lines == 5
+    assert whole.content == content
+    assert third_line.content == "second = ' '\x0b\r\n"
+    assert tail.content == "third = 3\rfourth = 4\n"

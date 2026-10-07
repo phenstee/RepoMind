@@ -13,6 +13,7 @@ from repomind.tools import (
     find_symbol,
     search_code,
 )
+from repomind.tools.models import MAX_SEARCH_LINE_CHARS
 
 
 def _write(path: Path, content: str | bytes) -> None:
@@ -127,3 +128,57 @@ def test_find_symbol_scopes_results_and_does_not_fall_back_to_references(tmp_pat
     assert len(find_symbol(context, FindSymbolInput(symbol="Service", path="src")).matches) == 1
     assert find_symbol(context, FindSymbolInput(symbol="Service", path="tests")).matches == []
     assert find_symbol(context, FindSymbolInput(symbol="Missing")).matches == []
+
+
+def test_search_results_bound_long_lines_and_keep_the_match_visible(tmp_path: Path) -> None:
+    minified = "var a='" + "A" * 900_000 + "';var NEEDLE=1;" + "B" * 50_000 + "\n"
+    _write(tmp_path / "min.js", minified)
+    _write(tmp_path / "short.py", "NEEDLE = 2\n")
+    context = ToolContext(repository_root=tmp_path)
+
+    output = search_code(context, SearchCodeInput(query="needle"))
+
+    long_match, short_match = output.matches
+    assert long_match.path == Path("min.js")
+    assert long_match.line_truncated
+    assert len(long_match.line) == MAX_SEARCH_LINE_CHARS
+    assert "NEEDLE" in long_match.line
+    assert short_match.line == "NEEDLE = 2" and not short_match.line_truncated
+    assert len(output.model_dump_json()) < 5_000
+
+
+def test_find_symbol_bounds_long_declaration_lines(tmp_path: Path) -> None:
+    _write(tmp_path / "gen.py", "def generated(" + "x, " * 2_000 + "):\n    pass\n")
+
+    output = find_symbol(ToolContext(repository_root=tmp_path), FindSymbolInput(symbol="generated"))
+
+    (match,) = output.matches
+    assert match.line_truncated
+    assert match.line.startswith("def generated(")
+    assert len(match.line) == MAX_SEARCH_LINE_CHARS
+
+
+def test_search_never_descends_into_git_metadata(tmp_path: Path) -> None:
+    _write(tmp_path / ".git" / "hooks" / "helper.py", "def leaked_symbol():\n    pass\n")
+    _write(tmp_path / "app.py", "x = 1\n")
+    context = ToolContext(repository_root=tmp_path)
+
+    assert search_code(context, SearchCodeInput(query="leaked_symbol")).matches == []
+    assert find_symbol(context, FindSymbolInput(symbol="leaked_symbol")).matches == []
+    with pytest.raises(ValidationError, match="Git metadata"):
+        SearchCodeInput(query="x", path=".git")
+
+
+def test_search_line_numbers_match_newline_based_numbering(tmp_path: Path) -> None:
+    content = "\x0c\nmarker_one = 1\x0c\n#   separator\nmarker_two = 2\r\ndef target():\n"
+    _write(tmp_path / "sample.py", content)
+    context = ToolContext(repository_root=tmp_path)
+
+    matches = search_code(context, SearchCodeInput(query="marker_")).matches
+    (symbol,) = find_symbol(context, FindSymbolInput(symbol="target")).matches
+
+    assert [(match.line_number, match.line) for match in matches] == [
+        (2, "marker_one = 1\x0c"),
+        (4, "marker_two = 2"),
+    ]
+    assert (symbol.line_number, symbol.line) == (5, "def target():")

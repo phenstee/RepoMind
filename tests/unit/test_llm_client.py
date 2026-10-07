@@ -380,3 +380,50 @@ async def test_agenerate_structured_retries_without_blocking_sleep(monkeypatch) 
     assert async_client.beta.chat.completions.parse.await_count == 2
     async_sleep.assert_awaited_once_with(1.0)
     blocking_sleep.assert_not_called()
+
+
+def _length_error() -> openai.LengthFinishReasonError:
+    return openai.LengthFinishReasonError(completion=SimpleNamespace(usage=None))
+
+
+@pytest.mark.parametrize(
+    "error_factory",
+    [_length_error, openai.ContentFilterFinishReasonError],
+)
+def test_sync_methods_wrap_non_api_openai_errors(error_factory) -> None:
+    # Finish-reason failures subclass OpenAIError, not APIError, and must not
+    # escape as raw SDK exceptions into agent or workflow code.
+    beta_client = FakeBetaClient(None)
+    beta_client.beta.chat.completions.parse = MagicMock(side_effect=error_factory())
+    text_client = FakeClient()
+    text_client.chat.completions.create = MagicMock(side_effect=error_factory())
+    structured = OpenAILLMClient(_settings(llm_max_retries=0), client=beta_client)
+    text = OpenAILLMClient(_settings(llm_max_retries=0), client=text_client)
+
+    with pytest.raises(LLMError, match="OpenAI client error") as structured_error:
+        structured.generate_structured("Classify the text.", Sentiment)
+    with pytest.raises(LLMError, match="OpenAI client error") as text_error:
+        text.generate("Hello")
+
+    assert isinstance(structured_error.value.__cause__, openai.OpenAIError)
+    assert isinstance(text_error.value.__cause__, openai.OpenAIError)
+    assert beta_client.beta.chat.completions.parse.call_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error_factory",
+    [_length_error, openai.ContentFilterFinishReasonError],
+)
+async def test_async_methods_wrap_non_api_openai_errors(error_factory) -> None:
+    beta_client = FakeAsyncBetaClient(None)
+    beta_client.beta.chat.completions.parse = AsyncMock(side_effect=error_factory())
+    text_client = FakeAsyncClient()
+    text_client.chat.completions.create = AsyncMock(side_effect=error_factory())
+    structured = OpenAILLMClient(_settings(llm_max_retries=0), async_client=beta_client)
+    text = OpenAILLMClient(_settings(llm_max_retries=0), async_client=text_client)
+
+    with pytest.raises(LLMError, match="OpenAI client error"):
+        await structured.agenerate_structured("Classify the text.", Sentiment)
+    with pytest.raises(LLMError, match="OpenAI client error"):
+        await text.agenerate("Hello")

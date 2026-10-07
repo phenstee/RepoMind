@@ -23,9 +23,49 @@ from repomind.tools.models import (
 )
 from repomind.tools.registry import ToolExecutionError
 
+# Files that configure, or are imported by, the fixed pytest/Ruff verifiers.
+# Letting the editing agent author them would let it change what "verification
+# passed" means (for example a conftest.py that forces pytest's exit status to
+# zero) instead of fixing the code under test.
+_PROTECTED_FILE_NAMES = frozenset(
+    {
+        "conftest.py",
+        "pytest.ini",
+        ".pytest.ini",
+        "pytest.toml",
+        ".pytest.toml",
+        "tox.ini",
+        "setup.cfg",
+        "pyproject.toml",
+        "ruff.toml",
+        ".ruff.toml",
+        "sitecustomize.py",
+        "usercustomize.py",
+        "pytest.py",
+        "ruff.py",
+    }
+)
+_PROTECTED_FILE_SUFFIXES = (".pth",)
+
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _reject_protected_path(path: Path) -> None:
+    """Refuse mutations of verification configuration and import-hook files."""
+
+    # Windows ignores trailing dots and spaces, so "conftest.py." is conftest.py.
+    name = path.name.rstrip(" .").casefold()
+    if name in _PROTECTED_FILE_NAMES or name.endswith(_PROTECTED_FILE_SUFFIXES):
+        raise ToolExecutionError(
+            f"Refusing to modify protected file: {path.as_posix()}. Verification "
+            "configuration and import-hook files (conftest.py, pytest.ini, tox.ini, "
+            "setup.cfg, pyproject.toml, ruff.toml, sitecustomize.py, "
+            "usercustomize.py, pytest.py, ruff.py, *.pth) control how the fixed "
+            "pytest and Ruff checks run, so they cannot be created or edited; "
+            "change the code under test instead."
+        )
 
 
 def _write_temporary_file(parent: Path, name: str, data: bytes) -> Path:
@@ -82,6 +122,7 @@ def create_file(
     """Create one new UTF-8 file without overwriting an existing path."""
 
     resolved_config = config or ToolConfig()
+    _reject_protected_path(arguments.path)
     target = _resolve_workspace_path(context, arguments.path, allow_root=False)
     if not target.parent.exists() or not target.parent.is_dir():
         raise ToolExecutionError(
@@ -130,6 +171,7 @@ def replace_text(
             "Replacement text exceeds the configured character limit"
         )
 
+    _reject_protected_path(arguments.path)
     target = _resolve_workspace_path(context, arguments.path, allow_root=False)
     if not target.exists():
         raise ToolExecutionError(f"File does not exist: {arguments.path.as_posix()}")

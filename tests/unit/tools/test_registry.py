@@ -97,3 +97,33 @@ def test_default_registry_has_six_tools_and_rejects_undeclared_arguments(tmp_pat
     ]
     with pytest.raises(ToolValidationError):
         registry.execute("git_status", {"command": "status; remove-everything"})
+
+
+def test_validation_error_reports_bounded_locations_without_input_values(tmp_path) -> None:
+    registry = create_default_tool_registry(ToolContext(repository_root=tmp_path))
+    secret_value = "sk-should-not-be-echoed"
+
+    with pytest.raises(ToolValidationError) as raised:
+        registry.execute(
+            "read_file",
+            {"path": "../escape.py", "x" * 2_000: secret_value},
+        )
+
+    message = str(raised.value)
+    prefix = "Invalid arguments for tool read_file: "
+    assert message.startswith(prefix + "path: Value error, path must be a safe")
+    assert "Extra inputs are not permitted" not in message  # cut by the bound
+    assert secret_value not in message and "../escape.py" not in message
+    assert len(message) == len(prefix) + 500
+    assert message.endswith("...")
+
+
+def test_validation_error_names_missing_fields() -> None:
+    registry = ToolRegistry()
+    registry.register(_tool("double"))
+
+    with pytest.raises(ToolValidationError) as raised:
+        registry.execute("double", {"unexpected": True})
+
+    message = str(raised.value)
+    assert "value: Field required" in message
