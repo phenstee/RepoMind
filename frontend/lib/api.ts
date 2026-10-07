@@ -42,10 +42,21 @@ function errorFromPayload(payload: unknown, status: number | null = null): ApiEr
   return new ApiError("request_failed", "The request could not be completed.", status);
 }
 
+/**
+ * State-changing requests carry a custom header so browsers must preflight them; the API
+ * rejects POSTs without it, which blocks cross-site "simple request" CSRF against localhost.
+ */
+const CLIENT_HEADER = { "X-RepoMind-Client": "web" };
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
   const response = await fetch(`${baseUrl}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
+    headers: {
+      "Content-Type": "application/json",
+      ...(method === "GET" || method === "HEAD" ? {} : CLIENT_HEADER),
+      ...init?.headers,
+    },
   });
   const payload: unknown = await response.json().catch(() => null);
   if (!response.ok) {
