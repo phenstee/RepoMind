@@ -2,7 +2,10 @@
 
 import { useState } from "react";
 
+import { humanize } from "../lib/format";
 import type { CodingResponse } from "../lib/types";
+import { Icon, Spinner } from "./icons";
+import { RichText } from "./rich-text";
 
 interface CodingInput {
   objective: string;
@@ -16,9 +19,11 @@ function splitPaths(value: string): string[] {
 
 export function CodePanel({
   disabled,
+  running,
   onSubmit,
 }: {
   disabled: boolean;
+  running?: boolean;
   onSubmit: (request: CodingInput) => Promise<CodingResponse | undefined>;
 }) {
   const [objective, setObjective] = useState("");
@@ -28,9 +33,11 @@ export function CodePanel({
   const [confirmed, setConfirmed] = useState(false);
   const [result, setResult] = useState<CodingResponse | null>(null);
 
+  const pathsValid = splitPaths(testPaths).length > 0 && splitPaths(ruffPaths).length > 0;
+
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!confirmed) return;
+    if (!confirmed || !pathsValid || disabled) return;
     const response = await onSubmit({
       objective: objective.trim(),
       acceptance_criteria: criteria.map((item) => item.trim()).filter(Boolean),
@@ -44,35 +51,60 @@ export function CodePanel({
       <header>
         <p className="eyebrow danger">Controlled mutation</p>
         <h2>Code</h2>
-        <p className="warning">This operation may modify files in the selected repository and run configured verification checks.</p>
+        <p>Plans, edits, verifies with pytest and Ruff, then passes an independent review before completing.</p>
       </header>
+      <p className="callout warning">
+        <Icon name="alert" />
+        This operation may modify files in the selected repository and run configured verification checks.
+      </p>
       <form className="stack" onSubmit={(event) => void submit(event)}>
         <label>
           Objective
-          <textarea value={objective} onChange={(event) => setObjective(event.target.value)} required maxLength={10_000} />
+          <textarea
+            value={objective}
+            onChange={(event) => setObjective(event.target.value)}
+            required
+            maxLength={10_000}
+            placeholder="Reject partial refunds that exceed the remaining refundable balance."
+          />
         </label>
-        <fieldset className="criteria">
+        <fieldset>
           <legend>Acceptance criteria</legend>
-          {criteria.map((criterion, index) => (
-            <div className="criterion" key={index}>
-              <input
-                aria-label={`Acceptance criterion ${index + 1}`}
-                value={criterion}
-                onChange={(event) => setCriteria((items) => items.map((item, i) => i === index ? event.target.value : item))}
-                maxLength={2000}
-              />
+          <div className="criteriaList">
+            {criteria.map((criterion, index) => (
+              <div className="criterion" key={index}>
+                <span aria-hidden="true">{index + 1}</span>
+                <input
+                  aria-label={`Acceptance criterion ${index + 1}`}
+                  value={criterion}
+                  onChange={(event) => setCriteria((items) => items.map((item, i) => i === index ? event.target.value : item))}
+                  maxLength={2000}
+                  placeholder="Describe one observable outcome"
+                />
+                <button
+                  type="button"
+                  className="btn btnGhost btnIcon btnSm"
+                  aria-label={`Remove criterion ${index + 1}`}
+                  title="Remove"
+                  disabled={criteria.length === 1}
+                  onClick={() => setCriteria((items) => items.filter((_, i) => i !== index))}
+                >
+                  <Icon name="trash" size={14} />
+                </button>
+              </div>
+            ))}
+            <div>
               <button
                 type="button"
-                disabled={criteria.length === 1}
-                onClick={() => setCriteria((items) => items.filter((_, i) => i !== index))}
+                className="btn btnSecondary btnSm"
+                onClick={() => setCriteria((items) => [...items, ""])}
+                disabled={criteria.length >= 50}
               >
-                Remove
+                <Icon name="plus" size={14} />
+                Add criterion
               </button>
             </div>
-          ))}
-          <button type="button" onClick={() => setCriteria((items) => [...items, ""])} disabled={criteria.length >= 50}>
-            Add criterion
-          </button>
+          </div>
         </fieldset>
         <div className="verificationGrid">
           <label>
@@ -84,11 +116,22 @@ export function CodePanel({
             <textarea value={ruffPaths} onChange={(event) => setRuffPaths(event.target.value)} required />
           </label>
         </div>
+        {!pathsValid ? (
+          <p className="callout danger">
+            <Icon name="alert" />
+            Enter at least one Pytest path and one Ruff path.
+          </p>
+        ) : null}
         <label className="confirmation">
           <input type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
           I understand this controlled workflow may modify repository files.
         </label>
-        <button type="submit" disabled={disabled || !confirmed}>Start controlled coding run</button>
+        <div>
+          <button type="submit" className="btn btnDanger" disabled={disabled || !confirmed || !pathsValid}>
+            {running ? <Spinner /> : <Icon name="play" size={14} />}
+            {running ? "Coding run in progress…" : "Start controlled coding run"}
+          </button>
+        </div>
       </form>
       {result ? <CodingResult result={result} /> : null}
     </section>
@@ -97,17 +140,28 @@ export function CodePanel({
 
 export function CodingResult({ result }: { result: CodingResponse }) {
   return (
-    <article className="answer">
-      <h3>{result.status}</h3>
-      <p>{result.final_answer ?? "No final coding answer was returned."}</p>
-      <p>Revision {result.workspace_revision} · {result.completion_attempts} completion attempts</p>
-      <p>Tests: {verificationLabel(result.tests)} · Ruff: {verificationLabel(result.ruff)}</p>
+    <article className="answer" aria-live="polite">
+      <div className="answerHead">
+        <h3>Coding run</h3>
+        <span className={`badge ${result.status === "completed" ? "completed" : "failed"}`}>
+          {humanize(result.status)}
+        </span>
+      </div>
+      <RichText text={result.final_answer ?? "No final coding answer was returned."} />
+      <div className="chipRow">
+        <VerificationChip label="Tests" summary={result.tests} />
+        <VerificationChip label="Ruff" summary={result.ruff} />
+        <span className="chip">Revision {result.workspace_revision}</span>
+        <span className="chip">
+          {result.completion_attempts} completion attempt{result.completion_attempts === 1 ? "" : "s"}
+        </span>
+      </div>
       {result.plan ? (
-        <section aria-label="Coding plan">
+        <section className="answerSection" aria-label="Coding plan">
           <h4>Plan</h4>
-          <p>{result.plan.task_summary}</p>
-          <ol>
-            {result.plan.steps.map((step) => <li key={step.step_id}>{step.action}</li>)}
+          <p className="muted">{result.plan.task_summary}</p>
+          <ol className="stepList">
+            {result.plan.steps.map((step) => <li key={step.step_id}><span>{step.action}</span></li>)}
           </ol>
           {result.plan.acceptance_coverage.length > 0 ? (
             <ul>
@@ -123,9 +177,13 @@ export function CodingResult({ result }: { result: CodingResponse }) {
         </section>
       ) : null}
       {result.review ? (
-        <section aria-label="Coding review">
-          <h4>Reviewer: {result.review.verdict === "approve" ? "Approved" : "Changes required"}</h4>
-          <p>{result.review_attempts} review attempt{result.review_attempts === 1 ? "" : "s"}</p>
+        <section className="answerSection" aria-label="Coding review">
+          <div className="answerHead">
+            <h4>Reviewer: {result.review.verdict === "approve" ? "Approved" : "Changes required"}</h4>
+            <span className={`badge ${result.review.verdict === "approve" ? "completed" : "blocked"}`}>
+              {result.review_attempts} review attempt{result.review_attempts === 1 ? "" : "s"}
+            </span>
+          </div>
           {result.review.findings.length > 0 ? (
             <ul>{result.review.findings.map((finding) => <li key={finding}>{finding}</li>)}</ul>
           ) : null}
@@ -134,9 +192,32 @@ export function CodingResult({ result }: { result: CodingResponse }) {
           ) : null}
         </section>
       ) : null}
-      {result.changed_files.length > 0 ? <ul className="citations">{result.changed_files.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : null}
-      {result.trace_run_id ? <small>Trace {result.trace_run_id}</small> : null}
+      {result.changed_files.length > 0 ? (
+        <section className="answerSection" aria-label="Changed files">
+          <h4>Changed files</h4>
+          <ul className="chipRow citations">
+            {result.changed_files.map((path) => (
+              <li key={path} className="chip">
+                <Icon name="file" />
+                <code>{path}</code>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+      {result.trace_run_id ? <small className="traceId">Trace {result.trace_run_id}</small> : null}
     </article>
+  );
+}
+
+function VerificationChip({ label, summary }: { label: string; summary: CodingResponse["tests"] }) {
+  const state = verificationLabel(summary);
+  const tone = state === "passed" ? "completed" : state === "not run" ? "" : "failed";
+  return (
+    <span className={`badge ${tone}`}>
+      <Icon name={state === "passed" ? "check" : state === "not run" ? "clock" : "x"} />
+      {label}: {state}
+    </span>
   );
 }
 

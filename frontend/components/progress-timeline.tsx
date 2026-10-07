@@ -96,39 +96,54 @@ function eventMetadata(data: Record<string, JsonValue>): string[] {
     "criteria_satisfied",
     "criteria_unsatisfied",
     "finding_count",
+    "duration_ms",
   ];
   return visible.flatMap((key) => {
     const value = data[key];
     const rendered = value === undefined ? null : displayValue(value);
-    return rendered === null ? [] : [`${key.replaceAll("_", " ")}: ${rendered}`];
+    if (rendered === null) return [];
+    if (key === "duration_ms" && typeof value === "number") return [`${Math.round(value)} ms`];
+    return [`${key.replaceAll("_", " ")}: ${rendered}`];
   });
 }
 
 export function ProgressTimeline({
   events,
   emptyLabel = "Progress events will appear here.",
+  live = false,
 }: {
   events: ProgressEvent[];
   emptyLabel?: string;
+  live?: boolean;
 }) {
   if (events.length === 0) {
-    return <p className="muted">{emptyLabel}</p>;
+    return <p className="hint">{emptyLabel}</p>;
   }
   return (
-    <ol className="timeline" aria-label="Progress timeline">
-      {events.map((entry) => (
-        <li className={`timelineItem ${stateFor(entry.event)}`} key={`${entry.run_id}-${entry.sequence}`}>
-          <div className="timelineHead">
-            <strong>{labels[entry.event] ?? entry.event}</strong>
-            <time dateTime={entry.timestamp}>{new Date(entry.timestamp).toLocaleTimeString()}</time>
-          </div>
-          {eventMetadata(entry.data).map((item) => (
-            <span className="metadata" key={item}>
-              {item}
-            </span>
-          ))}
-        </li>
-      ))}
+    <ol className={live ? "timeline live" : "timeline"} aria-label="Progress timeline">
+      {events.map((entry) => {
+        const metadata = eventMetadata(entry.data);
+        return (
+          <li className={`timelineItem ${stateFor(entry.event)}`} key={`${entry.run_id}-${entry.sequence}`}>
+            <span className="timelineDot" aria-hidden="true" />
+            <div className="timelineContent">
+              <div className="timelineHead">
+                <strong>{labels[entry.event] ?? entry.event}</strong>
+                <time dateTime={entry.timestamp}>{new Date(entry.timestamp).toLocaleTimeString()}</time>
+              </div>
+              {metadata.length > 0 ? (
+                <div className="metadataRow">
+                  {metadata.map((item) => (
+                    <span className="metadata" key={item}>
+                      {item}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </li>
+        );
+      })}
     </ol>
   );
 }
