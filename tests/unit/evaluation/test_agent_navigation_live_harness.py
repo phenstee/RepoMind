@@ -5,6 +5,8 @@ fake LLM exactly like ``test_agent_navigation_live.py``.
 """
 
 import json
+import shutil
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -17,9 +19,11 @@ from repomind.config import Settings
 from repomind.evaluation import (
     HARNESS_SCHEMA_VERSION,
     EvaluationMode,
+    LiveAgentNavigationHarnessResult,
     LiveEvaluationAuthorizationError,
     build_live_navigation_harness_result,
     evaluate_agent_navigation,
+    git_working_tree_dirty,
     merge_agent_navigation_reports,
     require_live_authorization,
 )
@@ -955,3 +959,88 @@ def test_merge_still_rejects_reports_from_different_benchmark_versions() -> None
 
     with pytest.raises(ValueError, match="benchmark_version"):
         merge_agent_navigation_reports([_bare_live_report("case-a"), stale])
+
+
+_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _git(root: Path, *arguments: str) -> None:
+    subprocess.run(["git", *arguments], cwd=root, check=True, capture_output=True, text=True)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is unavailable")
+def test_git_working_tree_dirty_reports_uncommitted_and_untracked_changes(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-b", "main")
+    _git(repository, "config", "user.email", "evaluation@example.invalid")
+    _git(repository, "config", "user.name", "RepoMind Evaluation")
+    (repository / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-m", "baseline")
+
+    assert git_working_tree_dirty(repository) is False
+
+    (repository / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    assert git_working_tree_dirty(repository) is True
+
+    _git(repository, "checkout", "--", "app.py")
+    (repository / "untracked.py").write_text("", encoding="utf-8")
+    assert git_working_tree_dirty(repository) is True
+
+
+def test_git_working_tree_dirty_is_unknown_when_git_cannot_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def _missing_git(*args: object, **kwargs: object) -> object:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(subprocess, "run", _missing_git)
+
+    assert git_working_tree_dirty(tmp_path) is None
+
+
+def test_harness_result_records_git_dirty_alongside_the_commit_sha(tmp_path: Path) -> None:
+    report, run_trace = _live_report(tmp_path)
+
+    result = build_live_navigation_harness_result(
+        benchmark_version=VERSION,
+        model="fake-model",
+        git_commit_sha="deadbeef",
+        git_dirty=True,
+        generated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        max_iterations=8,
+        runs=[(report, [run_trace], {})],
+    )
+    payload = result.model_dump(mode="json")
+
+    assert payload["git_commit_sha"] == "deadbeef"
+    assert payload["git_dirty"] is True
+
+
+def test_harness_result_git_dirty_defaults_to_unknown(tmp_path: Path) -> None:
+    report, run_trace = _live_report(tmp_path)
+
+    result = build_live_navigation_harness_result(
+        benchmark_version=VERSION,
+        model="fake-model",
+        git_commit_sha="deadbeef",
+        generated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        max_iterations=8,
+        runs=[(report, [run_trace], {})],
+    )
+
+    assert result.git_dirty is None
+
+
+def test_committed_live_artifact_without_git_dirty_still_loads() -> None:
+    artifact = _REPOSITORY_ROOT / "benchmarks" / "results" / "repo-agent-eval-v3-live.json"
+    raw = artifact.read_text(encoding="utf-8")
+    assert "git_dirty" not in json.loads(raw)
+
+    result = LiveAgentNavigationHarnessResult.model_validate_json(raw)
+
+    assert result.git_dirty is None
+    assert result.git_commit_sha is not None

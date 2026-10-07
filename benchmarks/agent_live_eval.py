@@ -38,19 +38,24 @@ configured OPENAI_API_KEY and the explicit --confirm-live flag; this script
 never runs in CI, and importing it (or calling --help) never makes a
 network request.
 
+``--output`` is validated (missing parent directories are created and the
+location must be writable) before any live request, so a bad path cannot
+discard a paid run. Never point it at a committed evidence artifact.
+
 Example:
     uv run python -m benchmarks.agent_live_eval --retrieval-mode both \\
-        --confirm-live --output results/agent_live_eval.json
+        --confirm-live --output benchmarks/results/agent_live_eval.json
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import TYPE_CHECKING
 
 from repomind.config import get_settings
@@ -62,6 +67,7 @@ from repomind.evaluation import (
     build_live_navigation_harness_result,
     evaluate_agent_navigation,
     git_commit_sha,
+    git_working_tree_dirty,
     merge_agent_navigation_reports,
     require_live_authorization,
 )
@@ -235,6 +241,23 @@ def _print_console_summary(result: LiveAgentNavigationHarnessResult) -> None:
         print()
 
 
+def _prepare_output_path(path: Path) -> None:
+    """Fail before any paid request if the JSON result could not be written.
+
+    Creates missing parent directories, then proves the directory accepts a
+    new file and an existing target is writable. Nothing is written to
+    ``path`` itself until the run has finished.
+    """
+
+    if path.is_dir():
+        raise IsADirectoryError(f"--output {path} is a directory, not a file path")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", suffix=".probe"):
+        pass
+    if path.exists() and not os.access(path, os.W_OK):
+        raise PermissionError(f"--output {path} exists and is not writable")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m benchmarks.agent_live_eval",
@@ -272,7 +295,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         metavar="PATH",
-        help="Write the JSON harness result to this path.",
+        help=(
+            "Write the JSON harness result to this path (e.g. "
+            "benchmarks/results/agent_live_eval.json). Parent directories are "
+            "created and writability is checked before any live request."
+        ),
     )
     parser.add_argument(
         "--confirm-live",
@@ -302,11 +329,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
+    # Validate the destination before any paid work: results are only written
+    # after every live request has completed, so a bad path found then would
+    # throw the paid run away.
+    if args.output is not None:
+        try:
+            _prepare_output_path(args.output)
+        except OSError as exc:
+            print(f"error: cannot write --output {args.output}: {exc}", file=sys.stderr)
+            return 2
+
     # Only imported/constructed once authorization has passed.
     from repomind.llm import OpenAILLMClient
 
     llm = OpenAILLMClient(settings)
     sha = git_commit_sha(_REPOSITORY_ROOT)
+    dirty = git_working_tree_dirty(_REPOSITORY_ROOT)
     modes = ["filesystem", "indexed"] if args.retrieval_mode == "both" else [args.retrieval_mode]
 
     with TemporaryDirectory(prefix="repomind-agent-live-eval-") as temporary:
@@ -328,6 +366,7 @@ def main(argv: list[str] | None = None) -> int:
         benchmark_version=VERSION,
         model=llm.model,
         git_commit_sha=sha,
+        git_dirty=dirty,
         generated_at=datetime.now(UTC),
         max_iterations=args.max_iterations,
         runs=mode_runs,

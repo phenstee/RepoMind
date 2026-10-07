@@ -13,6 +13,7 @@ from repomind.evaluation.agent_navigation_live import (
     LiveEvaluationAuthorizationError,
     build_live_navigation_harness_result,
     git_commit_sha,
+    git_working_tree_dirty,
     require_live_authorization,
 )
 from repomind.evaluation.coding import (
@@ -116,6 +117,7 @@ __all__ = [
     "format_rag_comparison",
     "format_retrieval_comparison",
     "git_commit_sha",
+    "git_working_tree_dirty",
     "mean_reciprocal_rank",
     "merge_agent_navigation_reports",
     "ndcg_at_k",

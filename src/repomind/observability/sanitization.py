@@ -154,16 +154,43 @@ _KEYS = frozenset(
         "result_count",
     ]
 )
+# Each alternative is anchored so it cannot fire in the middle of an ordinary
+# identifier or path (``coding-task-01``, ``src/tasks/task-runner.py``,
+# ``risk-model``). Provider prefixes are case-sensitive; only header/keyword
+# shapes are matched case-insensitively. Only the ``key`` group of a
+# ``name=value`` assignment survives redaction.
 _SECRET = re.compile(
-    r"sk-[\w-]+|(?:postgres(?:ql)?(?:\+\w+)?://)[^\s]+|"
-    r"(?:authorization\s*:\s*)?bearer\s+[^\s]+|"
-    r"OPENAI_API_KEY(?:\s*[:=]\s*[^\s,;]+)?",
-    re.IGNORECASE,
+    r"OPENAI_API_KEY(?:\s*[:=]\s*[^\s,;]+)?"
+    r"|(?i:postgres(?:ql)?(?:\+\w+)?://)\S+"
+    r"|(?<![A-Za-z0-9])sk-(?:proj-|ant-)?[A-Za-z0-9_-]{8,}"
+    r"|(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}"
+    r"|(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9])"
+    r"|(?<![A-Za-z0-9])xox[abposr]-[A-Za-z0-9-]{10,}"
+    r"|(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+"
+    r"|(?i:\b(?:authorization\s*:\s*)?bearer\s+)\S+"
+    r"|(?i:\bauthorization\s*:\s*basic\s+)\S+"
+    # A bare ``Basic <credentials>`` must look like real base64 (length a
+    # multiple of four, at least one digit/``+``/``/``/padding) so prose such
+    # as "basic configuration" is left alone.
+    r"|(?i:\bbasic\s+)(?=[A-Za-z0-9+/]*[0-9+/=])"
+    r"(?:[A-Za-z0-9+/]{4}){2,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![A-Za-z0-9+/=])"
+    # Userinfo of ``scheme://user:password@host`` in any URL scheme.
+    # Neither part may contain the other's delimiter, so the match is linear-time.
+    r"|(?<=://)[^\s/?#@:]*:[^\s/?#@]*(?=@)"
+    # The look-behind (not ``\b``) only lets a match start at the head of an
+    # identifier run, which keeps long ``a-a-a-...`` inputs linear-time.
+    r"|(?P<key>(?i:(?<![A-Za-z0-9_-])(?:[A-Za-z0-9]+[_-])*(?:api[_-]?key|token|secret|password|passwd))"
+    r"[\"']?\s*[:=]\s*)\S+"
 )
 
 
+def _replace_secret(match: re.Match[str]) -> str:
+    return (match.group("key") or "") + "[REDACTED]"
+
+
 def redact(value: str) -> str:
-    return re.sub(r"[\x00-\x1f\x7f]", " ", _SECRET.sub("[REDACTED]", value))[:256]
+    return re.sub(r"[\x00-\x1f\x7f]", " ", _SECRET.sub(_replace_secret, value))[:256]
 
 
 def _value(value: Any, *, depth: int = 0) -> Any:
