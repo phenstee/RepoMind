@@ -266,6 +266,13 @@ flowchart LR
   never claim the same job. `jobs/broker.py` is documented as "Best-effort
   Redis coordination; durable job truth never lives here" — it only wakes a
   polling worker and fans out progress; losing Redis does not lose job state.
+- **Leases.** A running job holds a lease that a heartbeat renews (retrying
+  transient database errors); every ownership-guarded transition locks the
+  row (`SELECT ... FOR UPDATE`). A job whose lease expires is requeued —
+  except coding jobs, which are failed as interrupted because they may have
+  mutated files — and is failed with `job_attempts_exhausted` after
+  `JOB_MAX_ATTEMPTS` expiries. The worker process survives database/Redis
+  outages with capped backoff and finishes its current job on SIGTERM.
 - **Cooperative cancellation.** `jobs/control.py`'s `CooperativeCancellation`
   is honored only at explicit safe workflow boundaries. No worker thread or
   in-flight call is forcefully terminated.
