@@ -29,6 +29,7 @@ from repomind.evaluation import (
     evaluate_coding_oracle,
     evaluate_coding_suite,
 )
+from repomind.evaluation.coding import _observed_changed_paths
 from repomind.tools import ToolContext, create_editing_tool_registry
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is unavailable")
@@ -490,3 +491,93 @@ def test_file_state_oracles_are_read_only_and_structured(tmp_path: Path) -> None
         "file_not_contains",
     ]
     assert target.read_bytes() == before
+
+
+def test_observed_changed_paths_come_from_git_not_the_workflow(tmp_path: Path) -> None:
+    fixture = _fixture_repository(tmp_path / "template", b"def add(a, b):\n    return a\n")
+    assert _observed_changed_paths(fixture) == ()
+
+    (fixture / "app.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    (fixture / "pkg" / "nested").mkdir(parents=True)
+    (fixture / "pkg" / "nested" / "new.py").write_text("", encoding="utf-8")
+    (fixture / "__pycache__").mkdir()
+    (fixture / "__pycache__" / "app.cpython-313.pyc").write_bytes(b"ignored")
+    _git(fixture, "mv", "tests/test_app.py", "tests/test_renamed.py")
+
+    assert _observed_changed_paths(fixture) == (
+        Path("app.py"),
+        Path("pkg/nested/new.py"),
+        Path("tests/test_app.py"),
+        Path("tests/test_renamed.py"),
+    )
+
+
+class _MisreportingRunner(_ScriptedWorkflowRunner):
+    """Run the real workflow, then tamper with the workspace or the self-report."""
+
+    def __init__(
+        self,
+        *args: Any,
+        extra_file: str | None = None,
+        claim: tuple[Path, ...] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.extra_file = extra_file
+        self.claim = claim
+
+    def __call__(
+        self,
+        task: CodingTask,
+        workspace: Path,
+        verification_policy: VerificationPolicy,
+    ) -> CodingTaskResult:
+        result = super().__call__(task, workspace, verification_policy)
+        if self.extra_file is not None:
+            (workspace / self.extra_file).write_text("unreported\n", encoding="utf-8")
+        if self.claim is not None:
+            result = result.model_copy(update={"changed_files": self.claim})
+        return result
+
+
+def test_unreported_changed_path_still_fails_allowed_paths_oracle(tmp_path: Path) -> None:
+    original = b"def add(a, b):\n    return a - b\n"
+    fixture = _fixture_repository(tmp_path / "template", original)
+    runner = _MisreportingRunner(
+        lambda workspace: _replace_script(original, "return a - b", "return a + b"),
+        extra_file="unreported.txt",
+    )
+
+    report = evaluate_coding_suite(
+        CodingBenchmarkSuite(cases=(_case(fixture, "unreported", contains="a + b"),)),
+        runner,
+    )
+    result = report.case_results[0]
+
+    assert Path("unreported.txt") not in runner.results[0].changed_files
+    assert result.changed_files == (Path("app.py"), Path("unreported.txt"))
+    assert result.oracle_passed is False
+    assert result.false_positive_completion is True
+    assert any("unreported.txt" in failure for failure in result.oracle_failures)
+
+
+def test_claimed_but_unmade_change_does_not_satisfy_required_paths(tmp_path: Path) -> None:
+    original = b"def add(a, b):\n    return a + b\n"
+    fixture = _fixture_repository(tmp_path / "template", original)
+    runner = _MisreportingRunner(
+        lambda workspace: [_final("No edit needed.")],
+        claim=(Path("app.py"),),
+    )
+
+    report = evaluate_coding_suite(
+        CodingBenchmarkSuite(cases=(_case(fixture, "claimed-only", contains="a + b"),)),
+        runner,
+    )
+    result = report.case_results[0]
+
+    assert result.changed_files == ()
+    assert result.oracle_passed is False
+    assert any(
+        check.check == "required_changed_path" and not check.passed
+        for check in result.oracle.checks
+    )

@@ -68,10 +68,14 @@ def _tool_call_counts(steps: Sequence[AgentStep]) -> Counter[str]:
 
 
 def _verified_retrieval_followup(steps: Sequence[AgentStep]) -> bool:
-    """Was the latest relevant indexed result set verified with ``read_file``?
+    """Was the most recent non-empty indexed result set followed by a ``read_file``?
 
-    Vacuously true when no indexed search occurred in this run: there is
-    nothing indexed evidence claimed that needs verification.
+    Cleared by a successful ``read_file`` of *at least one* location surfaced
+    by the most recent indexed search that returned locations; it does not
+    require every surfaced path to be re-read, nor that the answer cite the
+    re-read file. Vacuously true when no indexed search returned locations -
+    including every filesystem-mode run, where the tool does not exist - so
+    the metric is only informative for indexed-mode cases.
     """
 
     pending: set[str] = set()

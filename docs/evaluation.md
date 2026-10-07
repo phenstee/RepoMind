@@ -96,10 +96,17 @@ mode (it tests indexed search returning zero results and the agent falling
 back to filesystem tools), so filesystem mode has five applicable cases and
 indexed mode has six.
 
-**Verified retrieval follow-up = 1.0** means every case that relied on an
-indexed search result read the current file at that path before finalizing
-its answer — the current-source-authority policy held for every case in this
-run (see [`docs/architecture.md`](architecture.md#indexed-navigation-and-current-source-authority)).
+**Verified retrieval follow-up** is a per-case boolean: at least one location
+surfaced by the most recent indexed search that returned results was re-read
+with `read_file` before the final answer. It does not require every surfaced
+path to be re-read, nor that the answer cite the re-read file. It is
+vacuously true when no indexed search returned results — which includes
+every filesystem-mode case, where `indexed_code_search` does not exist — so
+the filesystem row's 1.000 carries no information. In indexed mode, 1.0 means
+every case that received indexed results re-read at least one of those files
+from the current source before finalizing — a minimal check of the
+current-source-authority policy (see [`docs/architecture.md`](architecture.md#indexed-navigation-and-current-source-authority)),
+not proof that every claim was verified.
 
 ### Important nuance — do not over-read this one run
 
@@ -131,6 +138,13 @@ uv run python -m benchmarks.agent_live_eval `
     --confirm-live `
     --output $liveResult
 ```
+
+`--output` is checked before any live request: missing parent directories are
+created and the location must be writable, so a bad path fails immediately
+instead of discarding a paid run. Each result records `git_commit_sha` plus
+`git_dirty` (whether the working tree had uncommitted or untracked changes;
+`null` when unknown). The committed artifact predates `git_dirty`, so it has
+no such field and still loads with it treated as unknown.
 
 The committed `benchmarks/results/repo-agent-eval-v3-live.json` is a frozen
 evidence artifact for one specific reviewed run, tied to commit
@@ -180,9 +194,15 @@ Same two questions at RAG `top_k=1`:
 Four-case scripted coding fixture measures workflow completion (0.750), true
 task success (0.500 — completion **and** a passing hidden oracle),
 false-positive completion (0.250), and recovery rate (1.000), among other
-counters. The coding oracle sees only `CodingTask` and the verification
-policy — never `file_contains`, required changed paths, or other evaluator
-answers — and itself executes no Python, shell, or model.
+counters. The coding runner (the `CodingTaskRunner` under test) sees only
+the visible `CodingTask` and the verification policy — never
+`file_contains`, required/allowed changed paths, or other hidden-oracle
+answers. The hidden oracle then inspects the final copied workspace: it
+checks `file_exists`/`file_not_exists`, `file_contains`/`file_not_contains`,
+and required/allowed changed paths, computing the changed paths itself from
+`git status` of that workspace rather than trusting the workflow's
+self-reported `changed_files`. The oracle executes no fixture code, shell, or
+model; its only subprocess is that fixed-argument, read-only `git status`.
 
 These are `offline_fixture`/`offline_scripted` infrastructure baselines using
 deterministic fakes; they do not measure a real OpenAI embedding, reranking,

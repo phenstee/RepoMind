@@ -5,7 +5,10 @@ CLI harness needs around the actual model call:
 
 * :func:`require_live_authorization` - a hard gate that must pass, with no
   network access attempted, before an OpenAI client is even constructed.
-* :func:`git_commit_sha` - best-effort provenance for reproducibility.
+* :func:`git_commit_sha` / :func:`git_working_tree_dirty` - best-effort
+  provenance for reproducibility: the HEAD commit plus whether the working
+  tree had uncommitted changes, since a dirty tree means HEAD alone does not
+  identify the code that ran.
 * :func:`build_live_navigation_harness_result` - assembles the deterministic,
   secret-free JSON result schema from the same
   :class:`~repomind.evaluation.models.AgentNavigationEvaluationReport` that
@@ -37,6 +40,7 @@ __all__ = [
     "LiveEvaluationAuthorizationError",
     "build_live_navigation_harness_result",
     "git_commit_sha",
+    "git_working_tree_dirty",
     "require_live_authorization",
 ]
 
@@ -92,6 +96,29 @@ def git_commit_sha(repository_root: Path) -> str | None:
     return sha or None
 
 
+def git_working_tree_dirty(repository_root: Path) -> bool | None:
+    """Best-effort: did the working tree differ from HEAD (incl. untracked files)?
+
+    ``None`` when git is unavailable or the status cannot be read, so an
+    unknown state is never reported as clean.
+    """
+
+    try:
+        completed = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repository_root,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    return bool(completed.stdout.strip())
+
+
 class LiveAgentNavigationRunMetrics(BaseModel):
     """Best-effort call/token/duration counters for one retrieval-mode run.
 
@@ -145,6 +172,10 @@ class LiveAgentNavigationHarnessResult(BaseModel):
     Contains no API keys, settings, prompts, or evaluator-only oracle text -
     only benchmark identity, run provenance, and the same graded case
     evidence the offline benchmark already produces.
+
+    ``git_dirty`` records whether the working tree had uncommitted changes
+    when ``git_commit_sha`` was captured (``None`` = unknown). It defaults to
+    ``None`` so results written before the field existed still load.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -153,6 +184,7 @@ class LiveAgentNavigationHarnessResult(BaseModel):
     benchmark_version: str
     model: str
     git_commit_sha: str | None = None
+    git_dirty: bool | None = None
     generated_at: datetime
     max_iterations: int = Field(gt=0)
     case_ids: tuple[str, ...]
@@ -196,6 +228,7 @@ def build_live_navigation_harness_result(
     benchmark_version: str,
     model: str,
     git_commit_sha: str | None,
+    git_dirty: bool | None = None,
     generated_at: datetime,
     max_iterations: int,
     runs: Sequence[
@@ -320,6 +353,7 @@ def build_live_navigation_harness_result(
         benchmark_version=benchmark_version,
         model=model,
         git_commit_sha=git_commit_sha,
+        git_dirty=git_dirty,
         generated_at=generated_at,
         max_iterations=max_iterations,
         case_ids=tuple(sorted(case_ids)),

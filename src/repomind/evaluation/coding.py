@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 from collections.abc import Sequence
 from inspect import Parameter, signature
 from pathlib import Path
@@ -34,6 +35,7 @@ from repomind.tools import GitStatusOutput, ToolContext, create_default_tool_reg
 
 _MUTATION_TOOLS = frozenset({"create_file", "replace_text"})
 _VERIFICATION_TOOLS = frozenset({"run_tests", "run_ruff"})
+_GIT_STATUS_TIMEOUT_SECONDS = 30
 
 
 class CodingTaskRunner(Protocol):
@@ -114,6 +116,56 @@ def _check_text(
             f"configured evaluator substring; observed contains={contains}."
         ),
     )
+
+
+def _observed_changed_paths(workspace: Path) -> tuple[Path, ...]:
+    """List every changed path in ``workspace`` according to Git itself.
+
+    The oracle must not trust the workflow's self-reported ``changed_files``.
+    ``--untracked-files=all`` lists new files individually (not collapsed
+    directories); a rename/copy contributes both its source and destination.
+    The explicit ``--git-dir``/``--work-tree`` stop Git from discovering an
+    enclosing repository, and ``--no-optional-locks`` keeps the call read-only.
+    """
+
+    root = workspace.resolve(strict=True)
+    command = [
+        "git",
+        f"--git-dir={root / '.git'}",
+        f"--work-tree={root}",
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=root,
+            capture_output=True,
+            check=True,
+            timeout=_GIT_STATUS_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("could not inspect the evaluated workspace with git status") from exc
+    paths: set[Path] = set()
+    records = completed.stdout.decode("utf-8", errors="surrogateescape").split("\0")
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if not record:
+            continue
+        status, path_text = record[:2], record[3:]
+        paths.add(Path(path_text))
+        if "R" in status or "C" in status:
+            if index < len(records) and records[index]:
+                paths.add(Path(records[index]))
+            index += 1
+    return tuple(sorted(paths, key=lambda item: item.as_posix()))
 
 
 def evaluate_coding_oracle(
@@ -250,7 +302,10 @@ def _evaluate_case(
             result = runner(case.task, workspace, case.verification_policy, trace=trace)
         else:
             result = runner(case.task, workspace, case.verification_policy)
-        oracle = evaluate_coding_oracle(case, workspace, result.changed_files)
+        # Changed-path checks use what Git observes in the workspace, never the
+        # workflow's own (possibly wrong or adversarial) changed_files report.
+        changed_files = _observed_changed_paths(workspace)
+        oracle = evaluate_coding_oracle(case, workspace, changed_files)
 
     completed = result.status is CodingTaskStatus.COMPLETED
     verification_passed = _verification_passed(result)
@@ -281,7 +336,7 @@ def _evaluate_case(
         false_positive_prevented_by_review=(
             not completed and not oracle.passed and result.review_blocks > 0
         ),
-        changed_files=result.changed_files,
+        changed_files=changed_files,
         oracle_failures=failures,
         workflow_blockers=result.blockers,
     )

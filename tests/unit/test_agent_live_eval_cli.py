@@ -473,3 +473,63 @@ def test_indexed_mode_multi_case_run_aggregates_metrics_and_queries_for_both_cas
     queries = run["indexed_search_queries_by_case"]
     assert queries["exact-symbol"] == ["atomic job claiming"]
     assert queries["literal-error-string"] == ["rate limit error constant"]
+
+
+def test_output_parent_directories_are_created_before_the_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    _patch_settings(monkeypatch, openai_api_key="sk-test-not-real")
+    output_path = tmp_path / "benchmarks" / "results" / "agent_live_eval.json"
+
+    class _FakeClient:
+        model = "fake-model"
+
+        def generate_structured(self, prompt, response_model, *, system_prompt=None, temperature=None):
+            # The destination directory already exists by the first model call.
+            assert output_path.parent.is_dir()
+            return response_model.model_validate(
+                {"action": "final", "final_answer": "The rate-limit error code is ERR_RATE_LIMIT_EXCEEDED_42."}
+            )
+
+    import repomind.llm as repomind_llm
+
+    monkeypatch.setattr(repomind_llm, "OpenAILLMClient", lambda *a, **k: _FakeClient())
+
+    exit_code = agent_live_eval.main(
+        ["--confirm-live", "--case", "literal-error-string", "--output", str(output_path)]
+    )
+
+    assert exit_code == 0
+    assert json.loads(output_path.read_text(encoding="utf-8"))["model"] == "fake-model"
+    # The writability probe leaves nothing behind next to the result.
+    assert [path.name for path in output_path.parent.iterdir()] == [output_path.name]
+
+
+@pytest.mark.parametrize("kind", ["directory", "parent-is-a-file"])
+def test_unwritable_output_fails_before_any_client_is_constructed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture, kind: str
+) -> None:
+    # Authorization passes, but the autouse stub raises if OpenAILLMClient is
+    # constructed: exit code 2 proves the bad --output path was rejected
+    # before any paid work could start.
+    _patch_settings(monkeypatch, openai_api_key="sk-test-not-real")
+    if kind == "directory":
+        output_path = tmp_path / "existing-directory"
+        output_path.mkdir()
+    else:
+        blocker = tmp_path / "not-a-directory"
+        blocker.write_text("", encoding="utf-8")
+        output_path = blocker / "agent_live_eval.json"
+
+    exit_code = agent_live_eval.main(
+        ["--confirm-live", "--case", "literal-error-string", "--output", str(output_path)]
+    )
+
+    assert exit_code == 2
+    assert "cannot write --output" in capsys.readouterr().err
+
+
+def test_docstring_example_output_path_points_at_an_existing_results_directory() -> None:
+    assert "--output benchmarks/results/" in agent_live_eval.__doc__
+    assert "--output results/" not in agent_live_eval.__doc__
+    assert (Path(agent_live_eval.__file__).parent / "results").is_dir()
