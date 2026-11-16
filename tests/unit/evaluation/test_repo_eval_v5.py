@@ -48,3 +48,21 @@ def test_every_gold_target_resolves_against_the_frozen_corpus() -> None:
     for suite in (SUITE, HELD_OUT_SUITE):
         gold = resolve_suite(suite, snapshot)
         assert set(gold) == {case.id for case in suite.cases}
+
+
+@pytest.mark.skipif(
+    not _corpus_commit_available(), reason="frozen corpus commit is not in this clone's history"
+)
+def test_corpus_ignores_crlf_checkout_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Git for Windows defaults to core.autocrlf=true; the live run on Windows
+    # scored a CRLF corpus until load_corpus pinned LF.
+    from benchmarks.repo_eval_v5 import load_corpus
+
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "core.autocrlf")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "true")
+
+    snapshot = load_corpus()
+
+    assert snapshot.files
+    assert not any("\r\n" in source.content for source in snapshot.files)

@@ -136,11 +136,13 @@ overall.
 
 Retrieval defaults are set by `repo-eval-v5`: 44 real developer questions
 about RepoMind's own source (plus 16 held out), scored on whether the gold
-evidence actually reaches the model's context. Moving to the current
-defaults (improved BM25, structural chunking, expanded context) raised that
-from 0.341 to 0.636 on the dev set and from 0.750 to 0.875 on the held-out
-set, using about a third less context. These offline numbers cover BM25 and
-symbol retrieval only; the semantic arm needs the paid `--live` mode.
+evidence actually reaches the model's context. Measured live with OpenAI
+embeddings, moving from the old defaults (line chunks, semantic search, top
+5) to the current ones (structural chunks, hybrid BM25 + semantic search,
+top 20, expanded context) raised that from 0.545 to 0.705 on the dev set and
+from 0.438 to 0.938 on the held-out set, with about 10% less context
+([dev](benchmarks/results/repo-eval-v5-live-dev.md),
+[held-out](benchmarks/results/repo-eval-v5-live-held-out.md)).
 
 This live result is separate from RepoMind's deterministic offline
 benchmarks (fake LLMs/embeddings, no OpenAI calls). Their evaluation logic

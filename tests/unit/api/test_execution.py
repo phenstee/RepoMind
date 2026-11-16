@@ -7,6 +7,7 @@ import subprocess
 
 import pytest
 
+from repomind.api.models import RAGRequest
 from repomind.ingestion import CodeChunk
 from repomind.retrieval import SemanticSearchResult
 
@@ -164,10 +165,30 @@ def test_rag_defaults_to_hybrid_retrieval_with_expanded_context(api):
 
     assert response.status_code == 200, response.text
     _, _, hybrid, top_k, include_symbols = api.store.search_calls[0]
-    assert (hybrid, top_k, include_symbols) == (True, 5, False)
+    assert (hybrid, top_k, include_symbols) == (True, 20, False)
     prompt = api.llm.calls[0][0]
     assert "def value" in prompt
     assert "def other" in prompt
+
+
+@pytest.mark.parametrize(
+    "body,expected_top_k",
+    [
+        ({}, 20),
+        ({"strategy": "semantic"}, 20),
+        ({"strategy": "hybrid_symbol"}, 20),
+        ({"strategy": "hybrid_rerank"}, 5),
+        ({"strategy": "hybrid_rerank", "top_k": 12}, 12),
+        ({"strategy": "hybrid", "top_k": 3}, 3),
+    ],
+)
+def test_rag_request_top_k_default_depends_on_strategy(body, expected_top_k):
+    # The reranker sees at most 20 candidates, so a rerank request keeps the
+    # smaller default it needs to drop anything; an explicit top_k always wins.
+    request = RAGRequest.model_validate({"question": "q", **body})
+
+    assert request.top_k == expected_top_k
+    assert RAGRequest.model_validate(request.model_dump()).top_k == expected_top_k
 
 
 def test_rag_seeds_only_context_strategy_excludes_neighbors(api):
