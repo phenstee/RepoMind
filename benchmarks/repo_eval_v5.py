@@ -325,7 +325,7 @@ def run(
         coverage_names = (
             ["bm25 (legacy)", "bm25"]
             + (["bm25 + symbol"] if chunking is ChunkingStrategy.STRUCTURAL else [])
-            + (["semantic", "hybrid_symbol"] if embedder is not None else [])
+            + (["semantic", "hybrid", "hybrid_symbol"] if embedder is not None else [])
         )
         for name in coverage_names:
             for top_k in COVERAGE_TOP_K[chunking]:
