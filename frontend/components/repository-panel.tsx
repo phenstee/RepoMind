@@ -23,6 +23,12 @@ function initials(name: string): string {
   return (parts.length > 1 ? parts[0][0] + parts[1][0] : name.slice(0, 2)) || "?";
 }
 
+/** "src/app/main.py" → ["src/app/", "main.py"], so the name survives truncation. */
+function splitPath(path: string): [string, string] {
+  const slash = path.lastIndexOf("/");
+  return slash === -1 ? ["", path] : [path.slice(0, slash + 1), path.slice(slash + 1)];
+}
+
 function languageClass(language: string | null): string {
   return (language ?? "text").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
@@ -172,7 +178,10 @@ export function RepositoryPanel({
             {files.map((file) => (
               <li key={file.relative_path} className="fileItem" title={`${file.relative_path} · ${file.language ?? "text"}`}>
                 <span className={`langDot ${languageClass(file.language)}`} aria-hidden="true" />
-                <code>{file.relative_path}</code>
+                <code className="filePath">
+                  <span className="fileDir">{splitPath(file.relative_path)[0]}</span>
+                  <span className="fileName">{splitPath(file.relative_path)[1]}</span>
+                </code>
                 <small>{file.line_count} lines</small>
               </li>
             ))}

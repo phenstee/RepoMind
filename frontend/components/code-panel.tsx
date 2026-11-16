@@ -5,6 +5,7 @@ import { useState } from "react";
 import { humanize } from "../lib/format";
 import type { CodingResponse } from "../lib/types";
 import { Icon, Spinner } from "./icons";
+import { PendingRun } from "./pending-run";
 import { RichText } from "./rich-text";
 
 interface CodingInput {
@@ -20,10 +21,12 @@ function splitPaths(value: string): string[] {
 export function CodePanel({
   disabled,
   running,
+  status = "Waiting for a worker",
   onSubmit,
 }: {
   disabled: boolean;
   running?: boolean;
+  status?: string;
   onSubmit: (request: CodingInput) => Promise<CodingResponse | undefined>;
 }) {
   const [objective, setObjective] = useState("");
@@ -32,25 +35,33 @@ export function CodePanel({
   const [ruffPaths, setRuffPaths] = useState(".");
   const [confirmed, setConfirmed] = useState(false);
   const [result, setResult] = useState<CodingResponse | null>(null);
+  const [pending, setPending] = useState(false);
 
   const pathsValid = splitPaths(testPaths).length > 0 && splitPaths(ruffPaths).length > 0;
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!confirmed || !pathsValid || disabled) return;
-    const response = await onSubmit({
-      objective: objective.trim(),
-      acceptance_criteria: criteria.map((item) => item.trim()).filter(Boolean),
-      verification: { test_paths: splitPaths(testPaths), ruff_paths: splitPaths(ruffPaths) },
-    });
-    if (response !== undefined) setResult(response);
+    setPending(true);
+    try {
+      const response = await onSubmit({
+        objective: objective.trim(),
+        acceptance_criteria: criteria.map((item) => item.trim()).filter(Boolean),
+        verification: { test_paths: splitPaths(testPaths), ruff_paths: splitPaths(ruffPaths) },
+      });
+      if (response !== undefined) setResult(response);
+    } finally {
+      setPending(false);
+    }
   }
 
   return (
     <section className="modePanel dangerPanel">
       <header>
-        <p className="eyebrow danger">Controlled mutation</p>
-        <h2>Code</h2>
+        <h2 className="panelTitle">
+          Code
+          <span className="badge failed"><Icon name="alert" />Controlled mutation</span>
+        </h2>
         <p>Plans, edits, verifies with pytest and Ruff, then passes an independent review before completing.</p>
       </header>
       <p className="callout warning">
@@ -133,7 +144,8 @@ export function CodePanel({
           </button>
         </div>
       </form>
-      {result ? <CodingResult result={result} /> : null}
+      {running && pending ? <PendingRun title="Coding run" status={status} /> : null}
+      {result && !(running && pending) ? <CodingResult result={result} /> : null}
     </section>
   );
 }
