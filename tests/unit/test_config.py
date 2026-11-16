@@ -19,6 +19,7 @@ def _isolated_settings_environment(monkeypatch):
         "JOB_MAX_ATTEMPTS",
         "REPOMIND_ALLOWED_HOSTS",
         "REPOMIND_TRUSTED_FRONTEND_ORIGINS",
+        "REPOMIND_CHUNKING_STRATEGY",
     ):
         monkeypatch.delenv(name, raising=False)
     get_settings.cache_clear()
@@ -151,3 +152,32 @@ def test_job_max_attempts_defaults_reads_environment_and_is_bounded(monkeypatch)
     assert Settings(_env_file=None).job_max_attempts == 5
     with pytest.raises(ValidationError):
         Settings(job_max_attempts=0, _env_file=None)
+
+
+def test_indexing_defaults_to_structural_chunking_and_can_be_reverted(monkeypatch) -> None:
+    from repomind.ingestion import ChunkingStrategy
+
+    assert Settings(_env_file=None).repomind_chunking_strategy is ChunkingStrategy.STRUCTURAL
+
+    monkeypatch.setenv("REPOMIND_CHUNKING_STRATEGY", "line_v1")
+    assert Settings(_env_file=None).repomind_chunking_strategy is ChunkingStrategy.LINE
+
+    monkeypatch.setenv("REPOMIND_CHUNKING_STRATEGY", "tree_sitter")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_service_container_indexes_with_the_configured_chunking(monkeypatch) -> None:
+    from repomind.api.dependencies import ServiceContainer
+    from repomind.ingestion import ChunkingStrategy
+
+    class _Stub:
+        pass
+
+    for strategy in ChunkingStrategy:
+        container = ServiceContainer(
+            settings=Settings(_env_file=None, repomind_chunking_strategy=strategy),
+            repository_store=_Stub(),
+            trace_store=_Stub(),
+        )
+        assert container.get().repositories.chunking_config.strategy is strategy

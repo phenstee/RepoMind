@@ -27,7 +27,7 @@ Next.js frontend.
 
 | Capability | What it means |
 | --- | --- |
-| **Understand** | Deterministic ingestion and chunking (line-based baseline, plus Python AST-structural chunking) turn a repository into citation-ready source chunks. |
+| **Understand** | Deterministic ingestion and chunking (Python AST-structural chunks by default, line-based for other languages) turn a repository into citation-ready source chunks. |
 | **Retrieve** | Semantic (pgvector) + BM25 + symbol-name signal, fused with Reciprocal Rank Fusion, with an optional bounded LLM reranking stage. |
 | **Investigate** | A handwritten read-only tool-using agent answers open-ended questions with an optional indexed-navigation tool, always verified against current source. |
 | **Modify safely** | A controlled editing agent makes exact, bounded file changes — no arbitrary shell access, ever. |
@@ -133,6 +133,14 @@ fallback case only exists in indexed mode.)
 here, but it used *more* total model tokens (33,754 vs. 26,256) — this run
 does not show indexed navigation is cheaper, faster, or more efficient
 overall.
+
+Retrieval defaults are set by `repo-eval-v5`: 44 real developer questions
+about RepoMind's own source (plus 16 held out), scored on whether the gold
+evidence actually reaches the model's context. Moving to the current
+defaults (improved BM25, structural chunking, expanded context) raised that
+from 0.341 to 0.636 on the dev set and from 0.750 to 0.875 on the held-out
+set, using about a third less context. These offline numbers cover BM25 and
+symbol retrieval only; the semantic arm needs the paid `--live` mode.
 
 This live result is separate from RepoMind's deterministic offline
 benchmarks (fake LLMs/embeddings, no OpenAI calls). Their evaluation logic

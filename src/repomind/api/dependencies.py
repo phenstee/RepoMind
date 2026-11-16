@@ -13,6 +13,7 @@ from repomind.api.services.streaming import StreamingService
 from repomind.api.store import PostgresRepositoryStore, RepositoryStore
 from repomind.config import Settings, get_settings
 from repomind.db import create_database_engine, create_session_factory
+from repomind.ingestion import ChunkingConfig
 from repomind.jobs.broker import NullSubscription, RedisJobBroker
 from repomind.jobs.locks import NullRepositoryExecutionLock, PostgresRepositoryExecutionLock
 from repomind.jobs.store import InMemoryJobStore, PostgresJobStore
@@ -74,6 +75,7 @@ class ServiceContainer:
                     PostgresRepositoryExecutionLock(factory)
                     if self.engine is not None
                     else NullRepositoryExecutionLock(),
+                    ChunkingConfig(strategy=settings.repomind_chunking_strategy),
                 )
                 execution = ExecutionService(
                     repositories,

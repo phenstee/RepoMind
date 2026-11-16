@@ -11,6 +11,8 @@ from urllib.parse import urlsplit
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from repomind.ingestion.models import ChunkingStrategy
+
 
 class Settings(BaseSettings):
     """Settings loaded from environment variables and an optional ``.env`` file."""
@@ -34,6 +36,12 @@ class Settings(BaseSettings):
     )
     # Host header names the API answers to; anything else (DNS rebinding) is rejected.
     repomind_allowed_hosts: tuple[str, ...] = ("localhost", "127.0.0.1", "api", "[::1]")
+
+    # Python files are chunked along functions and classes; other languages
+    # fall back to line windows. ``line_v1`` restores pure line chunking.
+    # Changing it changes the index fingerprint, so the next index run safely
+    # rebuilds instead of mixing chunk shapes.
+    repomind_chunking_strategy: ChunkingStrategy = ChunkingStrategy.STRUCTURAL
 
     llm_timeout_seconds: float = Field(default=60.0, gt=0)
     llm_max_retries: int = Field(default=3, ge=0)
