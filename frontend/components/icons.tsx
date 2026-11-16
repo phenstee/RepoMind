@@ -140,17 +140,11 @@ export function Icon({ name, size = 16, className }: { name: IconName; size?: nu
 export function BrandMark() {
   return (
     <svg className="brandMark" width="32" height="32" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
-      <defs>
-        <linearGradient id="repomind-brand" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#7c86ff" />
-          <stop offset="1" stopColor="#2dd4bf" />
-        </linearGradient>
-      </defs>
-      <rect width="32" height="32" rx="9" fill="url(#repomind-brand)" />
-      <path d="M11 11l10 5M11 21l10-5M11 11v10" stroke="#fff" strokeWidth="2" strokeLinecap="round" fill="none" opacity=".9" />
-      <circle cx="11" cy="11" r="2.7" fill="#fff" />
-      <circle cx="11" cy="21" r="2.7" fill="#fff" />
-      <circle cx="21" cy="16" r="2.7" fill="#fff" />
+      <rect width="32" height="32" rx="9" className="brandMarkTile" />
+      <path d="M11 11l10 5M11 21l10-5M11 11v10" className="brandMarkEdge" strokeWidth="2" strokeLinecap="round" fill="none" />
+      <circle cx="11" cy="11" r="2.7" className="brandMarkNode" />
+      <circle cx="11" cy="21" r="2.7" className="brandMarkNode" />
+      <circle cx="21" cy="16" r="3.2" className="brandMarkNode brandMarkFocus" />
     </svg>
   );
 }
