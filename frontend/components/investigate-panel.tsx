@@ -5,7 +5,9 @@ import { useState } from "react";
 import { humanize } from "../lib/format";
 import type { AgentResponse, AgentRetrievalMode, ObservedLocation } from "../lib/types";
 import { submitOnModEnter } from "./ask-panel";
+import { CitationChip } from "./citation-chip";
 import { Icon, Spinner } from "./icons";
+import { PendingRun } from "./pending-run";
 import { RichText } from "./rich-text";
 
 function locationLabel(location: ObservedLocation) {
@@ -23,31 +25,39 @@ const observedViaLabels: Record<ObservedLocation["observed_via"], string> = {
 export function InvestigatePanel({
   disabled,
   running,
+  status = "Waiting for a worker",
   onSubmit,
 }: {
   disabled: boolean;
   running?: boolean;
+  status?: string;
   onSubmit: (query: string, retrievalMode: AgentRetrievalMode) => Promise<AgentResponse | undefined>;
 }) {
   const [query, setQuery] = useState("");
   const [retrievalMode, setRetrievalMode] = useState<AgentRetrievalMode>("filesystem");
   const [result, setResult] = useState<AgentResponse | null>(null);
+  const [pending, setPending] = useState(false);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const requestedQuery = query.trim();
     if (requestedQuery.length === 0 || disabled) return;
-    const response = await onSubmit(requestedQuery, retrievalMode);
-    if (response !== undefined) {
-      setResult(response);
+    setPending(true);
+    try {
+      const response = await onSubmit(requestedQuery, retrievalMode);
+      if (response !== undefined) setResult(response);
+    } finally {
+      setPending(false);
     }
   }
 
   return (
     <section className="modePanel">
       <header>
-        <p className="eyebrow readOnly">Read-only</p>
-        <h2>Investigate</h2>
+        <h2 className="panelTitle">
+          Investigate
+          <span className="badge completed"><Icon name="shield" />Read-only</span>
+        </h2>
         <p>The agent can inspect the selected repository but has no file-edit controls in this mode.</p>
       </header>
       <form className="stack" onSubmit={(event) => void submit(event)}>
@@ -79,7 +89,8 @@ export function InvestigatePanel({
           </button>
         </div>
       </form>
-      {result ? <InvestigationResult result={result} /> : null}
+      {running && pending ? <PendingRun title="Investigation" status={status} /> : null}
+      {result && !(running && pending) ? <InvestigationResult result={result} /> : null}
     </section>
   );
 }
@@ -103,11 +114,12 @@ export function InvestigationResult({ result }: { result: AgentResponse }) {
           <p className="hint">Locations the agent observed in the current repository.</p>
           <ul className="chipRow citations">
             {result.evidence.map((location) => (
-              <li key={`${location.relative_path}:${location.start_line}-${location.end_line}`} className="chip">
-                <Icon name="file" />
-                <code>{locationLabel(location)}</code>
-                <span className="chipMeta">{observedViaLabels[location.observed_via]}</span>
-              </li>
+              <CitationChip
+                key={`${location.relative_path}:${location.start_line}-${location.end_line}`}
+                label={locationLabel(location)}
+                meta={observedViaLabels[location.observed_via]}
+                reference={locationLabel(location)}
+              />
             ))}
           </ul>
           {result.evidence_truncated ? (

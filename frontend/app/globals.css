@@ -16,7 +16,7 @@
   --border-strong: rgba(15, 23, 42, 0.15);
   --text: #0f172a;
   --text-2: #334155;
-  --muted: #64748b;
+  --muted: #596779;
   --subtle: #94a3b8;
   --accent: #5b5fe8;
   --accent-hover: #4b4fd6;
@@ -44,6 +44,19 @@
   --ease: cubic-bezier(0.2, 0.8, 0.2, 1);
   --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+  /* Motion tokens (transitions.dev): thinking states and icon swap. */
+  --think-swap: 150ms;
+  --think-distance: 8px;
+  --think-blur: 2px;
+  --think-shimmer: 2000ms;
+  --think-base: var(--muted);
+  --think-highlight: var(--text);
+  --think-ease: ease-in-out;
+  --icon-swap-dur: 250ms;
+  --icon-swap-blur: 2px;
+  --icon-swap-start-scale: 0.25;
+  --icon-swap-ease: ease-in-out;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -154,6 +167,12 @@ h3,
 h4,
 p {
   margin: 0;
+}
+
+h1,
+h2,
+h3 {
+  text-wrap: balance;
 }
 
 h1 {
@@ -395,21 +414,16 @@ ol {
   color: var(--muted);
 }
 
-.eyebrow {
-  margin-bottom: 0.3rem;
-  color: var(--accent-text);
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
+.cardSubtitle {
+  color: var(--muted);
+  font-size: 0.78rem;
 }
 
-.eyebrow.readOnly {
-  color: var(--success);
-}
-
-.eyebrow.danger {
-  color: var(--danger);
+.panelTitle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.55rem;
 }
 
 .countBadge {
@@ -573,7 +587,7 @@ select {
 
 input::placeholder,
 textarea::placeholder {
-  color: var(--subtle);
+  color: var(--muted);
 }
 
 input:hover,
@@ -634,8 +648,17 @@ input[type="checkbox"] {
   max-width: 20rem;
 }
 
+/* Sits under the select: after the submit button on wide rows, before it once they stack. */
+.fieldHint {
+  flex-basis: 100%;
+  order: 3;
+  margin-top: -0.35rem;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
 .hint {
-  color: var(--subtle);
+  color: var(--muted);
   font-size: 0.74rem;
   font-weight: 450;
 }
@@ -773,12 +796,71 @@ kbd {
   color: var(--muted);
   font-family: var(--font-mono);
   font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A chip that copies its source reference. */
+.chipButton {
+  cursor: copy;
+  transition:
+    background-color 0.15s var(--ease),
+    border-color 0.15s var(--ease),
+    transform 0.12s var(--ease);
+}
+
+.chipButton:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
+}
+
+.chipButton:active {
+  transform: scale(0.96);
+}
+
+.t-icon-swap {
+  position: relative;
+  display: inline-grid;
+  flex: none;
+}
+
+.t-icon-swap .t-icon {
+  display: inline-flex;
+  grid-area: 1 / 1;
+  transition:
+    opacity var(--icon-swap-dur) var(--icon-swap-ease),
+    filter var(--icon-swap-dur) var(--icon-swap-ease),
+    transform var(--icon-swap-dur) var(--icon-swap-ease);
+}
+
+.t-icon-swap[data-state="a"] .t-icon[data-icon="a"],
+.t-icon-swap[data-state="b"] .t-icon[data-icon="b"] {
+  opacity: 1;
+  filter: blur(0);
+  transform: scale(1);
+}
+
+.t-icon-swap[data-state="a"] .t-icon[data-icon="b"],
+.t-icon-swap[data-state="b"] .t-icon[data-icon="a"] {
+  opacity: 0;
+  filter: blur(var(--icon-swap-blur));
+  transform: scale(var(--icon-swap-start-scale));
+}
+
+.t-icon-swap[data-state="b"] .icon {
+  color: var(--success);
 }
 
 .chipRow {
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
+  list-style: none;
+}
+
+.chipRow > li {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .toast {
@@ -977,10 +1059,31 @@ kbd {
   white-space: nowrap;
 }
 
+/* The directory gives way first, so the file name stays readable. */
+.filePath {
+  display: flex;
+  min-width: 0;
+}
+
+.fileDir {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+}
+
+.fileName {
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .fileItem small {
   flex: none;
   font-family: var(--font-mono);
   font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .langDot {
@@ -1049,6 +1152,64 @@ kbd {
   display: grid;
   gap: 0.7rem;
   padding: 1rem 1.2rem;
+}
+
+.skeletonLines {
+  display: grid;
+  gap: 0.6rem;
+}
+
+/* Pending result: the latest progress step narrates the run in place. */
+.answer.pending {
+  border-style: dashed;
+}
+
+.thinking {
+  font-size: 0.86rem;
+  font-weight: 550;
+}
+
+.t-think-text {
+  position: relative;
+  display: inline-block;
+  color: var(--think-base);
+  animation: t-think-enter var(--think-swap) var(--think-ease) both;
+}
+
+/* Shimmer sweeps the glyphs only (background-clip: text). */
+.t-think-text::before {
+  content: attr(data-text);
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: linear-gradient(90deg,
+    transparent 0%, transparent 40%,
+    var(--think-highlight) 50%,
+    transparent 60%, transparent 100%);
+  background-size: 400% 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: t-think-shimmer var(--think-shimmer) linear infinite;
+}
+
+@keyframes t-think-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: 0% 0;
+  }
+}
+
+@keyframes t-think-enter {
+  from {
+    transform: translateY(var(--think-distance));
+    filter: blur(var(--think-blur));
+    opacity: 0;
+  }
 }
 
 /* ---------- Workspace header & modes ---------- */
@@ -1271,6 +1432,7 @@ kbd {
 
 .richText p {
   white-space: pre-wrap;
+  text-wrap: pretty;
 }
 
 .answerSection {
@@ -1298,7 +1460,7 @@ kbd {
 }
 
 .traceId {
-  color: var(--subtle);
+  color: var(--muted);
   font-family: var(--font-mono);
   font-size: 0.72rem;
 }
@@ -1462,7 +1624,8 @@ kbd {
 
 .timelineHead time {
   flex: none;
-  color: var(--subtle);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
   font-family: var(--font-mono);
   font-size: 0.72rem;
 }
@@ -1584,6 +1747,7 @@ kbd {
   gap: 0.15rem;
   color: var(--muted);
   font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .runSide span:first-child {
@@ -1660,6 +1824,7 @@ kbd {
   font-family: var(--font-mono);
   font-size: 0.95rem;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- Spinner ---------- */
@@ -1782,13 +1947,40 @@ kbd {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* Remove movement (entrances, slides, sweeps, pings, presses) but keep the feedback that
+     carries state: spinners keep turning (slower), color and opacity changes still transition,
+     and the pending status line still updates, just without its shimmer and blur. Entrance
+     animations end at their resting state, so dropping them leaves content fully visible. */
   *,
   *::before,
   *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
+    animation: none !important;
     scroll-behavior: auto !important;
+  }
+
+  .spinner,
+  .btn.isSpinning .icon {
+    animation: spin 1.5s linear infinite !important;
+  }
+
+  .t-think-text::before,
+  .progressBar {
+    display: none !important;
+  }
+
+  .btn:active:not(:disabled),
+  .chipButton:active {
+    transform: none;
+  }
+
+  .segmented::before {
+    transition-property: background-color, box-shadow !important;
+  }
+
+  .t-icon-swap .t-icon {
+    transition-property: opacity !important;
+    filter: none !important;
+    transform: none !important;
   }
 }
 
@@ -1822,6 +2014,10 @@ kbd {
   .historyGrid,
   .verificationGrid {
     grid-template-columns: 1fr;
+  }
+
+  .fileList {
+    max-height: 12rem;
   }
 
   .runList {
@@ -1860,6 +2056,7 @@ kbd {
   }
 
   .formFooter .btn {
+    order: 4;
     width: 100%;
   }
 

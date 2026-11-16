@@ -20,7 +20,7 @@ import { AnswerCard, AskPanel } from "./ask-panel";
 import { CodePanel, CodingResult } from "./code-panel";
 import { BrandMark, Icon, type IconName, Spinner } from "./icons";
 import { InvestigatePanel, InvestigationResult } from "./investigate-panel";
-import { ProgressTimeline } from "./progress-timeline";
+import { eventLabel, ProgressTimeline } from "./progress-timeline";
 import { RepositoryPanel } from "./repository-panel";
 import { RunHistory } from "./run-history";
 import { ThemeToggle } from "./theme-toggle";
@@ -346,6 +346,8 @@ export function Workspace() {
   ];
   const activeModeIndex = modes.findIndex((item) => item.id === mode);
   const operationState = operation?.state ?? "idle";
+  const latestEvent = events.length > 0 ? events[events.length - 1] : null;
+  const progressStatus = latestEvent === null ? "Waiting for a worker" : eventLabel(latestEvent.event);
 
   return (
     <div className="app">
@@ -387,7 +389,6 @@ export function Workspace() {
             <section className="card" aria-label="Workspace">
               <div className="workspaceHeader">
                 <div className="workspaceTitle">
-                  <p className="eyebrow">Workspace</p>
                   <h1>{selectedRepository?.name ?? "Select a repository"}</h1>
                   {selectedRepository ? (
                     <div className="chipRow">
@@ -466,14 +467,14 @@ export function Workspace() {
                   <p>Register or select a repository to begin.</p>
                 </div>
               ) : null}
-              {selectedId !== null && mode === "ask" ? <AskPanel key={selectedId} disabled={running} running={running && operation?.kind === "rag"} onSubmit={(question, strategy) => runJob<RAGResponse>("rag", { question, strategy })} /> : null}
-              {selectedId !== null && mode === "investigate" ? <InvestigatePanel key={selectedId} disabled={running} running={running && operation?.kind === "agent"} onSubmit={(query, retrievalMode) => runJob<AgentResponse>("agent", { query, retrieval_mode: retrievalMode })} /> : null}
-              {selectedId !== null && mode === "code" ? <CodePanel key={selectedId} disabled={running} running={running && operation?.kind === "coding"} onSubmit={(request) => runJob<CodingResponse>("coding", request)} /> : null}
+              {selectedId !== null && mode === "ask" ? <AskPanel key={selectedId} disabled={running} running={running && operation?.kind === "rag"} status={progressStatus} onSubmit={(question, strategy) => runJob<RAGResponse>("rag", { question, strategy })} /> : null}
+              {selectedId !== null && mode === "investigate" ? <InvestigatePanel key={selectedId} disabled={running} running={running && operation?.kind === "agent"} status={progressStatus} onSubmit={(query, retrievalMode) => runJob<AgentResponse>("agent", { query, retrieval_mode: retrievalMode })} /> : null}
+              {selectedId !== null && mode === "code" ? <CodePanel key={selectedId} disabled={running} running={running && operation?.kind === "coding"} status={progressStatus} onSubmit={(request) => runJob<CodingResponse>("coding", request)} /> : null}
             </section>
 
             {recoveredResult !== null ? (
               <section className="card modePanel" aria-live="polite">
-                <header><p className="eyebrow">Recovered job result</p></header>
+                <header><h2>Recovered job result</h2></header>
                 {recoveredResult.jobType === "rag" ? <AnswerCard question="Recovered answer" answer={recoveredResult.result} /> : null}
                 {recoveredResult.jobType === "agent" ? <InvestigationResult result={recoveredResult.result} /> : null}
                 {recoveredResult.jobType === "coding" ? <CodingResult result={recoveredResult.result} /> : null}
@@ -485,8 +486,8 @@ export function Workspace() {
                 <div>
                   <Icon name="sparkles" />
                   <div>
-                    <p className="eyebrow">Live progress</p>
-                    <h2>{operation ? `${runTypeLabel(operation.kind)} job` : "No active operation"}</h2>
+                    <h2>Live progress</h2>
+                    <p className="cardSubtitle">{operation ? `${runTypeLabel(operation.kind)} job` : "No active operation"}</p>
                   </div>
                 </div>
                 <span className={`badge ${operationState}`} role="status" aria-live="polite">

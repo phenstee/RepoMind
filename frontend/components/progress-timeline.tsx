@@ -1,3 +1,4 @@
+import { formatDuration } from "../lib/format";
 import type { JsonValue, ProgressEvent } from "../lib/types";
 
 const labels: Record<string, string> = {
@@ -60,6 +61,11 @@ const blockerLabels: Record<string, string> = {
   review_failed: "Independent review failed",
 };
 
+/** Human label for a progress event name; unknown names pass through unchanged. */
+export function eventLabel(event: string): string {
+  return labels[event] ?? event;
+}
+
 function stateFor(event: string): string {
   if (event.includes("failed")) return "failure";
   if (event.includes("blocked") || event.includes("cancel")) return "blocked";
@@ -102,7 +108,7 @@ function eventMetadata(data: Record<string, JsonValue>): string[] {
     const value = data[key];
     const rendered = value === undefined ? null : displayValue(value);
     if (rendered === null) return [];
-    if (key === "duration_ms" && typeof value === "number") return [`${Math.round(value)} ms`];
+    if (key === "duration_ms" && typeof value === "number") return [formatDuration(value)];
     return [`${key.replaceAll("_", " ")}: ${rendered}`];
   });
 }
@@ -128,7 +134,7 @@ export function ProgressTimeline({
             <span className="timelineDot" aria-hidden="true" />
             <div className="timelineContent">
               <div className="timelineHead">
-                <strong>{labels[entry.event] ?? entry.event}</strong>
+                <strong>{eventLabel(entry.event)}</strong>
                 <time dateTime={entry.timestamp}>{new Date(entry.timestamp).toLocaleTimeString()}</time>
               </div>
               {metadata.length > 0 ? (

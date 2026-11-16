@@ -75,8 +75,8 @@ export function RunHistory({ refreshKey }: { refreshKey: number }) {
         <div>
           <Icon name="clock" />
           <div>
-            <p className="eyebrow">Persisted traces</p>
             <h2>Run history</h2>
+            <p className="cardSubtitle">Persisted traces</p>
           </div>
         </div>
         <button
@@ -119,7 +119,7 @@ export function RunHistory({ refreshKey }: { refreshKey: number }) {
                         <span className="srOnly">{run.status}</span>
                       </strong>
                       <small>
-                        {run.llm_calls} model · {run.tool_calls} tool calls
+                        {run.llm_calls} model {run.llm_calls === 1 ? "call" : "calls"} · {run.tool_calls} tool {run.tool_calls === 1 ? "call" : "calls"}
                         {run.domain_status ? ` · ${humanize(run.domain_status).toLowerCase()}` : ""}
                       </small>
                     </span>
