@@ -137,19 +137,51 @@ def test_rag_expanded_context_strategy_includes_neighbor_evidence(api):
     assert "def other" in prompt
 
 
-def test_rag_seeds_only_is_the_default_context_strategy(api):
+def _neighbor_fixture(api):
     api.store.candidates = candidates()
+    api.store.neighbor_corpus = [
+        candidates()[0].chunk,
+        CodeChunk(
+            relative_path="src/app.py",
+            language="python",
+            start_line=3,
+            end_line=4,
+            content="def other():\n    return 2\n",
+            chunk_index=1,
+        ),
+    ]
     api.llm.responses.append(
         {"answer": "value returns one", "source_ids": ["S1"], "insufficient_evidence": False}
     )
 
+
+def test_rag_defaults_to_hybrid_retrieval_with_expanded_context(api):
+    _neighbor_fixture(api)
+
     response = api.client.post(
-        "/api/v1/repositories/1/rag",
-        json={"question": "What does value do?", "strategy": "semantic", "top_k": 3},
+        "/api/v1/repositories/1/rag", json={"question": "What does value do?"}
     )
 
     assert response.status_code == 200, response.text
-    assert api.store.neighbor_corpus == []
+    _, _, hybrid, top_k, include_symbols = api.store.search_calls[0]
+    assert (hybrid, top_k, include_symbols) == (True, 5, False)
+    prompt = api.llm.calls[0][0]
+    assert "def value" in prompt
+    assert "def other" in prompt
+
+
+def test_rag_seeds_only_context_strategy_excludes_neighbors(api):
+    _neighbor_fixture(api)
+
+    response = api.client.post(
+        "/api/v1/repositories/1/rag",
+        json={"question": "What does value do?", "top_k": 3, "context_strategy": "seeds_only"},
+    )
+
+    assert response.status_code == 200, response.text
+    prompt = api.llm.calls[0][0]
+    assert "def value" in prompt
+    assert "def other" not in prompt
 
 
 @pytest.mark.parametrize("strategy", ["semantic", "hybrid", "hybrid_rerank"])

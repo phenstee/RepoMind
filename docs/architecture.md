@@ -37,20 +37,29 @@ flowchart LR
 ```
 
 Four retrieval strategies are selectable per request (`semantic`, `hybrid`,
-`hybrid_rerank`, `hybrid_symbol`); `semantic` is the API default.
+`hybrid_rerank`, `hybrid_symbol`); `hybrid` with `expanded` context is the
+API default. Defaults follow `repo-eval-v5`, which asks real questions about
+this repository (see [evaluation](evaluation.md#repo-eval-v5--real-questions-over-a-real-repository)).
 
-- **Chunking.** Deterministic line-based chunking (`ingestion/chunker.py`) is
-  the baseline for every language. Python source can additionally opt into
-  AST-anchored structural chunking (`ingestion/structural.py`), which slices
-  original source, bounds oversized symbols, and falls back to line
-  boundaries rather than failing indexing.
+- **Chunking.** Python source is chunked structurally by default
+  (`ingestion/structural.py`, `python_ast_v1`): AST-anchored chunks that
+  slice original source, bound oversized symbols, and fall back to line
+  boundaries rather than failing indexing. Every other language uses
+  deterministic line-based chunking (`ingestion/chunker.py`, 120 lines with
+  20 lines of overlap). `REPOMIND_CHUNKING_STRATEGY=line_v1` switches Python
+  back to line chunks; the index fingerprint includes the strategy, so a
+  change triggers a safe full rebuild on the next index.
 - **Semantic search.** Exact pgvector cosine search is the reference
   implementation; an HNSW index (`alembic/versions/20260917_01_retrieval_v2.py`)
   is an explicit, optional acceleration path measured against it with
   ANN Recall@k, not a silent replacement.
 - **BM25.** A small dependency-free implementation
   (`retrieval/bm25.py`) with inspectable IDF/saturation/length-normalization
-  math. It has **no persisted index** — `db/hybrid.py` rebuilds a `BM25Index`
+  math. Each chunk is indexed with its file path and qualified symbol name
+  as well as its content; English function words are dropped from the query;
+  and test files score at half weight unless the query asks about tests.
+  `LEGACY_BM25_CONFIG` keeps the previous content-only behavior for
+  comparison. It has **no persisted index** — `db/hybrid.py` rebuilds a `BM25Index`
   from `load_chunks(session, repository_id)` on every hybrid query. This is a
   known scaling limit (see [Limitations](../README.md#limitations)).
 - **Symbol fusion.** `retrieval/symbols.py` reuses `symbol_name`/
@@ -58,7 +67,10 @@ Four retrieval strategies are selectable per request (`semantic`, `hybrid`,
   bounded, repository-scoped SQL query with tier-ordered ranking over two
   B-tree indexes — never a graph traversal, reparse, or second embedding
   call. This is deliberately **not** GraphRAG, a call graph, or a language
-  server.
+  server. A *weak* match (a plain English word such as `run` that happens to
+  name a function) only joins fusion when BM25 or semantic retrieval found
+  the same symbol independently, so a common word cannot take the top slot
+  on its own.
 - **Fusion.** `retrieval/hybrid.py` combines ranked sources with Reciprocal
   Rank Fusion rather than mixing raw cosine/BM25 scores, which have no shared
   scale.
@@ -68,8 +80,8 @@ Four retrieval strategies are selectable per request (`semantic`, `hybrid`,
   so evaluation can compare with/without it.
 - **Context assembly.** `rag/context.py`'s `ContextAssembler` answers "what
   evidence should reach the model" as a separate question from "what chunks
-  are relevant." The preserved baseline (`seeds_only`) is untouched
-  production behavior; the `expanded` strategy performs bounded same-file
+  are relevant." `seeds_only` packs only the ranked hits; the default
+  `expanded` strategy performs bounded same-file
   neighbor expansion (`radius=1` by default), prefers same-symbol structural
   fragments, deduplicates by stable chunk identity
   (`relative_path, chunk_index, start_line, end_line`), and greedily packs a

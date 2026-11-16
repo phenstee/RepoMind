@@ -161,12 +161,107 @@ or by any test.
 ## Offline benchmarks (retrieval / RAG / coding fixtures)
 
 None of the commands below make an OpenAI or other model-provider network
-request. The versioned `repo-eval-v1`–`repo-eval-v4` fixture benchmarks are
-deterministic and run fully in-process. The opt-in PostgreSQL benchmarks
+request. The versioned `repo-eval-v1`–`repo-eval-v4` fixture benchmarks and
+the default (offline) mode of `repo-eval-v5` are deterministic and run fully
+in-process. The opt-in PostgreSQL benchmarks
 further below also avoid model-provider calls and roll back their own
 transaction, so they too remain safe to run repeatedly; `ann_pgvector`
 additionally reports local wall-clock timings, so its timing values are
 expected to vary between runs.
+
+### `repo-eval-v5` — real questions over a real repository
+
+```powershell
+uv run python -m benchmarks.repo_eval_v5             # 44-question dev set
+uv run python -m benchmarks.repo_eval_v5 --held-out  # 16-question held-out set
+```
+
+`repo-eval-v1`–`v4` use tiny synthetic fixtures with a handful of queries
+each, which is why several of their rows sit at 1.000. `repo-eval-v5` asks
+**44 developer questions about RepoMind's own source tree**, frozen at commit
+`efd04a5` and extracted with `git archive` so local edits cannot leak in, and
+holds back **16 more questions written after the retrieval changes below were
+chosen**. Categories are `behavior` (natural-language "how does X work"),
+`identifier` (names a class or function), and `config` (settings, Compose,
+CI).
+
+Gold labels are **source spans, not chunk IDs**: either a Python symbol
+(resolved through the AST, decorators included) or an explicit line range.
+A retrieved chunk counts as evidence for a span when it overlaps at least
+`min(span length, 5)` lines of it, so line and structural chunking are scored
+on equal terms and a shared boundary line is not evidence
+(`repomind/evaluation/spans.py`). A gold target that no longer resolves fails
+the run instead of silently scoring zero.
+
+Two things are measured:
+
+1. **Ranking:** hit@k (any gold span covered in the top k), target recall@k,
+   and MRR.
+2. **Evidence reaching the model:** after the production RAG context packing
+   (`assemble_context` + `build_repository_context`, 20,000-character budget),
+   is the gold evidence actually in the prompt? This is the number that
+   matters for answers, and it is where chunking choices show up.
+
+**Offline mode is BM25 + symbol only.** Semantic and fused strategies need
+real embeddings, so the committed numbers below do **not** include the
+semantic arm. `--live --confirm-live` with a configured `OPENAI_API_KEY`
+adds `semantic`, `hybrid`, and `hybrid_symbol` rows; it embeds the whole
+corpus (roughly 1.2M embedding tokens, a few cents with
+`text-embedding-3-small`) and is never run in CI.
+
+Ranking at k=5 (hit / target recall / MRR). "Legacy" is the previous BM25
+(`LEGACY_BM25_CONFIG`: content only, no stopword filtering, tests weighted
+like source):
+
+| Chunking | Retriever | Dev (44) | Held-out (16) |
+| --- | --- | --- | --- |
+| `line_v1` | BM25 legacy | 0.432 / 0.409 / 0.216 | 0.812 / 0.812 / 0.460 |
+| `line_v1` | BM25 | **0.659 / 0.625 / 0.419** | **0.812 / 0.812 / 0.708** |
+| `python_ast_v1` | BM25 legacy | 0.295 / 0.250 / 0.224 | 0.688 / 0.656 / 0.583 |
+| `python_ast_v1` | BM25 | **0.523 / 0.443 / 0.295** | **0.750 / 0.719 / 0.672** |
+| `python_ast_v1` | BM25 legacy + symbol (weak matches uncorroborated) | 0.273 / 0.239 / 0.218 | 0.625 / 0.594 / 0.594 |
+| `python_ast_v1` | BM25 + symbol (weak matches corroborated) | 0.523 / 0.443 / 0.266 | 0.750 / 0.719 / 0.641 |
+
+Evidence reaching the model, top_k=5:
+
+| Configuration | Dev evidence hit | Held-out evidence hit | Mean context chars (dev) |
+| --- | --- | --- | --- |
+| Previous product shape: `line_v1`, legacy BM25, `seeds_only` | 0.341 | 0.750 | 17,508 |
+| `line_v1`, new BM25, `seeds_only` | 0.591 | 0.812 | 17,671 |
+| `line_v1`, new BM25, `expanded` | 0.591 | 0.812 | 15,255 |
+| **`python_ast_v1`, new BM25, `expanded` (new default)** | **0.636** | **0.875** | **11,863** |
+
+What the numbers drove:
+
+- **BM25 now indexes the file path and qualified symbol name** alongside the
+  content, **drops English function words from the query** (unless nothing
+  would be left), and **halves the score of test files** unless the query is
+  about tests (`test`, `pytest`, `fixture`, …). Removing any one of them
+  lowers structural-chunking dev hit@5 (0.523 with all three; 0.386 without
+  stopword filtering, 0.295 without test demotion, 0.477 without the path).
+  With line chunking the path made no hit@5 difference and helped hit@10
+  (0.773 without, 0.795 with). Stemming was tried and dropped: it was mixed. `k1`/`b` were
+  not tuned.
+- **Weak symbol matches need corroboration.** A plain English word in the
+  query (`run`, `claim`, `lease`) that happens to name a function used to get
+  a full rank-1 vote in fusion; it now only counts when BM25 or semantic
+  retrieval independently found the same symbol. Without that, adding the
+  symbol arm made BM25 *worse* (0.295 → 0.273 dev, 0.688 → 0.625 held-out).
+- **Structural chunking is the indexing default** and `expanded` is the RAG
+  default. Structural chunks rank a little lower than 120-line windows on
+  raw hit@5 (a 120-line window covers more spans by sheer size), but once
+  neighbor expansion runs, more gold evidence reaches the model in about two
+  thirds of the characters.
+- **`top_k` stays at 5.** Going to 10–20 helped some configurations and
+  hurt others on these sets, so there was no clear case to change it.
+
+Caveats: 60 questions about one repository is a real but small sample, and
+the author of the questions also chose the changes (the held-out set exists
+to check that; it agrees in direction). The semantic arm and generated
+answers are unmeasured here; the `hybrid` default is a product judgment that
+fusing an improved lexical arm with semantic search beats semantic alone,
+consistent with `repo-eval-v1`, not a measured `repo-eval-v5` result. Run
+`--live --confirm-live` to measure it.
 
 ### `repo-eval-v1` — baseline retrieval, RAG, and coding fixture
 
@@ -179,7 +274,7 @@ Two-query retrieval fixture:
 | Strategy | Recall@3 | MRR | nDCG@3 |
 | --- | --- | --- | --- |
 | semantic | 1.000 | 0.750 | 0.815 |
-| bm25 | 1.000 | 0.667 | 0.750 |
+| bm25 | 1.000 | 0.750 | 0.815 |
 | hybrid | 1.000 | 1.000 | 1.000 |
 | hybrid+rerank | 1.000 | 1.000 | 1.000 |
 
@@ -221,11 +316,12 @@ natural-language behavior query, nested function/decorators):
 | --- | --- | --- | --- |
 | `line_v1+exact` | 1.000 | 0.583 | 0.690 |
 | `python_ast_v1+exact` | 1.000 | 0.750 | 0.831 |
-| `python_ast_v1+exact+bm25_rrf` | 1.000 | 0.875 | 0.908 |
+| `python_ast_v1+exact+bm25_rrf` | 1.000 | 1.000 | 1.000 |
 | `python_ast_v1+context+exact` | 1.000 | 0.750 | 0.795 |
 
-`line_v1` chunking remains the application default; structural chunking is
-opt-in.
+`python_ast_v1` structural chunking is the application default (see
+`repo-eval-v5` above for why); `REPOMIND_CHUNKING_STRATEGY=line_v1` reverts
+to line chunking.
 
 Opt-in real-pgvector variants (require an isolated, migrated test database —
 never run against a shared database). `repo_eval_v2_postgres` reuses the same

@@ -1,6 +1,6 @@
 """Semantic, lexical, symbol, and hybrid repository retrieval primitives."""
 
-from repomind.retrieval.bm25 import BM25Error, BM25Index
+from repomind.retrieval.bm25 import BM25Error, BM25Index, is_test_path
 from repomind.retrieval.embeddings import (
     EmbeddingError,
     OpenAIEmbeddingClient,
@@ -23,6 +23,7 @@ from repomind.retrieval.identifiers import (
     extract_identifier_candidates,
 )
 from repomind.retrieval.models import (
+    LEGACY_BM25_CONFIG,
     BM25Config,
     BM25SearchResult,
     EmbeddedChunk,
@@ -66,6 +67,7 @@ __all__ = [
     "DEFAULT_CANDIDATE_MULTIPLIER",
     "DEFAULT_RRF_K",
     "DEFAULT_SYMBOL_CANDIDATE_LIMIT",
+    "LEGACY_BM25_CONFIG",
     "MAX_SYMBOL_CANDIDATE_LIMIT",
     "BM25Config",
     "BM25Error",
@@ -108,6 +110,7 @@ __all__ = [
     "hybrid_search",
     "hybrid_search_with_reranking",
     "hybrid_symbol_search",
+    "is_test_path",
     "rank_by_similarity",
     "reciprocal_rank_fusion",
     "semantic_search",

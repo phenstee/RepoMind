@@ -12,7 +12,11 @@ from repomind.retrieval import (
 )
 from repomind.retrieval.identifiers import extract_identifier_candidates
 from repomind.retrieval.models import SymbolMatchTier
-from repomind.retrieval.symbols import SymbolSearchError, symbol_search
+from repomind.retrieval.symbols import (
+    SymbolSearchError,
+    require_weak_match_corroboration,
+    symbol_search,
+)
 
 
 def _structural_chunk(
@@ -319,3 +323,70 @@ def test_candidate_count_is_bounded_by_limit() -> None:
 def test_rejects_invalid_limit(limit: object) -> None:
     with pytest.raises(SymbolSearchError):
         symbol_search((), [], limit=limit)  # type: ignore[arg-type]
+
+
+def test_weak_match_is_kept_only_when_retrieval_evidence_found_the_same_symbol() -> None:
+    stream_helper = _structural_chunk(
+        "tests/helpers.py", 0, symbol_name="stream", qualified_symbol_name="stream"
+    )
+    stream_impl = _structural_chunk(
+        "src/api/jobs.py", 0, symbol_name="stream", qualified_symbol_name="JobService.stream"
+    )
+    strong = _structural_chunk(
+        "src/api/streaming.py",
+        0,
+        symbol_name="encode_sse_event",
+        qualified_symbol_name="encode_sse_event",
+    )
+    candidates = extract_identifier_candidates("how does encode_sse_event stream progress")
+    matches = symbol_search(candidates, [stream_helper, stream_impl, strong])
+    assert [m.match_tier for m in matches] == [
+        SymbolMatchTier.SIMPLE_SYMBOL_STRONG,
+        SymbolMatchTier.SIMPLE_SYMBOL_WEAK,
+        SymbolMatchTier.SIMPLE_SYMBOL_WEAK,
+    ]
+
+    evidence = symbol_search(extract_identifier_candidates("JobService.stream"), [stream_impl])
+    kept = require_weak_match_corroboration(matches, evidence)
+
+    assert [m.chunk for m in kept] == [strong, stream_impl]
+    assert [m.rank for m in kept] == [1, 2]
+    assert require_weak_match_corroboration(matches, []) == [
+        matches[0].model_copy(update={"rank": 1})
+    ]
+
+
+def test_uncorroborated_common_word_cannot_take_the_top_fused_slot() -> None:
+    claim_test = _structural_chunk(
+        "tests/test_store.py",
+        0,
+        symbol_name="claim",
+        qualified_symbol_name="claim",
+        content="def claim(): return fake_store()\n",
+    )
+    implementation = _structural_chunk(
+        "src/jobs/store.py",
+        0,
+        symbol_name="claim_next",
+        qualified_symbol_name="JobStore.claim_next",
+        content="def claim_next(self):\n    lock the oldest queued job and lease it to one worker\n",
+    )
+    chunks = [claim_test, implementation]
+    embedded = [
+        EmbeddedChunk(chunk=chunk, embedding=EmbeddingVector(values=vector, model="test-model"))
+        for chunk, vector in ((claim_test, (0.0, 1.0)), (implementation, (1.0, 0.0)))
+    ]
+
+    results = hybrid_symbol_search(
+        "How does a worker claim the oldest queued job?",
+        embedded,
+        BM25Index.from_chunks(chunks),
+        _FixedEmbeddingProvider(),
+        chunks,
+        top_k=2,
+        semantic_candidates=1,
+        lexical_candidates=1,
+    )
+
+    assert results[0].chunk == implementation
+    assert all(result.symbol_rank is None for result in results)

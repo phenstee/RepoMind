@@ -90,10 +90,13 @@ class IndexResponse(BaseModel):
 
 
 class RAGRequest(RequestModel):
+    """Defaults follow ``repo-eval-v5`` (docs/evaluation.md): fused semantic + BM25
+    retrieval, with bounded same-file neighbor expansion around each hit."""
+
     question: NonBlank
-    strategy: Strategy = "semantic"
+    strategy: Strategy = "hybrid"
     top_k: int = Field(default=5, ge=1, le=20, strict=True)
-    context_strategy: ContextStrategyLiteral = "seeds_only"
+    context_strategy: ContextStrategyLiteral = "expanded"
     trace: bool = False
 
 
