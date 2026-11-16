@@ -37,9 +37,9 @@ flowchart LR
 ```
 
 Four retrieval strategies are selectable per request (`semantic`, `hybrid`,
-`hybrid_rerank`, `hybrid_symbol`); `hybrid` with `expanded` context is the
-API default. Defaults follow `repo-eval-v5`, which asks real questions about
-this repository (see [evaluation](evaluation.md#repo-eval-v5--real-questions-over-a-real-repository)).
+`hybrid_rerank`, `hybrid_symbol`); `hybrid` with `expanded` context and
+`top_k=20` is the API default (`hybrid_rerank` defaults to 5). Defaults
+follow `repo-eval-v5`, which asks real questions about this repository (see [evaluation](evaluation.md#repo-eval-v5--real-questions-over-a-real-repository)).
 
 - **Chunking.** Python source is chunked structurally by default
   (`ingestion/structural.py`, `python_ast_v1`): AST-anchored chunks that

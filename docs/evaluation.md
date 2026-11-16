@@ -203,8 +203,8 @@ Two things are measured:
    matters for answers, and it is where chunking choices show up.
 
 **Offline mode is BM25 + symbol only.** Semantic and fused strategies need
-real embeddings, so the committed numbers below do **not** include the
-semantic arm. `--live --confirm-live` with a configured `OPENAI_API_KEY`
+real embeddings, so the first tables below do **not** include the semantic
+arm; the [live run](#live-run-semantic-and-hybrid-retrieval) after them does. `--live --confirm-live` with a configured `OPENAI_API_KEY`
 adds `semantic`, `hybrid`, and `hybrid_symbol` rows; it embeds the whole
 corpus (roughly 1.2M embedding tokens, a few cents with
 `text-embedding-3-small`) and is never run in CI.
@@ -222,14 +222,14 @@ like source):
 | `python_ast_v1` | BM25 legacy + symbol (weak matches uncorroborated) | 0.273 / 0.239 / 0.218 | 0.625 / 0.594 / 0.594 |
 | `python_ast_v1` | BM25 + symbol (weak matches corroborated) | 0.523 / 0.443 / 0.266 | 0.750 / 0.719 / 0.641 |
 
-Evidence reaching the model, top_k=5:
+Evidence reaching the model, top_k=5 (offline, BM25 only):
 
 | Configuration | Dev evidence hit | Held-out evidence hit | Mean context chars (dev) |
 | --- | --- | --- | --- |
 | Previous product shape: `line_v1`, legacy BM25, `seeds_only` | 0.341 | 0.750 | 17,508 |
 | `line_v1`, new BM25, `seeds_only` | 0.591 | 0.812 | 17,671 |
 | `line_v1`, new BM25, `expanded` | 0.591 | 0.812 | 15,255 |
-| **`python_ast_v1`, new BM25, `expanded` (new default)** | **0.636** | **0.875** | **11,863** |
+| **`python_ast_v1`, new BM25, `expanded`** | **0.636** | **0.875** | **11,863** |
 
 What the numbers drove:
 
@@ -249,19 +249,78 @@ What the numbers drove:
   symbol arm made BM25 *worse* (0.295 → 0.273 dev, 0.688 → 0.625 held-out).
 - **Structural chunking is the indexing default** and `expanded` is the RAG
   default. Structural chunks rank a little lower than 120-line windows on
-  raw hit@5 (a 120-line window covers more spans by sheer size), but once
-  neighbor expansion runs, more gold evidence reaches the model in about two
-  thirds of the characters.
-- **`top_k` stays at 5.** Going to 10–20 helped some configurations and
-  hurt others on these sets, so there was no clear case to change it.
+  raw hit@5 (a 120-line window covers more spans by sheer size). Offline,
+  once neighbor expansion runs, more gold evidence reaches the model in
+  about two thirds of the characters. The live run below shows that this
+  only holds once `top_k` is raised to use the budget.
 
-Caveats: 60 questions about one repository is a real but small sample, and
-the author of the questions also chose the changes (the held-out set exists
-to check that; it agrees in direction). The semantic arm and generated
-answers are unmeasured here; the `hybrid` default is a product judgment that
-fusing an improved lexical arm with semantic search beats semantic alone,
-consistent with `repo-eval-v1`, not a measured `repo-eval-v5` result. Run
-`--live --confirm-live` to measure it.
+#### Live run: semantic and hybrid retrieval
+
+`--live --confirm-live` on both sets, at `ad70746` with
+`text-embedding-3-small`, 2026-11-16. Full output:
+[`benchmarks/results/repo-eval-v5-live-dev.md`](../benchmarks/results/repo-eval-v5-live-dev.md),
+[`benchmarks/results/repo-eval-v5-live-held-out.md`](../benchmarks/results/repo-eval-v5-live-held-out.md).
+The run was on Windows, where `git archive` honored Git's default
+`core.autocrlf=true` and scored a CRLF copy of the corpus; `load_corpus` now
+pins LF. That shifted packing slightly: the offline BM25 rows in that output
+match the tables above except `line_v1` BM25 `expanded` (0.568 vs 0.591 dev),
+and rerunning offline with `core.autocrlf=true` reproduces the Windows rows
+exactly. Every live row shares the same corpus, so the comparisons between
+them hold; absolute numbers on an LF corpus may move by about one question.
+
+Ranking, hit@5 / hit@10:
+
+| Chunking | Retriever | Dev (44) | Held-out (16) |
+| --- | --- | --- | --- |
+| `line_v1` | semantic | 0.545 / 0.636 | 0.438 / 0.688 |
+| `line_v1` | hybrid | 0.727 / 0.795 | 0.812 / 0.938 |
+| `python_ast_v1` | semantic | 0.341 / 0.477 | 0.562 / 0.562 |
+| `python_ast_v1` | hybrid | 0.523 / 0.614 | 0.625 / 0.875 |
+| `python_ast_v1` | hybrid_symbol | 0.523 / 0.591 | 0.562 / 0.875 |
+
+Evidence reaching the model, `hybrid` unless noted:
+
+| Configuration | Dev evidence hit | Held-out evidence hit | Mean context chars (dev) |
+| --- | --- | --- | --- |
+| Previous product default: `line_v1`, semantic, top 5, `seeds_only` | 0.545 | 0.438 | 17,630 |
+| `line_v1`, top 5, `seeds_only` | 0.705 | 0.812 | 17,354 |
+| `line_v1`, top 5, `expanded` | 0.682 | 0.812 | 14,891 |
+| `python_ast_v1`, top 5, `expanded` (default until this run) | 0.591 | 0.688 | 12,009 |
+| `python_ast_v1`, top 10, `expanded` | 0.659 | 0.875 | 15,592 |
+| `python_ast_v1`, top 15, `expanded` | 0.682 | 0.875 | 15,926 |
+| **`python_ast_v1`, top 20, `expanded` (default)** | **0.705** | **0.938** | **15,950** |
+| `python_ast_v1`, top 20, `seeds_only` | 0.727 | 0.938 | 17,679 |
+| `python_ast_v1`, semantic, top 20, `expanded` | 0.523 | 0.625 | 15,965 |
+
+What the live numbers drove:
+
+- **`hybrid` stays the default.** It beats semantic-only for both chunkers
+  on both sets, by 0.18 hit@5 on dev with structural chunks. Semantic search
+  alone scores below the current BM25 on every chunking and set.
+- **`top_k` is 20, up from 5** (`hybrid_rerank` keeps 5, because its LLM
+  reranker sees at most 20 candidates). A structural chunk is about a third
+  the size of a 120-line window, so five of them, even with neighbor
+  expansion, used only about 12k of the 20k-character budget. Evidence hit rises at every step from 5 to 20 on
+  dev, and on held-out it never falls. At top 5, structural chunking lost to
+  line chunking (0.591 vs 0.705 dev). At top 20 it matches or beats line
+  chunking's best on both sets, with about 1.4k fewer characters than line
+  `seeds_only`.
+- **`expanded` stays the context default.** At top 20, `seeds_only` scores
+  one more dev question (0.727 vs 0.705) and ties on held-out. However, it
+  sends about 1.7k more characters, and neighbor expansion matters more at
+  the smaller `top_k` values that callers can still request (0.659 vs 0.614
+  at top 10).
+- **Answers are still unmeasured.** This run measures what reaches the
+  prompt, not answer quality. Twenty seeds give the model about 16 sources
+  instead of about 11.
+
+Caveats: 60 questions about one repository is a real but small sample. On
+held-out, one question moves a rate by 0.0625. The author of the questions
+also chose the changes. The held-out set exists to check that, and it agrees
+in direction, but it has now informed two rounds of decisions, so treat it
+as a weaker check than it was. The offline "previous product shape" row
+(0.341) stood in for the old default with legacy BM25, because semantic
+retrieval cannot run offline; the live 0.545 is the old default as shipped.
 
 ### `repo-eval-v1` — baseline retrieval, RAG, and coding fixture
 

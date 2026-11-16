@@ -86,10 +86,24 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_corpus(commit: str = CORPUS_COMMIT) -> RepositorySnapshot:
-    """Ingest the repository exactly as it was at ``commit``."""
+    """Ingest the repository exactly as it was at ``commit``.
+
+    Line-ending conversion is switched off so the corpus is byte-identical on
+    every platform: Git for Windows defaults to ``core.autocrlf=true``, and
+    ``git archive`` honors it, which shifts character budgets and scores.
+    """
 
     archive = subprocess.run(
-        ["git", "archive", "--format=tar", commit],
+        [
+            "git",
+            "-c",
+            "core.autocrlf=false",
+            "-c",
+            "core.eol=lf",
+            "archive",
+            "--format=tar",
+            commit,
+        ],
         cwd=REPOSITORY_ROOT,
         capture_output=True,
         check=True,

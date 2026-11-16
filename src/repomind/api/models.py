@@ -26,6 +26,8 @@ from repomind.tools import RunRuffInput, RunTestsInput
 NonBlank = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=10_000)]
 RelativePath = Annotated[str, StringConstraints(min_length=1, max_length=1024)]
 Strategy = Literal["semantic", "hybrid", "hybrid_rerank", "hybrid_symbol"]
+DEFAULT_RAG_TOP_K = 20
+RERANK_RAG_TOP_K = 5
 ContextStrategyLiteral = Literal["seeds_only", "expanded"]
 PublicRelativePath = Annotated[
     str, AfterValidator(lambda value: validate_repository_relative_path(Path(value)).as_posix())
@@ -91,13 +93,30 @@ class IndexResponse(BaseModel):
 
 class RAGRequest(RequestModel):
     """Defaults follow ``repo-eval-v5`` (docs/evaluation.md): fused semantic + BM25
-    retrieval, with bounded same-file neighbor expansion around each hit."""
+    retrieval, with bounded same-file neighbor expansion around each hit.
+
+    ``top_k`` defaults to 20 because structural chunks are small: five of them
+    filled only about 12k of the 20k-character context budget, and the live run
+    found more evidence reaching the model at each step up to 20. ``hybrid_rerank``
+    keeps 5, because its reranker sees at most 20 candidates and would otherwise
+    have nothing to drop."""
 
     question: NonBlank
     strategy: Strategy = "hybrid"
-    top_k: int = Field(default=5, ge=1, le=20, strict=True)
+    top_k: int = Field(default=DEFAULT_RAG_TOP_K, ge=1, le=20, strict=True)
     context_strategy: ContextStrategyLiteral = "expanded"
     trace: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strategy_default_top_k(cls, data: object) -> object:
+        if (
+            isinstance(data, dict)
+            and "top_k" not in data
+            and data.get("strategy") == "hybrid_rerank"
+        ):
+            return {**data, "top_k": RERANK_RAG_TOP_K}
+        return data
 
 
 class CitationResponse(BaseModel):
