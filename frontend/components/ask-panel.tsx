@@ -92,9 +92,9 @@ export function AskPanel({
         <h2>Ask</h2>
         <p>Grounded answers with line-level citations from the indexed repository.</p>
       </header>
-      <form className="stack" onSubmit={(event) => void submit(event)}>
-        <label>
-          Question
+      <form className="composer" onSubmit={(event) => void submit(event)}>
+        <label className="composerInput">
+          <span className="srOnly">Question</span>
           <textarea
             value={question}
             onChange={(event) => setQuestion(event.target.value)}
@@ -104,9 +104,9 @@ export function AskPanel({
             placeholder="How are refunds issued, and what stops one from exceeding the original payment?"
           />
         </label>
-        <div className="formFooter">
-          <label>
-            Retrieval strategy
+        <div className="composerBar">
+          <label className="inlineField">
+            <span>Retrieval</span>
             <select
               value={strategy}
               aria-describedby="strategy-hint"
@@ -117,14 +117,14 @@ export function AskPanel({
               ))}
             </select>
           </label>
-          <p id="strategy-hint" className="fieldHint">{strategyHint}</p>
+          <span className="composerKeys" aria-hidden="true"><kbd>Ctrl/⌘</kbd><kbd>Enter</kbd></span>
           <button type="submit" className="btn btnPrimary" disabled={disabled}>
             {running ? <Spinner /> : <Icon name="sparkles" />}
             {running ? "Answering…" : "Ask repository"}
           </button>
         </div>
-        <p className="hint"><kbd>Ctrl</kbd> / <kbd>⌘</kbd> + <kbd>Enter</kbd> to ask</p>
       </form>
+      <p id="strategy-hint" className="fieldHint">{strategyHint} <span className="srOnly">Press Ctrl or Command with Enter to ask.</span></p>
       <AskResults history={history} pending={running ? pending : null} status={status} />
     </section>
   );

@@ -60,9 +60,9 @@ export function InvestigatePanel({
         </h2>
         <p>The agent can inspect the selected repository but has no file-edit controls in this mode.</p>
       </header>
-      <form className="stack" onSubmit={(event) => void submit(event)}>
-        <label>
-          Investigation task
+      <form className="composer" onSubmit={(event) => void submit(event)}>
+        <label className="composerInput">
+          <span className="srOnly">Investigation task</span>
           <textarea
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -72,9 +72,9 @@ export function InvestigatePanel({
             placeholder="Where are webhook signatures verified, and is the comparison constant-time?"
           />
         </label>
-        <div className="formFooter">
-          <label>
-            Code search
+        <div className="composerBar">
+          <label className="inlineField">
+            <span>Code search</span>
             <select
               value={retrievalMode}
               onChange={(event) => setRetrievalMode(event.target.value as AgentRetrievalMode)}
@@ -83,6 +83,7 @@ export function InvestigatePanel({
               <option value="indexed">Indexed (experimental)</option>
             </select>
           </label>
+          <span className="composerKeys" aria-hidden="true"><kbd>Ctrl/⌘</kbd><kbd>Enter</kbd></span>
           <button type="submit" className="btn btnPrimary" disabled={disabled}>
             {running ? <Spinner /> : <Icon name="search" />}
             {running ? "Investigating…" : "Run read-only investigation"}

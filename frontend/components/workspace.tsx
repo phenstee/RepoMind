@@ -386,8 +386,8 @@ export function Workspace() {
           />
 
           <div className="main">
-            <section className="card" aria-label="Workspace">
-              <div className="workspaceHeader">
+            <section className="workspaceHeader" aria-label="Workspace">
+              <div className="workspaceTop">
                 <div className="workspaceTitle">
                   <h1>{selectedRepository?.name ?? "Select a repository"}</h1>
                   {selectedRepository ? (
@@ -428,7 +428,7 @@ export function Workspace() {
                 </div>
               ) : null}
               {operation?.state === "disconnected" || cancellationMessage(trackedJob) ? (
-                <div className="stack" style={{ padding: "0 1.4rem 1.2rem" }}>
+                <div className="stack">
                   {operation?.state === "disconnected" ? (
                     <p className="callout warning"><Icon name="alert" />Progress viewing stopped. The backend operation may still be running.</p>
                   ) : null}
@@ -437,30 +437,28 @@ export function Workspace() {
                   ) : null}
                 </div>
               ) : null}
+              <nav
+                className="segmented"
+                aria-label="Workspace mode"
+                style={{ "--active": activeModeIndex } as React.CSSProperties}
+              >
+                {modes.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={mode === item.id ? "active" : ""}
+                    aria-pressed={mode === item.id}
+                    onClick={() => setMode(item.id)}
+                    disabled={running}
+                  >
+                    <Icon name={item.icon} size={15} />
+                    {item.label}
+                  </button>
+                ))}
+              </nav>
             </section>
 
-            <section className="card" aria-label="Mode">
-              <div className="cardHeader modeBar">
-                <nav
-                  className="segmented"
-                  aria-label="Workspace mode"
-                  style={{ "--active": activeModeIndex } as React.CSSProperties}
-                >
-                  {modes.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      className={mode === item.id ? "active" : ""}
-                      aria-pressed={mode === item.id}
-                      onClick={() => setMode(item.id)}
-                      disabled={running}
-                    >
-                      <Icon name={item.icon} size={15} />
-                      {item.label}
-                    </button>
-                  ))}
-                </nav>
-              </div>
+            <section className="card modeCard" aria-label="Mode">
               {selectedId === null ? (
                 <div className="emptyBlock">
                   <Icon name="folder" />
@@ -480,8 +478,10 @@ export function Workspace() {
                 {recoveredResult.jobType === "coding" ? <CodingResult result={recoveredResult.result} /> : null}
               </section>
             ) : null}
+          </div>
 
-            <section className="card" aria-label="Live progress">
+          <aside className="rail" aria-label="Live progress">
+            <section className="card progressCard">
               <header className="cardHeader progressHead">
                 <div>
                   <Icon name="sparkles" />
@@ -506,10 +506,10 @@ export function Workspace() {
                 />
               </div>
             </section>
-          </div>
+          </aside>
         </div>
 
-        <div style={{ marginTop: "1.25rem" }}>
+        <div className="historyWrap">
           <RunHistory refreshKey={historyKey} />
         </div>
       </main>

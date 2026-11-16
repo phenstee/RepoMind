@@ -1,5 +1,8 @@
 import type { Metadata, Viewport } from "next";
 
+import "@fontsource-variable/hanken-grotesk";
+import "@fontsource-variable/jetbrains-mono";
+
 import { themeBootScript } from "../lib/theme";
 import "./globals.css";
 
@@ -10,8 +13,8 @@ export const metadata: Metadata = {
 
 export const viewport: Viewport = {
   themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f6f7fb" },
-    { media: "(prefers-color-scheme: dark)", color: "#0b0d12" },
+    { media: "(prefers-color-scheme: light)", color: "#f4f2ee" },
+    { media: "(prefers-color-scheme: dark)", color: "#131211" },
   ],
 };
 
