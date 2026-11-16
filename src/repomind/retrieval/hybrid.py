@@ -19,6 +19,7 @@ from repomind.retrieval.similarity import RetrievalError
 from repomind.retrieval.symbols import (
     DEFAULT_SYMBOL_CANDIDATE_LIMIT,
     is_exact_identifier_query,
+    require_weak_match_corroboration,
     select_evidence_backed_symbol_fragments,
     symbol_search,
 )
@@ -244,8 +245,9 @@ def hybrid_symbol_search(
             top_k=max(1, len(semantic_results) + len(lexical_results)),
             rrf_k=rrf_k,
         )
-        symbol_results = select_evidence_backed_symbol_fragments(
-            symbol_results, evidence_results
+        symbol_results = require_weak_match_corroboration(
+            select_evidence_backed_symbol_fragments(symbol_results, evidence_results),
+            evidence_results,
         )
 
     return fuse_ranked_sources(

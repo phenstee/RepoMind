@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from repomind.ingestion import ChunkingStrategy, ChunkKind, CodeChunk
-from repomind.retrieval import BM25Config, BM25Error, BM25Index
+from repomind.retrieval import LEGACY_BM25_CONFIG, BM25Config, BM25Error, BM25Index, is_test_path
 
 
 def _chunk(path: str, content: str, index: int = 0) -> CodeChunk:
@@ -98,8 +98,11 @@ def test_camel_case_components_are_searchable(identifier: str, query: str) -> No
 
 
 def test_known_bm25_score_matches_documented_formula() -> None:
+    # The legacy configuration scores content alone, so the arithmetic below
+    # is not shifted by path tokens.
     index = BM25Index.from_chunks(
-        [_chunk("repeated.py", "token token"), _chunk("other.py", "other")]
+        [_chunk("repeated.py", "token token"), _chunk("other.py", "other")],
+        LEGACY_BM25_CONFIG,
     )
 
     result = index.search("token", top_k=1)[0]
@@ -196,12 +199,103 @@ def test_invalid_bm25_configuration_is_rejected(config: dict[str, float]) -> Non
 
 
 def test_tokenless_corpus_returns_no_results_instead_of_dividing_by_zero() -> None:
+    # Paths always contribute tokens, so only the content-only legacy
+    # configuration can produce a corpus without a single token.
     index = BM25Index.from_chunks(
         [
             _chunk("blank.py", "   \n", 0),
             _chunk("punctuation.css", "{}();\n", 1),
-        ]
+        ],
+        LEGACY_BM25_CONFIG,
     )
 
     assert index.average_document_length == 0.0
     assert index.search("authentication", top_k=5) == []
+
+
+def test_file_path_is_searchable_by_default() -> None:
+    chunks = [
+        _chunk("src/jobs/worker.py", "def run_once(self): return self.store.claim_next()"),
+        _chunk("src/ui/layout.py", "def render(self): return self.template"),
+    ]
+
+    assert [
+        r.chunk.relative_path.as_posix() for r in BM25Index.from_chunks(chunks).search("job worker")
+    ] == ["src/jobs/worker.py"]
+    assert BM25Index.from_chunks(chunks, LEGACY_BM25_CONFIG).search("job worker") == []
+
+
+def test_query_stopwords_do_not_let_prose_outrank_the_topic() -> None:
+    chunks = [
+        _chunk("cache.py", "cache eviction policy"),
+        _chunk("notes.py", "how does the code do what it does when the code is the code"),
+    ]
+
+    default = BM25Index.from_chunks(chunks).search("how does the cache work")
+    legacy = BM25Index.from_chunks(chunks, LEGACY_BM25_CONFIG).search("how does the cache work")
+
+    assert [r.chunk.relative_path.as_posix() for r in default] == ["cache.py"]
+    assert {r.chunk.relative_path.as_posix() for r in legacy} == {"cache.py", "notes.py"}
+
+
+def test_query_made_only_of_stopwords_still_searches_for_them() -> None:
+    index = BM25Index.from_chunks([_chunk("guard.py", "if not ready: return")])
+
+    assert [r.chunk.relative_path.as_posix() for r in index.search("if not")] == ["guard.py"]
+
+
+def test_test_files_rank_below_identical_implementation_matches() -> None:
+    content = "def claim_next(self): lease the oldest queued job"
+    index = BM25Index.from_chunks(
+        [_chunk("tests/test_store.py", content, 0), _chunk("src/store.py", content, 1)]
+    )
+
+    results = index.search("claim queued job lease")
+
+    assert [r.chunk.relative_path.as_posix() for r in results] == [
+        "src/store.py",
+        "tests/test_store.py",
+    ]
+    assert results[1].score == pytest.approx(results[0].score * 0.5, rel=0.2)
+
+
+def test_queries_about_tests_do_not_demote_test_files() -> None:
+    content = "def test_claim_next(): assert store.claim_next() is None"
+    index = BM25Index.from_chunks(
+        [_chunk("tests/test_store.py", content, 0), _chunk("src/store.py", content, 1)]
+    )
+
+    results = index.search("which test covers claim_next")
+
+    # Undemoted, the test file's own path ("tests/test_store.py") matches "test".
+    assert [r.chunk.relative_path.as_posix() for r in results] == [
+        "tests/test_store.py",
+        "src/store.py",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("tests/unit/test_api.py", True),
+        ("src/pkg/tests/helpers.py", True),
+        ("test_cli.py", True),
+        ("pkg/cli_test.py", True),
+        ("conftest.py", True),
+        ("frontend/lib/api.test.ts", True),
+        ("web/components/button.spec.tsx", True),
+        ("src/__tests__/app.js", True),
+        ("src/repomind/evaluation/metrics.py", False),
+        ("src/testing_utils.py", False),
+        ("src/contest.py", False),
+        ("docs/testing.md", False),
+    ],
+)
+def test_is_test_path_matches_conventional_test_locations(path: str, expected: bool) -> None:
+    assert is_test_path(path) is expected
+
+
+@pytest.mark.parametrize("weight", [0, -0.5, 1.5, True])
+def test_test_file_weight_must_be_a_fraction(weight: object) -> None:
+    with pytest.raises(ValidationError):
+        BM25Config(test_file_weight=weight)

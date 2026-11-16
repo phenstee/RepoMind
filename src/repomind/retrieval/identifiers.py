@@ -40,14 +40,26 @@ class IdentifierCandidate:
 
 
 def _has_internal_case_transition(word: str) -> bool:
-    """Detect a lower-to-upper transition after position zero.
+    """Detect a word boundary marked by case after position zero.
 
-    A merely capitalized English word (``Where``, ``Login``) has no such
-    transition and stays weak; ``ContextAssembler`` and ``camelCaseName`` do,
-    and are strong.
+    A merely capitalized English word (``Where``, ``Login``) or an all-caps
+    abbreviation (``API``) has no such boundary and stays weak.
+    ``ContextAssembler`` and ``camelCaseName`` (lower to upper), names led by
+    an acronym such as ``LLMReranker`` (an uppercase run ending where a
+    capitalized word starts), and names with a digit before a capital such as
+    ``BM25Index`` all do, and are strong.
     """
 
-    return any(word[index - 1].islower() and word[index].isupper() for index in range(1, len(word)))
+    for index in range(1, len(word)):
+        previous, current = word[index - 1], word[index]
+        if current.isupper() and (previous.islower() or previous.isdigit()):
+            return True
+        # An acronym followed by a capitalized word; the two-letter lowercase
+        # requirement keeps plurals such as ``IDs`` and ``APIs`` weak.
+        following = word[index + 1 : index + 3]
+        if previous.isupper() and current.isupper() and len(following) == 2 and following.islower():
+            return True
+    return False
 
 
 def _classify_simple(word: str) -> IdentifierConfidence:

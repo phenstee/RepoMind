@@ -127,12 +127,32 @@ class SemanticSearchResult(BaseModel):
 
 
 class BM25Config(BaseModel):
-    """Standard BM25 saturation and document-length parameters."""
+    """BM25 parameters plus the code-search adjustments layered on top of it.
+
+    ``k1`` and ``b`` are the standard saturation and length-normalization
+    parameters. The remaining fields were each measured on ``repo-eval-v5``
+    (real questions over a real repository, see ``docs/evaluation.md``):
+
+    - ``include_path`` indexes the file path next to the content, so a
+      question about "the job worker" can match ``jobs/worker.py``.
+    - ``query_stopwords`` drops English function words (``how``, ``the``,
+      ``does``) from the query. They carry no topic, yet they occur in every
+      comment and docstring, so they mostly add noise to natural questions.
+    - ``test_file_weight`` scales the score of chunks from test files.
+      Tests repeat the vocabulary of the code they cover, so without it they
+      crowd implementation out of the top results. Queries that ask about
+      tests themselves are never demoted.
+
+    :data:`LEGACY_BM25_CONFIG` reproduces the original plain BM25 scoring.
+    """
 
     k1: float = Field(default=1.5, gt=0)
     b: float = Field(default=0.75, ge=0, le=1)
+    include_path: bool = True
+    query_stopwords: bool = True
+    test_file_weight: float = Field(default=0.5, gt=0, le=1)
 
-    @field_validator("k1", "b", mode="before")
+    @field_validator("k1", "b", "test_file_weight", mode="before")
     @classmethod
     def _reject_boolean_parameters(cls, value: object) -> object:
         if isinstance(value, bool):
@@ -148,6 +168,12 @@ class BM25Config(BaseModel):
         if not isfinite(value):
             raise ValueError("BM25 k1 must be finite")
         return value
+
+
+# Plain BM25 over chunk content (plus structural symbol names), exactly as
+# RepoMind scored before the repo-eval-v5 adjustments. Kept so benchmarks can
+# compare against it and earlier published numbers stay reproducible.
+LEGACY_BM25_CONFIG = BM25Config(include_path=False, query_stopwords=False, test_file_weight=1.0)
 
 
 class BM25SearchResult(BaseModel):

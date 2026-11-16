@@ -114,7 +114,11 @@ class WorkspacePolicy:
 class RepositoryService:
     MAX_FILES = 10_000
     MAX_SOURCE_BYTES = 50 * 1024 * 1024
-    MAX_CHUNKS = 10_000
+    # Structural (Python AST) chunks are about five times smaller than line
+    # windows over the same source, so the chunk cap is sized to keep the
+    # effective repository size limit where it was under line chunking.
+    # Total embedded text stays bounded by MAX_SOURCE_BYTES either way.
+    MAX_CHUNKS = 50_000
 
     def __init__(
         self,
