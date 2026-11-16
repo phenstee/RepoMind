@@ -15,12 +15,15 @@ import type {
   Repository,
   RepositoryFile,
 } from "../lib/types";
+import { humanize, runTypeLabel } from "../lib/format";
 import { AnswerCard, AskPanel } from "./ask-panel";
 import { CodePanel, CodingResult } from "./code-panel";
+import { BrandMark, Icon, type IconName, Spinner } from "./icons";
 import { InvestigatePanel, InvestigationResult } from "./investigate-panel";
 import { ProgressTimeline } from "./progress-timeline";
 import { RepositoryPanel } from "./repository-panel";
 import { RunHistory } from "./run-history";
+import { ThemeToggle } from "./theme-toggle";
 
 type Mode = "ask" | "investigate" | "code";
 type OperationState = "running" | "completed" | "failed" | "cancelled" | "disconnected";
@@ -289,14 +292,21 @@ export function Workspace() {
     setRecoveredResult(null);
   }
 
-  async function registerRepository(name: string, path: string) {
+  async function registerRepository(name: string, path: string): Promise<boolean> {
     try {
       const repository = await api.registerRepository(name, path);
       await refreshRepositories();
       selectRepository(repository.id);
+      return true;
     } catch (caught) {
       setError(safeError(caught));
+      return false;
     }
+  }
+
+  function checkHealth() {
+    setHealth("checking");
+    void api.health().then(() => setHealth("online")).catch(() => setHealth("offline"));
   }
 
   async function indexRepository() {
@@ -329,68 +339,189 @@ export function Workspace() {
   const running = operation?.state === "running";
   const jobPending = activeJobId !== null && trackedJob !== null && !isTerminalJob(trackedJob.status);
 
+  const modes: Array<{ id: Mode; label: string; icon: IconName }> = [
+    { id: "ask", label: "Ask", icon: "message" },
+    { id: "investigate", label: "Investigate", icon: "search" },
+    { id: "code", label: "Code", icon: "code" },
+  ];
+  const activeModeIndex = modes.findIndex((item) => item.id === mode);
+  const operationState = operation?.state ?? "idle";
+
   return (
-    <main className="appShell">
+    <div className="app">
       <header className="topbar">
-        <div><span className="brandMark">RM</span><strong>RepoMind</strong><small>trusted local developer workspace</small></div>
-        <button className={`health ${health}`} type="button" onClick={() => void api.health().then(() => setHealth("online")).catch(() => setHealth("offline"))}>
-          <span /> API {health}
-        </button>
-      </header>
-      {error ? <p className="error globalError" role="alert">{error}</p> : null}
-      <div className="workbench">
-        <RepositoryPanel
-          repositories={repositories}
-          selectedId={selectedId}
-          files={files}
-          loadingFiles={loadingFiles}
-          running={running}
-          indexResult={indexResult}
-          onSelect={selectRepository}
-          onRegister={registerRepository}
-          onIndex={() => void indexRepository()}
-        />
-        <section className="workspacePanel">
-          <div className="workspaceHeader">
-            <div>
-              <p className="eyebrow">Workspace</p>
-              <h1>{selectedRepository?.name ?? "Select a repository"}</h1>
-              {selectedRepository?.workspace_relative_path ? <p className="muted">{selectedRepository.workspace_relative_path}</p> : null}
+        <div className="topbarInner">
+          <div className="brand">
+            <BrandMark />
+            <div className="brandText">
+              <strong>RepoMind</strong>
+              <small>Trusted local repository intelligence</small>
             </div>
-            {running ? <button type="button" className="secondary" onClick={() => controller.current?.abort()}>Stop viewing progress</button> : null}
-            {!running && jobPending && operation?.state === "disconnected" ? <button type="button" className="secondary" onClick={resumeProgress}>Resume progress</button> : null}
-            {jobPending && canCancelJob(trackedJob) ? <button type="button" className="secondary" onClick={() => void cancelActiveJob()}>Cancel job</button> : null}
           </div>
-          {operation?.state === "disconnected" ? <p className="warning">Progress viewing stopped. The backend operation may still be running.</p> : null}
-          {activeJobId ? <p className="muted">Durable job: {activeJobId}</p> : null}
-          {cancellationMessage(trackedJob) ? <p className="warning">{cancellationMessage(trackedJob)}</p> : null}
-          {trackedJob ? <p className="muted">Job {trackedJob.status}{trackedJob.trace_run_id ? ` · trace ${trackedJob.trace_run_id}` : ""}</p> : null}
-          <nav className="modeTabs" aria-label="Workspace mode">
-            {(["ask", "investigate", "code"] as Mode[]).map((item) => (
-              <button key={item} type="button" className={mode === item ? "active" : ""} aria-pressed={mode === item} onClick={() => setMode(item)} disabled={running}>
-                {item === "ask" ? "Ask" : item === "investigate" ? "Investigate" : "Code"}
-              </button>
-            ))}
-          </nav>
-          {selectedId === null ? <p className="emptyState">Register or select a repository to begin.</p> : null}
-          {selectedId !== null && mode === "ask" ? <AskPanel key={selectedId} disabled={running} onSubmit={(question, strategy) => runJob<RAGResponse>("rag", { question, strategy })} /> : null}
-          {selectedId !== null && mode === "investigate" ? <InvestigatePanel key={selectedId} disabled={running} onSubmit={(query, retrievalMode) => runJob<AgentResponse>("agent", { query, retrieval_mode: retrievalMode })} /> : null}
-          {selectedId !== null && mode === "code" ? <CodePanel key={selectedId} disabled={running} onSubmit={(request) => runJob<CodingResponse>("coding", request)} /> : null}
-          {recoveredResult !== null ? (
-            <section className="modePanel" aria-live="polite">
-              <header><p className="eyebrow">Recovered job result</p></header>
-              {recoveredResult.jobType === "rag" ? <AnswerCard question="Recovered answer" answer={recoveredResult.result} /> : null}
-              {recoveredResult.jobType === "agent" ? <InvestigationResult result={recoveredResult.result} /> : null}
-              {recoveredResult.jobType === "coding" ? <CodingResult result={recoveredResult.result} /> : null}
+          <div className="topbarActions">
+            <button className={`healthPill ${health}`} type="button" onClick={checkHealth} title="Re-check API health">
+              <span className="healthDot" aria-hidden="true" />
+              API {health}
+            </button>
+            <ThemeToggle />
+          </div>
+        </div>
+      </header>
+
+      <main className="page">
+        <div className="layout">
+          <RepositoryPanel
+            repositories={repositories}
+            selectedId={selectedId}
+            files={files}
+            loadingFiles={loadingFiles}
+            running={running}
+            indexing={running && operation?.kind === "index"}
+            indexResult={indexResult}
+            onSelect={selectRepository}
+            onRegister={registerRepository}
+            onIndex={() => void indexRepository()}
+          />
+
+          <div className="main">
+            <section className="card" aria-label="Workspace">
+              <div className="workspaceHeader">
+                <div className="workspaceTitle">
+                  <p className="eyebrow">Workspace</p>
+                  <h1>{selectedRepository?.name ?? "Select a repository"}</h1>
+                  {selectedRepository ? (
+                    <div className="chipRow">
+                      <span className="chip"><Icon name="folder" /><code>{selectedRepository.workspace_relative_path ?? "workspace root"}</code></span>
+                      <span className="chip">{files.length} indexed files</span>
+                    </div>
+                  ) : (
+                    <p className="muted">Register or select a repository to begin.</p>
+                  )}
+                </div>
+                <div className="headerActions">
+                  {running ? (
+                    <button type="button" className="btn btnSecondary btnSm" onClick={() => controller.current?.abort()}>
+                      <Icon name="eye" size={14} />
+                      Stop viewing progress
+                    </button>
+                  ) : null}
+                  {!running && jobPending && operation?.state === "disconnected" ? (
+                    <button type="button" className="btn btnSecondary btnSm" onClick={resumeProgress}>
+                      <Icon name="play" size={14} />
+                      Resume progress
+                    </button>
+                  ) : null}
+                  {jobPending && canCancelJob(trackedJob) ? (
+                    <button type="button" className="btn btnDangerGhost btnSm" onClick={() => void cancelActiveJob()}>
+                      <Icon name="stop" size={14} />
+                      Cancel job
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+              {activeJobId || trackedJob ? (
+                <div className="jobStrip">
+                  {trackedJob ? <span className={`badge ${trackedJob.status}`}>{humanize(trackedJob.status)}</span> : null}
+                  {activeJobId ? <span>Job <code>{activeJobId}</code></span> : null}
+                  {trackedJob?.trace_run_id ? <span>Trace <code>{trackedJob.trace_run_id}</code></span> : null}
+                </div>
+              ) : null}
+              {operation?.state === "disconnected" || cancellationMessage(trackedJob) ? (
+                <div className="stack" style={{ padding: "0 1.4rem 1.2rem" }}>
+                  {operation?.state === "disconnected" ? (
+                    <p className="callout warning"><Icon name="alert" />Progress viewing stopped. The backend operation may still be running.</p>
+                  ) : null}
+                  {cancellationMessage(trackedJob) ? (
+                    <p className="callout warning"><Icon name="alert" />{cancellationMessage(trackedJob)}</p>
+                  ) : null}
+                </div>
+              ) : null}
             </section>
-          ) : null}
-          <section className="liveProgress">
-            <div className="panelTitle"><div><p className="eyebrow">Live progress</p><h2>{operation?.kind ?? "No active operation"}</h2></div><span className={`status ${operation?.state ?? "idle"}`} role="status" aria-live="polite">{operation?.state ?? "idle"}</span></div>
-            <ProgressTimeline events={events} />
-          </section>
-        </section>
-      </div>
-      <RunHistory refreshKey={historyKey} />
-    </main>
+
+            <section className="card" aria-label="Mode">
+              <div className="cardHeader modeBar">
+                <nav
+                  className="segmented"
+                  aria-label="Workspace mode"
+                  style={{ "--active": activeModeIndex } as React.CSSProperties}
+                >
+                  {modes.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className={mode === item.id ? "active" : ""}
+                      aria-pressed={mode === item.id}
+                      onClick={() => setMode(item.id)}
+                      disabled={running}
+                    >
+                      <Icon name={item.icon} size={15} />
+                      {item.label}
+                    </button>
+                  ))}
+                </nav>
+              </div>
+              {selectedId === null ? (
+                <div className="emptyBlock">
+                  <Icon name="folder" />
+                  <p>Register or select a repository to begin.</p>
+                </div>
+              ) : null}
+              {selectedId !== null && mode === "ask" ? <AskPanel key={selectedId} disabled={running} running={running && operation?.kind === "rag"} onSubmit={(question, strategy) => runJob<RAGResponse>("rag", { question, strategy })} /> : null}
+              {selectedId !== null && mode === "investigate" ? <InvestigatePanel key={selectedId} disabled={running} running={running && operation?.kind === "agent"} onSubmit={(query, retrievalMode) => runJob<AgentResponse>("agent", { query, retrieval_mode: retrievalMode })} /> : null}
+              {selectedId !== null && mode === "code" ? <CodePanel key={selectedId} disabled={running} running={running && operation?.kind === "coding"} onSubmit={(request) => runJob<CodingResponse>("coding", request)} /> : null}
+            </section>
+
+            {recoveredResult !== null ? (
+              <section className="card modePanel" aria-live="polite">
+                <header><p className="eyebrow">Recovered job result</p></header>
+                {recoveredResult.jobType === "rag" ? <AnswerCard question="Recovered answer" answer={recoveredResult.result} /> : null}
+                {recoveredResult.jobType === "agent" ? <InvestigationResult result={recoveredResult.result} /> : null}
+                {recoveredResult.jobType === "coding" ? <CodingResult result={recoveredResult.result} /> : null}
+              </section>
+            ) : null}
+
+            <section className="card" aria-label="Live progress">
+              <header className="cardHeader progressHead">
+                <div>
+                  <Icon name="sparkles" />
+                  <div>
+                    <p className="eyebrow">Live progress</p>
+                    <h2>{operation ? `${runTypeLabel(operation.kind)} job` : "No active operation"}</h2>
+                  </div>
+                </div>
+                <span className={`badge ${operationState}`} role="status" aria-live="polite">
+                  {operationState === "running" ? <Spinner /> : null}
+                  {operationState === "completed" ? <Icon name="check" /> : null}
+                  {operationState === "failed" ? <Icon name="x" /> : null}
+                  {humanize(operationState)}
+                </span>
+                {running ? <span className="progressBar" aria-hidden="true" /> : null}
+              </header>
+              <div className="progressBody">
+                <ProgressTimeline
+                  events={events}
+                  live={running}
+                  emptyLabel={running ? "Waiting for the first progress event…" : "Start an Ask, Investigate, Code, or Index job to see its live timeline here."}
+                />
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <div style={{ marginTop: "1.25rem" }}>
+          <RunHistory refreshKey={historyKey} />
+        </div>
+      </main>
+
+      {error ? (
+        <div className="toast" role="alert">
+          <Icon name="alert" />
+          <p>{error}</p>
+          <button type="button" className="btn btnGhost btnIcon btnSm" aria-label="Dismiss error" onClick={() => setError(null)}>
+            <Icon name="x" size={14} />
+          </button>
+        </div>
+      ) : null}
+    </div>
   );
 }
