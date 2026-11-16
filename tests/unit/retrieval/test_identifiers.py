@@ -98,3 +98,15 @@ def test_short_and_numeric_tokens_are_ignored() -> None:
     assert "42" not in texts
     assert "is" in texts
     assert "ok" in texts
+
+
+@pytest.mark.parametrize(
+    "identifier", ["BM25Index", "LLMReranker", "HTTPServer", "OpenAILLMClient"]
+)
+def test_acronym_or_digit_led_pascal_case_is_strong(identifier: str) -> None:
+    assert _by_text(identifier)[identifier] == (False, IdentifierConfidence.STRONG)
+
+
+@pytest.mark.parametrize("word", ["API", "SQL", "IDs", "APIs", "URLs", "V2"])
+def test_abbreviations_and_their_plurals_stay_weak(word: str) -> None:
+    assert _by_text(word)[word] == (False, IdentifierConfidence.WEAK)

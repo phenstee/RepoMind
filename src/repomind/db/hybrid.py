@@ -19,6 +19,7 @@ from repomind.retrieval import (
 )
 from repomind.retrieval.symbols import (
     is_exact_identifier_query,
+    require_weak_match_corroboration,
     select_evidence_backed_symbol_fragments,
 )
 
@@ -133,8 +134,9 @@ def postgres_hybrid_symbol_search(
             top_k=max(1, len(semantic_results) + len(lexical_results)),
             rrf_k=rrf_k,
         )
-        symbol_results = select_evidence_backed_symbol_fragments(
-            symbol_results, evidence_results
+        symbol_results = require_weak_match_corroboration(
+            select_evidence_backed_symbol_fragments(symbol_results, evidence_results),
+            evidence_results,
         )
     return fuse_ranked_sources(
         {"semantic": semantic_results, "lexical": lexical_results, "symbol": symbol_results},

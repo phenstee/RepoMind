@@ -62,6 +62,36 @@ def select_evidence_backed_symbol_fragments(
     ]
 
 
+def require_weak_match_corroboration(
+    symbol_results: Sequence[SymbolSearchResult],
+    evidence_results: Sequence[RankedChunk],
+) -> list[SymbolSearchResult]:
+    """Keep a weak-tier match only when semantic/BM25 evidence already found it.
+
+    A weak candidate is an ordinary English word (``claim``, ``stream``,
+    ``run``) that happens to equal some symbol name. Ranked alone, the first
+    such match gets the symbol source's full rank-1 fusion vote even when no
+    strong identifier was asked about, which let a ``stream`` test helper
+    outrank the implementation a question was about. Requiring the same
+    symbol to appear in the evidence turns a weak match into corroboration
+    instead of an independent vote. Strong and qualified matches are kept
+    unconditionally, and surviving matches are re-ranked contiguously.
+    """
+
+    supported = {
+        _symbol_identity(result.chunk)
+        for result in evidence_results
+        if _symbol_identity(result.chunk)[1]
+    }
+    kept = [
+        result
+        for result in symbol_results
+        if result.match_tier is not SymbolMatchTier.SIMPLE_SYMBOL_WEAK
+        or _symbol_identity(result.chunk) in supported
+    ]
+    return [result.model_copy(update={"rank": rank}) for rank, result in enumerate(kept, start=1)]
+
+
 def _validate_limit(limit: int) -> None:
     if (
         isinstance(limit, bool)
